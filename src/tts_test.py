@@ -39,7 +39,7 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    model = load(MODEL_ID)
+    model = load(MODEL_ID, model_type="higgs_audio_v3")
     load_seconds = time.perf_counter() - started
 
     started = time.perf_counter()

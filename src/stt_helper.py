@@ -5,18 +5,14 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import snapshot_download
 
 MODEL_ID = "bosonai/higgs-audio-v3-stt"
 REVISION = "2ffd1aa39f5a1266931e405cba12e404a9f994b2"
-FILES = ("transcribe.py", "higgs_audio_collator.py")
 
 
 def prepare() -> Path:
-    paths = [Path(hf_hub_download(MODEL_ID, name, revision=REVISION)) for name in FILES]
-    if len({path.parent for path in paths}) != 1:
-        raise RuntimeError("Hugging Face helper files did not resolve to one snapshot")
-    return paths[0].parent
+    return Path(snapshot_download(MODEL_ID, revision=REVISION, allow_patterns=["*.py"]))
 
 
 def load_transcribe():

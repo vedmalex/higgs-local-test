@@ -11,7 +11,13 @@ import soundfile as sf
 import torch
 import transformers
 from jiwer import wer
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, GenerationConfig
+
+if not hasattr(GenerationConfig, "generation_kwargs"):
+    GenerationConfig.generation_kwargs = property(
+        lambda self: self.__dict__.setdefault("generation_kwargs", {}),
+        lambda self, val: self.__dict__.__setitem__("generation_kwargs", val),
+    )
 
 from stt_helper import MODEL_ID, REVISION, load_transcribe
 
@@ -42,9 +48,36 @@ def main() -> None:
             attn_implementation="eager",
         )
         model.to(args.device).eval()
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=REVISION)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True)
         model.audio_out_bos_token_id = tokenizer.convert_tokens_to_ids("<|audio_out_bos|>")
         model.audio_eos_token_id = tokenizer.convert_tokens_to_ids("<|audio_eos|>")
+
+        import functools
+        model_cls = type(model)
+        orig_sample = model_cls._sample
+        orig_forward = model_cls.forward
+
+        @functools.wraps(orig_sample)
+        def _compat_sample(self, input_ids, logits_processor=None, stopping_criteria=None, generation_config=None, synced_gpus=False, streamer=None, past_key_values_buckets=None, **kwargs):
+            return orig_sample(
+                self,
+                input_ids,
+                logits_processor,
+                stopping_criteria,
+                generation_config,
+                synced_gpus,
+                streamer,
+                past_key_values_buckets,
+                **kwargs,
+            )
+
+        @functools.wraps(orig_forward)
+        def _compat_forward(self, *args, **kwargs):
+            kwargs.pop("tokenizer", None)
+            return orig_forward(self, *args, **kwargs)
+
+        model_cls._sample = _compat_sample
+        model_cls.forward = _compat_forward
         load_seconds = time.perf_counter() - started
         audio, sample_rate = sf.read(args.audio, dtype="float32")
         if sample_rate != 16000 or audio.ndim != 1:
