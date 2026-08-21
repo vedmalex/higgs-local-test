@@ -1,0 +1,238 @@
+# Higgs Audio v3: current APIs and Apple-Silicon implications
+
+Research snapshot: 2026-08-21. Only primary sources were consulted. No package or model was installed or downloaded.
+
+## TTS: model identity and MLX-Audio API
+
+Use the canonical Hugging Face ID:
+
+```text
+bosonai/higgs-tts-3-4b
+```
+
+The current MLX-Audio Higgs v3 guide still spells the ID as
+`bosonai/higgs-audio-v3-tts-4b`, but that Hugging Face URL currently returns
+an HTTP 307 redirect to `bosonai/higgs-tts-3-4b`. MLX-Audio's current model
+detector recognizes both the upstream `higgs_multimodal_qwen3` model type and
+hyphenated `higgs-audio-v3` paths, so the canonical redirected repository is
+the sensible ID to pin in this test project.
+
+Sources:
+
+- [MLX-Audio Higgs Audio v3 guide](https://github.com/Blaizzy/mlx-audio/blob/main/docs/models/tts/higgs_audio_v3.md)
+- [MLX-Audio Higgs v3 detector](https://github.com/Blaizzy/mlx-audio/blob/main/mlx_audio/tts/models/higgs_audio_v3/__init__.py)
+- [Canonical Boson model card](https://huggingface.co/bosonai/higgs-tts-3-4b)
+- [Legacy ID which redirects to the canonical model](https://huggingface.co/bosonai/higgs-audio-v3-tts-4b)
+
+Current MLX-Audio supports Python `>=3.10`; Python 3.11 is the conservative
+choice for this M1 test (it also avoids being on the newest interpreter edge).
+The actual installed version and resolved model ID should still be logged by
+`bootstrap.sh`, because the PyPI release can lag `main`.
+
+Source: [MLX-Audio package metadata](https://github.com/Blaizzy/mlx-audio/blob/main/pyproject.toml)
+
+### CLI
+
+The supported command shape is:
+
+```bash
+python -m mlx_audio.tts.generate \
+  --model bosonai/higgs-tts-3-4b \
+  --text "Сегодня мы проверяем русский синтез речи."
+```
+
+For cloning, repeat `--ref_audio` and `--ref_text` as paired flags. A single
+reference is sufficient for this benchmark:
+
+```bash
+python -m mlx_audio.tts.generate \
+  --model bosonai/higgs-tts-3-4b \
+  --text "Тестовая русская фраза." \
+  --ref_audio samples/reference.wav \
+  --ref_text "Точная транскрипция reference audio."
+```
+
+### Python API
+
+The current model-specific guide uses this API (not `load_model`):
+
+```python
+from mlx_audio.tts.utils import load
+from mlx_audio.audio_io import write as audio_write
+
+model = load("bosonai/higgs-tts-3-4b")
+for result in model.generate(
+    text=text,
+    temperature=1.0,
+    max_new_tokens=2048,
+):
+    audio_write(output_path, result.audio, result.sample_rate)
+```
+
+`model.generate()` is a generator. Benchmark generation through completion,
+then compute WAV duration from the saved sample count/rate or the written WAV.
+For cloning, add `ref_audio` and its exact `ref_text`. The model also exposes
+`encode_reference_audio()` so repeated runs can reuse codes, but that would
+distort a cold-load benchmark and is unnecessary here.
+
+Source: [MLX-Audio Higgs Audio v3 guide](https://github.com/Blaizzy/mlx-audio/blob/main/docs/models/tts/higgs_audio_v3.md)
+
+## TTS control tags
+
+The official format is `<|category:value|>`. Sentence-level tags go at the
+start of a sentence. Only pause tags are inserted inline at the desired
+position. A suitable Russian controls test using only documented tags is:
+
+```text
+<|emotion:contentment|><|prosody:speed_slow|>Сегодня мы начинаем спокойный рассказ. <|prosody:pause|> Теперь голос становится выразительнее.
+<|emotion:enthusiasm|><|prosody:expressive_high|>Это важная и радостная часть нашего теста! <|prosody:long_pause|> <|style:whispering|>А теперь рассказ завершается тихо и спокойно.
+```
+
+Documented catalog:
+
+- Emotion (sentence-level): `affection`, `amusement`, `anger`, `arousal`,
+  `awe`, `bitterness`, `confusion`, `contemplation`, `contentment`,
+  `determination`, `disgust`, `elation`, `enthusiasm`, `fear`, `helplessness`,
+  `longing`, `pride`, `relief`, `sadness`, `shame`, `surprise`.
+- Prosody sentence-level: `speed_very_slow`, `speed_slow`, `speed_fast`,
+  `speed_very_fast`, `pitch_low`, `pitch_high`, `expressive_high`,
+  `expressive_low`.
+- Prosody inline: `pause`, `long_pause`.
+- Style sentence-level: `singing`, `shouting`, `whispering`.
+- SFX inline: `cough`, `laughter`, `crying`, `screaming`, `burping`, `humming`,
+  `sigh`, `sniff`, `sneeze`. SFX require matching onomatopoeia immediately
+  after the tag with no intervening space.
+
+Source: [Boson PROMPTING.md](https://huggingface.co/bosonai/higgs-tts-3-4b/blob/main/PROMPTING.md)
+
+The weights use Boson's research/non-commercial license (with a separately
+described creator-use grant), not Apache-2.0. The benchmark README should link
+the license and avoid implying production permission.
+
+Source: [Boson TTS model card and license notice](https://huggingface.co/bosonai/higgs-tts-3-4b)
+
+## STT: authoritative checkpoint and API
+
+Use only:
+
+```text
+bosonai/higgs-audio-v3-stt
+```
+
+The card describes a 2.68B model: Whisper Large-v3 encoder plus Qwen3-1.7B
+decoder, with 16 kHz mono audio input. It is tagged English, not multilingual;
+there is no primary-source claim establishing Russian support. Russian must
+therefore be treated strictly as an empirical result.
+
+Source: [Boson STT model card](https://huggingface.co/bosonai/higgs-audio-v3-stt)
+
+Loading requires custom code and eager attention:
+
+```python
+model = AutoModel.from_pretrained(
+    MODEL_ID,
+    torch_dtype=dtype,
+    trust_remote_code=True,
+    attn_implementation="eager",
+)
+model.eval()
+model.to(device)
+```
+
+Do not copy the card's `device_map="cuda:0"` or BF16 choice to the Mac. For
+the requested experiment, load on CPU first, then explicitly move to MPS. Log
+`torch.backends.mps.is_built()` and `.is_available()` independently.
+
+### `boson_multimodal`: current safe resolution
+
+The model card still says preprocessing requires `boson_multimodal` and imports
+it from the official `boson-ai/higgs-audio` repository. That repository is the
+only authoritative source; its distribution name is `boson_multimodal==0.1.0`.
+It is not appropriate to install an unrelated similarly named PyPI project.
+
+However, installing the old repository wholesale is a bad fit for this STT
+environment: its official requirements pin `transformers>=4.45.1,<4.47.0`,
+while the current STT card requires `transformers>=4.51.0`. The repository's
+current README also says Higgs v3 no longer depends on that repository.
+
+More importantly, the current STT model repository now bundles
+`higgs_audio_collator.py`, and its bundled `transcribe.py` imports that sibling
+collator directly. Therefore the preferred current implementation is:
+
+1. install `torch`, a compatible current `transformers`, `soundfile`, `numpy`,
+   `huggingface_hub`, and the small dependencies actually reported by an import
+   smoke test;
+2. fetch the checkpoint's small `transcribe.py` and required sibling Python
+   files at the **same pinned model revision** using `hf_hub_download` (this is
+   code, not model weights);
+3. call its public `transcribe(model, tokenizer, audio, sample_rate=16000)`;
+4. keep `trust_remote_code=True` for the custom model architecture.
+
+This follows the model repository's current evaluation path and avoids the
+incompatible legacy package. If direct use of `boson_multimodal` is still
+needed, install only from the official Git commit, pinned explicitly, and
+expect to resolve its old Transformers constraint rather than silently mixing
+versions:
+
+```bash
+pip install "boson_multimodal @ git+https://github.com/boson-ai/higgs-audio.git@<PINNED_COMMIT>"
+```
+
+Sources:
+
+- [Current STT repository files](https://huggingface.co/bosonai/higgs-audio-v3-stt/tree/main)
+- [Bundled STT transcribe helper](https://huggingface.co/bosonai/higgs-audio-v3-stt/blob/main/transcribe.py)
+- [Official Boson package metadata](https://github.com/boson-ai/higgs-audio/blob/main/setup.cfg)
+- [Official Boson legacy dependency pins](https://github.com/boson-ai/higgs-audio/blob/main/requirements.txt)
+- [Official Boson v3 migration notice](https://github.com/boson-ai/higgs-audio)
+
+Pin the Hugging Face revision in benchmark logs. The `main` checkpoint and
+helper code were updated in June 2026; reproducibility requires recording the
+resolved commit SHA, not merely the model ID.
+
+### MPS risk identified in current remote code
+
+There is no official MPS support claim. The current custom architecture has a
+device-independent path when using eager attention, but it also forcibly casts
+`audio_features` to `torch.bfloat16` inside `modeling_higgs_audio.py`, regardless
+of the dtype requested at load time. This creates two concrete risks on M1:
+
+- BF16 operation support may be incomplete for the model's MPS operations;
+- loading FP16 or FP32 weights can encounter mixed-dtype failures because the
+  audio features are forced to BF16.
+
+The same file contains CUDA graph code and hard-coded CUDA allocations, but
+those are in the optional CUDA-graph preparation path and should not be reached
+by the normal eager MPS/CPU transcription path. This is a source audit, not
+proof of inference compatibility.
+
+Source: [Current STT custom model implementation](https://huggingface.co/bosonai/higgs-audio-v3-stt/blob/main/modeling_higgs_audio.py)
+
+Implementation order for an honest test:
+
+1. MPS availability checks.
+2. MPS FP16 load and one short inference; retain full traceback on failure.
+3. If the error is specifically a dtype mismatch/unsupported BF16 operation,
+   record it before trying anything else.
+4. A minimal MPS FP32 attempt is informative, but the hard-coded BF16 cast may
+   make it fail for the same reason; do not patch remote model code and call
+   that stock support.
+5. Fully terminate the failed MPS process, then try CPU FP32 in a fresh process.
+6. Report load success separately from successful generation.
+
+Do not use BF16 on M1 merely because the CUDA model card does. Do not claim MPS
+support until `generate()` completes on real audio.
+
+## Condensed implementation decisions
+
+- Python: 3.11.
+- TTS model: `bosonai/higgs-tts-3-4b` (canonical target of MLX guide's legacy ID).
+- TTS API: `mlx_audio.tts.utils.load`, iterate `model.generate`, write with
+  `mlx_audio.audio_io.write`.
+- Controls: use only values from Boson's `PROMPTING.md`; pauses are inline.
+- STT model: `bosonai/higgs-audio-v3-stt`, never the 8B checkpoint.
+- STT preprocessing/inference helper: pin and use the model repository's bundled
+  `transcribe.py` plus siblings; do not install a random `boson_multimodal`.
+- MPS: experimental; FP16 first, CPU FP32 fallback in a separate process; log
+  the entire failure and resolved package/model revisions.
+- Russian STT: unknown until measured; the official metadata is English.

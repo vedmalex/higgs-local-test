@@ -1,0 +1,13 @@
+.venv-tts/
+.venv-stt/
+output/*
+!output/.gitkeep
+logs/*
+!logs/.gitkeep
+samples/reference.wav
+samples/reference.txt
+samples/stt_ru.wav
+*.pyc
+__pycache__/
+.hf-helper-cache/
+.DS_Store
