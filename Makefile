@@ -1,4 +1,4 @@
-.PHONY: setup info download-models tts stt benchmark clean-output
+.PHONY: setup info download-models tts stt benchmark clean-output upload-gdrive download-gdrive
 
 setup:
 	./scripts/bootstrap.sh
@@ -17,6 +17,13 @@ stt:
 
 benchmark:
 	python3 src/benchmark.py
+
+upload-gdrive:
+	python3 scripts/gdrive_sync.py upload --all
+
+download-gdrive:
+	@test -n "$(FOLDER_ID)" || (echo "ERROR: specify FOLDER_ID, e.g.: make download-gdrive FOLDER_ID=<id>" && exit 1)
+	python3 scripts/gdrive_sync.py download --folder-id $(FOLDER_ID) --dest output
 
 clean-output:
 	find output logs -type f ! -name .gitkeep -delete

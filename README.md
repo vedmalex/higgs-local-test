@@ -32,6 +32,8 @@ make info
 make tts              # basic, official control tags, optional clone; fresh process each
 make stt              # MPS FP16 inference, then CPU FP32 fallback if needed
 make benchmark        # TTS then STT, sequentially
+make upload-gdrive    # upload samples/, output/, and notebooks/ to Google Drive
+make download-gdrive FOLDER_ID=<id> # download results from Google Drive
 make clean-output
 ```
 
