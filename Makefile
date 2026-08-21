@@ -1,10 +1,13 @@
-.PHONY: setup info tts stt benchmark clean-output
+.PHONY: setup info download-models tts stt benchmark clean-output
 
 setup:
 	./scripts/bootstrap.sh
 
 info:
 	./scripts/system_info.sh
+
+download-models:
+	./scripts/download_models.sh
 
 tts:
 	./scripts/test_tts.sh
@@ -17,4 +20,3 @@ benchmark:
 
 clean-output:
 	find output logs -type f ! -name .gitkeep -delete
-

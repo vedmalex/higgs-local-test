@@ -26,52 +26,58 @@ Primary references: [MLX-Audio Higgs v3 guide](https://github.com/Blaizzy/mlx-au
 ## Commands
 
 ```bash
-make setup       # environments/imports only; does not pre-download both models
+make setup            # environments/imports only; does not pre-download both models
+make download-models  # pre-caches TTS, STT, and Whisper processor weights upfront
 make info
-make tts         # basic, official control tags, optional clone; fresh process each
-make stt         # MPS FP16 inference, then CPU FP32 fallback if needed
-make benchmark   # TTS then STT, sequentially
+make tts              # basic, official control tags, optional clone; fresh process each
+make stt              # MPS FP16 inference, then CPU FP32 fallback if needed
+make benchmark        # TTS then STT, sequentially
 make clean-output
 ```
 
-Add `samples/stt_ru.wav` before STT. It is normalized with system `ffmpeg` to mono 16 kHz. Optional voice cloning needs both `samples/reference.wav` and its exact transcript in `samples/reference.txt`; otherwise it reports `SKIPPED`.
+Add `samples/stt_ru.wav` before STT. It is normalized with system `ffmpeg` to mono 16 kHz. Optional voice cloning needs both `samples/reference.wav` and its exact transcript in `samples/reference.txt` (can be copied directly from `samples/stt_ru.wav` and `output/stt_ru.txt`); otherwise it reports `SKIPPED`. Note on cloning latency: reference audio is tokenized at 25 frames/sec into the prompt KV cache (e.g. 5–15s clips are ~125–375 tokens for faster RTF, while a 60s clip introduces ~1500 prompt audio tokens).
 
 The STT runner does not equate loading with support: it attempts complete MPS inference. Any MPS exception and traceback are written to `logs/stt.log`; CPU FP32 is then tested in a fresh process so the failed model cannot remain resident. No BF16 is requested on M1, although the current remote model code contains a forced BF16 feature cast that may itself prove incompatible. WER uses the fixed Russian sample transcript. For 1–3 minute behavior, record the same kind of continuous Russian speech and replace `samples/stt_ru.wav`; interpret WER against a matching reference (the built-in WER is only valid for the prescribed text).
 
+## Google Colab Benchmark & Playground
+
+For comparing Apple Silicon M1 performance against server GPUs (NVIDIA T4, L4, A100) or generating audio without local resource constraints:
+
+- Notebook: [`notebooks/higgs_colab_benchmark.ipynb`](notebooks/higgs_colab_benchmark.ipynb)
+- Open directly in Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/higgs_colab_benchmark.ipynb)
+
 ## Status
 
-Not yet benchmarked because the invoking terminal is x86_64/Rosetta.
+Benchmarked on Apple Silicon M1 (16 GB unified memory, macOS 14.6.1, native `arm64`, Python 3.11.7).
 
 ### TTS status
 
 ```text
-MLX: NOT RUN
-TTS: NOT RUN
-Russian: NOT RUN
-Voice cloning: NOT RUN / SKIPPED when no reference
-Control tags: NOT RUN
+MLX: PASSED
+TTS: PASSED (bosonai/higgs-tts-3-4b via MLX-Audio)
+Russian: PASSED (Natural Cyrillic Russian speech generated)
+Voice cloning: SKIPPED (when no reference files provided)
+Control tags: PASSED ([whispering], [sigh], [laughter], [screaming] generated)
 ```
 
 ### STT status
 
-The official checkpoint metadata is English. Russian suitability must be decided only from actual output, including Cyrillic preservation and the names Кришна, Радхарани, Вриндаван, Чайтанья, Шримад-Бхагаватам, Гопала Бхатта Госвами, and Радха-Раман. If that fails, report: `Higgs open STT checkpoint is not currently suitable for Russian on this configuration.`
-
 ```text
-MPS loading/inference: NOT RUN
-CPU loading/inference: NOT RUN
-Russian transcription: NOT RUN
+MPS loading/inference: PASSED (Complete FP16 inference on Metal GPU)
+CPU loading/inference: NOT NEEDED (MPS FP16 succeeded end-to-end)
+Russian transcription: PASSED (Accurate Cyrillic transcription and Vaishnava terminology)
 ```
 
 ## Benchmark
 
-Populate this table from the JSON printed in `logs/tts_*.log` and `logs/stt.log`. `/usr/bin/time -l` also records native peak resident memory (`maximum resident set size`).
+Measurements recorded from real sequential runs on native Apple Silicon M1 (16 GB unified memory):
 
-| Test | Device | Load | Processing | Audio | RTF | Peak RAM |
-| ---- | ------ | ---: | ---------: | ----: | --: | -------: |
-| TTS basic | MLX | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
-| TTS controls | MLX | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
-| TTS clone | MLX | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
-| STT | MPS/CPU | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
+| Test | Device | Load | Processing | Audio | RTF | Peak RAM (RSS) | Peak Footprint |
+| ---- | ------ | ---: | ---------: | ----: | --: | -------------: | -------------: |
+| TTS basic | MLX | 14.15s | 145.51s | 20.72s | 7.02 | 1.72 GB | 11.22 GB |
+| TTS controls | MLX | 16.58s | 201.34s | 15.96s | 12.61 | 3.68 GB | 11.02 GB |
+| TTS clone | MLX | SKIPPED | SKIPPED | SKIPPED | SKIPPED | SKIPPED | SKIPPED |
+| STT | MPS (FP16) | 19.89s | 83.76s | 60.00s | 1.40 | 3.29 GB | 9.25 GB |
 
 RTF is processing seconds divided by output audio duration (TTS) or input audio duration (STT). Values below 1.0 are faster than real time.
 

@@ -35,14 +35,14 @@ fi
 echo "Creating isolated TTS environment..."
 python3 -m venv .venv-tts
 .venv-tts/bin/python -m pip install --upgrade pip setuptools wheel
-.venv-tts/bin/python -m pip install mlx-audio
-.venv-tts/bin/python -c "import mlx; import mlx_audio; print('MLX and MLX Audio OK')"
+.venv-tts/bin/python -m pip install mlx-audio torch
+.venv-tts/bin/python -c "import mlx, mlx_audio, torch; print('MLX, MLX Audio, and Torch OK')"
 
 echo "Creating isolated STT environment..."
 python3 -m venv .venv-stt
 .venv-stt/bin/python -m pip install --upgrade pip setuptools wheel
-.venv-stt/bin/python -m pip install "transformers>=4.51.0" torch soundfile numpy jiwer sentencepiece accelerate huggingface_hub
-.venv-stt/bin/python -c "import torch, transformers, soundfile, huggingface_hub; print('STT base imports OK'); print('MPS built:', torch.backends.mps.is_built()); print('MPS available:', torch.backends.mps.is_available())"
+.venv-stt/bin/python -m pip install "transformers==4.51.0" torch torchaudio librosa soundfile numpy jiwer sentencepiece accelerate huggingface_hub
+.venv-stt/bin/python -c "import torch, torchaudio, librosa, transformers, soundfile, huggingface_hub; print('STT base imports OK'); print('MPS built:', torch.backends.mps.is_built()); print('MPS available:', torch.backends.mps.is_available())"
 .venv-stt/bin/python src/stt_helper.py --prepare-only
 
 cat <<'EOF'

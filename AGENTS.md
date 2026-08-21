@@ -21,12 +21,15 @@ Substantive project work must be driven through GitHub Issues in `vedmalex/higgs
 
 1. Search open and closed issues for an existing matching task and reuse it instead of creating a duplicate.
 2. If none exists, create an issue that states the problem, scope, constraints, acceptance criteria, and expected evidence.
-3. Record important source links, model or package revisions, technical decisions, discovered limitations, benchmark commands, results, and blockers in that issue as the work progresses.
+3. Record resolving progress, root cause analyses, model or package revisions, technical decisions, code/dependency fixes, discovered limitations, benchmark commands, results, and blockers directly in comments on that issue as the work progresses.
 4. Name the working branch so it can be associated with the issue, and reference the issue number in commits and pull requests.
 5. Use `Closes #N` only when the implemented and verified result fully satisfies the issue. Otherwise use `Refs #N` and leave the issue open with its remaining work documented.
-6. Close an issue only after its acceptance criteria have been checked. A commit, successful model load, or partial benchmark alone does not imply completion.
+6. Before closing an issue, run every relevant validation for its scope and record the results or reproducible failures in the issue.
+7. Review every acceptance-criteria checkbox against that evidence and explicitly mark an item complete only when its intended outcome is actually achieved. Never rewrite, weaken, or reinterpret acceptance criteria merely to make a partial result pass.
+8. Do not close an issue while the original user-requested outcome or any acceptance criterion remains incomplete. A reproducible failure, documented blocker, completed check, commit, successful model load, or partial benchmark is progress evidence, not completion; keep the issue open and record the remaining work.
+9. Close the issue only after the original goal is genuinely complete, validation evidence is recorded, and every acceptance-criteria checkbox is checked against that completed outcome.
 
-GitHub Issues are the canonical surface for task state and development history. README status tables and local logs are supporting evidence, not substitutes for an issue. Trivial typo fixes and repository administration that do not change behavior may be performed without a new issue, but should reference an existing issue when one is relevant.
+GitHub Issues are the canonical surface for task state and development history. Record every intermediate troubleshooting and resolution step directly in issue comments so all technical findings remain fully traceable. README status tables and local logs are supporting evidence, not substitutes for an issue. Trivial typo fixes and repository administration that do not change behavior may be performed without a new issue, but should reference an existing issue when one is relevant.
 
 ## Architecture
 
