@@ -58,7 +58,7 @@ Benchmarked on Apple Silicon M1 (16 GB unified memory, macOS 14.6.1, native `arm
 MLX: PASSED
 TTS: PASSED (bosonai/higgs-tts-3-4b via MLX-Audio)
 Russian: PASSED (Natural Cyrillic Russian speech generated)
-Voice cloning: SKIPPED (when no reference files provided)
+Voice cloning: PASSED (60s reference audio cloned into 25.2s Russian speech)
 Control tags: PASSED ([whispering], [sigh], [laughter], [screaming] generated)
 ```
 
@@ -78,7 +78,7 @@ Measurements recorded from real sequential runs on native Apple Silicon M1 (16 G
 | ---- | ------ | ---: | ---------: | ----: | --: | -------------: | -------------: |
 | TTS basic | MLX | 14.15s | 145.51s | 20.72s | 7.02 | 1.72 GB | 11.22 GB |
 | TTS controls | MLX | 16.58s | 201.34s | 15.96s | 12.61 | 3.68 GB | 11.02 GB |
-| TTS clone | MLX | SKIPPED | SKIPPED | SKIPPED | SKIPPED | SKIPPED | SKIPPED |
+| TTS clone (60s ref) | MLX | 17.00s | 20716.63s | 25.20s | 822.09 | 1.33 GB | 11.67 GB |
 | STT | MPS (FP16) | 19.89s | 83.76s | 60.00s | 1.40 | 3.29 GB | 9.25 GB |
 
 RTF is processing seconds divided by output audio duration (TTS) or input audio duration (STT). Values below 1.0 are faster than real time.
