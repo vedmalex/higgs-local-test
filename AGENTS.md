@@ -15,6 +15,19 @@ An honest partial result is valid. Never turn a load-only success into an infere
 
 Before changing dependency setup or model IDs, verify the current first-party MLX-Audio source, Boson model card, bundled checkpoint code, and package metadata. Record source links and pinned revisions in `docs/research/` and update `README.md` when a decision changes.
 
+## GitHub Issues are the primary workflow
+
+Substantive project work must be driven through GitHub Issues in `vedmalex/higgs-local-test`. Before starting implementation, dependency research, compatibility investigation, benchmark execution, or a behavioral documentation change:
+
+1. Search open and closed issues for an existing matching task and reuse it instead of creating a duplicate.
+2. If none exists, create an issue that states the problem, scope, constraints, acceptance criteria, and expected evidence.
+3. Record important source links, model or package revisions, technical decisions, discovered limitations, benchmark commands, results, and blockers in that issue as the work progresses.
+4. Name the working branch so it can be associated with the issue, and reference the issue number in commits and pull requests.
+5. Use `Closes #N` only when the implemented and verified result fully satisfies the issue. Otherwise use `Refs #N` and leave the issue open with its remaining work documented.
+6. Close an issue only after its acceptance criteria have been checked. A commit, successful model load, or partial benchmark alone does not imply completion.
+
+GitHub Issues are the canonical surface for task state and development history. README status tables and local logs are supporting evidence, not substitutes for an issue. Trivial typo fixes and repository administration that do not change behavior may be performed without a new issue, but should reference an existing issue when one is relevant.
+
 ## Architecture
 
 - `scripts/bootstrap.sh`: validates the host and creates isolated environments without downloading both models.
