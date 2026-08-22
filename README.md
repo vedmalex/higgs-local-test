@@ -48,6 +48,14 @@ For comparing Apple Silicon M1 performance against server GPUs (NVIDIA T4, L4, A
 - Notebook: [`notebooks/higgs_colab_benchmark.ipynb`](notebooks/higgs_colab_benchmark.ipynb)
 - Open directly in Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/higgs_colab_benchmark.ipynb)
 
+## Voice Cloning Guide
+
+For recording reference audio, recommended phonetically balanced texts, latency optimization on Apple Silicon, and voice profile persistence:
+
+- Full Guide & Reference Texts: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md)
+- Optimal sample length: **7–12 seconds** (~175–250 prompt tokens) for 1–2 minute inference on M1.
+- Exact transcript: `samples/reference.txt` must match `samples/reference.wav` 1-to-1.
+
 ## Status
 
 Benchmarked on Apple Silicon M1 (16 GB unified memory, macOS 14.6.1, native `arm64`, Python 3.11.7).
