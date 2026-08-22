@@ -236,3 +236,60 @@ support until `generate()` completes on real audio.
 - MPS: experimental; FP16 first, CPU FP32 fallback in a separate process; log
   the entire failure and resolved package/model revisions.
 - Russian STT: unknown until measured; the official metadata is English.
+
+## CUDA (Google Colab) inference paths
+
+Research snapshot: 2026-08-22. Sources are the pinned checkpoints and first-party
+repositories; nothing was installed or downloaded.
+
+### TTS has no `transformers` path
+
+`bosonai/higgs-tts-3-4b` at revision `7556c17e05201fccd9c8cc120bc216dcc7b5d561`
+contains no `.py` files at all, so `trust_remote_code=True` resolves no
+implementation. Its `config.json` declares `model_type: higgs_multimodal_qwen3`,
+`architectures: [HiggsMultimodalQwen3ForConditionalGeneration]`, and
+`transformers_version: 5.5.0`, but `higgs_multimodal_qwen3` is **not implemented in
+`transformers`**: `src/transformers/models/` on `main` carries only `higgs_audio_v2`
+and `higgs_audio_v2_tokenizer`.
+
+The only first-party CUDA implementation is `sglang_omni/models/higgs_tts` in
+SGLang-Omni, which the model card presents as the sole serving path. Verified present
+in the pinned release `sglang-omni==0.1.3` (18 modules under `models/higgs_tts/`,
+`hf_config.py` matching `higgs_multimodal_qwen3`).
+
+Server API actually exposed by that release: `GET /health`,
+`POST /v1/audio/speech` with `input`, `response_format`, `max_new_tokens`,
+`temperature`, `top_k`, and `references: [{audio_path, text}]` for cloning. Local
+reference files require `--allowed-local-media-path`. `sgl-omni serve` has **no
+`--revision` flag**, so a pinned run must `snapshot_download(..., revision=...)`
+first and serve the resolved directory.
+
+Hardware floor: the package pins `flash-attn-4>=4.0.0b18` and
+`flashinfer_python[cu13]==0.6.14`, whose kernels require an Ampere-class device.
+Colab's T4 is compute capability 7.5 and therefore cannot run this stack; L4 (8.9)
+and A100 (8.0) can. Consequently a T4 Colab session can benchmark STT but must
+report TTS as `SKIPPED`, not as a placeholder result.
+
+Sources:
+
+- [Boson TTS model card and SGLang-Omni usage](https://huggingface.co/bosonai/higgs-tts-3-4b)
+- [TTS checkpoint file listing (no `.py` files)](https://huggingface.co/bosonai/higgs-tts-3-4b/tree/main)
+- [`transformers` model registry](https://github.com/huggingface/transformers/tree/main/src/transformers/models)
+- [SGLang-Omni `higgs_tts` implementation](https://github.com/sgl-project/sglang-omni/tree/main/sglang_omni/models/higgs_tts)
+- [SGLang-Omni dependency pins](https://github.com/sgl-project/sglang-omni/blob/main/pyproject.toml)
+- [SGLang-Omni OpenAI-compatible speech API](https://github.com/sgl-project/sglang-omni/blob/main/sglang_omni/serve/openai_api.py)
+
+### STT runs on CUDA in the existing runner
+
+`bosonai/higgs-audio-v3-stt` at the pinned revision
+`2ffd1aa39f5a1266931e405cba12e404a9f994b2` declares `transformers_version: 4.51.0`
+and ships its own remote code, so it cannot share an environment with the TTS stack.
+`src/stt_test.py` therefore accepts `--device cuda`, streaming shards straight into
+VRAM with `device_map={"": 0}` so host RAM never holds a full copy.
+
+### Isolation requirement on Colab
+
+Because the two stacks pin incompatible `transformers` versions, and because a
+notebook kernel cannot reliably release a model held by a global name, each model
+must run as a **separate subprocess in its own virtual environment**. Process exit is
+what returns VRAM and host RAM; `del` on a function argument does not.

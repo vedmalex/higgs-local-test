@@ -43,10 +43,24 @@ The STT runner does not equate loading with support: it attempts complete MPS in
 
 ## Google Colab Benchmark & Playground
 
-For comparing Apple Silicon M1 performance against server GPUs (NVIDIA T4, L4, A100) or generating audio without local resource constraints:
+For comparing Apple Silicon M1 performance against server GPUs:
 
 - Notebook: [`notebooks/higgs_colab_benchmark.ipynb`](notebooks/higgs_colab_benchmark.ipynb)
 - Open directly in Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/higgs_colab_benchmark.ipynb)
+
+Each model runs as a separate subprocess in its own virtual environment, so VRAM and host RAM are reclaimed by process exit rather than by a `del` inside the kernel. The two stacks cannot share one environment: STT pins `transformers==4.51.0` plus the checkpoint's remote code, while TTS needs `transformers` 5.x through SGLang-Omni.
+
+TTS availability is hardware-gated. `bosonai/higgs-tts-3-4b` ships no remote code and its `higgs_multimodal_qwen3` architecture is not implemented in `transformers`, so the only documented first-party CUDA path is `sgl-omni serve` from [SGLang-Omni](https://github.com/sgl-project/sglang-omni), whose pinned `flash-attn-4` / `flashinfer` kernels require compute capability 8.0 or newer.
+
+| Colab GPU | Compute | STT | TTS |
+| --- | --- | --- | --- |
+| T4 | 7.5 | supported | `SKIPPED` — kernels require ≥ 8.0 |
+| L4 | 8.9 | supported | supported |
+| A100 | 8.0 | supported | supported |
+
+On a T4 the notebook benchmarks STT and reports TTS as `SKIPPED` with the unmet requirement; it never substitutes a placeholder value. Details and source links are in [`docs/research/higgs-current-apis.md`](docs/research/higgs-current-apis.md).
+
+Inputs and outputs live in `MyDrive/higgs-benchmark`; model weights are cached on the VM's local disk. A missing `stt_ru.wav`, TTS text, or cloning reference yields `SKIPPED` rather than synthetic input. Automatic runtime disconnect is off by default (`AUTO_DISCONNECT`).
 
 ## Voice Cloning & Audiobook Production Guides
 
