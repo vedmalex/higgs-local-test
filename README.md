@@ -48,13 +48,10 @@ For comparing Apple Silicon M1 performance against server GPUs (NVIDIA T4, L4, A
 - Notebook: [`notebooks/higgs_colab_benchmark.ipynb`](notebooks/higgs_colab_benchmark.ipynb)
 - Open directly in Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/higgs_colab_benchmark.ipynb)
 
-## Voice Cloning Guide
+## Voice Cloning & Audiobook Production Guides
 
-For recording reference audio, recommended phonetically balanced texts, latency optimization on Apple Silicon, and voice profile persistence:
-
-- Full Guide & Reference Texts: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md)
-- Optimal sample length: **7–12 seconds** (~175–250 prompt tokens) for 1–2 minute inference on M1.
-- Exact transcript: `samples/reference.txt` must match `samples/reference.wav` 1-to-1.
+- **Voice Cloning Guide & Reference Texts**: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) — rules for recording clean 7–12s audio samples, phonetically balanced text templates, and voice profile export.
+- **Audiobook Production Guide**: [`docs/guides/audiobook_guide.md`](docs/guides/audiobook_guide.md) — multi-character dialogue switching, screenplay JSON format, natural pause insertion, and complete chapter audio stitching.
 
 ## Status
 
