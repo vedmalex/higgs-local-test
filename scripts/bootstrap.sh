@@ -35,7 +35,9 @@ fi
 echo "Creating isolated TTS environment..."
 python3 -m venv .venv-tts
 .venv-tts/bin/python -m pip install --upgrade pip setuptools wheel
-.venv-tts/bin/python -m pip install mlx-audio torch
+# jiwer is for the Qwen3-ASR local test's WER, which runs in this environment
+# because Qwen3-ASR is an MLX-Audio model, not part of the Torch STT stack.
+.venv-tts/bin/python -m pip install mlx-audio torch jiwer
 .venv-tts/bin/python -c "import mlx, mlx_audio, torch; print('MLX, MLX Audio, and Torch OK')"
 
 echo "Creating isolated STT environment..."

@@ -39,6 +39,7 @@ GitHub Issues are the canonical surface for task state and development history. 
 - `src/tts_test.py`: MLX model loading, WAV generation, timing, RTF, and memory metrics.
 - `src/stt_test.py`: one device/dtype attempt per process, transcript output, timing, RTF, WER, versions, and full failures.
 - `src/stt_helper.py`: resolves checkpoint-owned helper code at a pinned Hugging Face revision.
+- `src/tts_qwen_local_test.py` and `src/stt_qwen_local_test.py`: the local Apple Silicon Qwen3-TTS / Qwen3-ASR benchmarks, running MLX-Audio's native `qwen3_tts` / `qwen3_asr` implementations. Each spawns its own child process for the model call, so the runner never holds a model resident. A separate backend with separately reported numbers — never merged into a Higgs row.
 - `src/benchmark.py`: sequential orchestration only; it must not retain either model.
 - `samples/`: committed text fixtures and instructions; user audio is ignored.
 - `output/` and `logs/`: generated artifacts; only `.gitkeep` files are tracked.
