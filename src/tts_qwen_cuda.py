@@ -146,15 +146,23 @@ def attention_backend_diagnostics(log_path: Path) -> dict:
     Unlike Higgs, Qwen3-TTS's upstream deploy profile does not pin one -- so which
     backend vLLM's auto-selector picks on a T4 is an open question this run answers,
     not an assumption (docs/research/qwen3-tts-notes.md).
+
+    Matches vLLM's own "Using X attention backend" log line rather than a bare
+    substring search: a bare search for "FLASHINFER" false-positived on the
+    unrelated `VLLM_USE_FLASHINFER_SAMPLER` env-var name mentioned in a warning
+    line, reporting FLASHINFER even on a run where TRITON_ATTN was the backend
+    actually selected (observed on a real T4 run, #52).
     """
+    import re
+
     if not log_path.exists():
         return {}
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    for marker in ("FLASHINFER", "TRITON_ATTN", "FLASH_ATTN", "XFORMERS", "TORCH_SDPA"):
-        if marker in text:
-            return {"attention_backend_observed": marker}
+    matches = re.findall(r"Using (\w+) attention backend", text)
+    if matches:
+        return {"attention_backend_observed": list(dict.fromkeys(matches))}
     return {"attention_backend_observed": None,
-            "attention_backend_note": "no known attention-backend name found in the server log"}
+            "attention_backend_note": "no 'Using X attention backend' line found in the server log"}
 
 
 def build_jobs(args, variant: dict, model_dir: str) -> list[dict]:
@@ -311,7 +319,10 @@ def main() -> None:
     base_url = f"http://127.0.0.1:{args.port}"
     server = None
     sampler = DeviceMemorySampler()
-    log_path = args.output_dir / "qwen_vllm_server.log"
+    # One log file per model variant: sharing a single filename across the
+    # notebook's per-variant loop clobbered the previous variant's log before
+    # it could be inspected (observed on a real T4 run, #52).
+    log_path = args.output_dir / f"qwen_vllm_server_{args.model_variant}.log"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     try:
         from huggingface_hub import snapshot_download
