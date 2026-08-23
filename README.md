@@ -50,15 +50,13 @@ For comparing Apple Silicon M1 performance against server GPUs:
 
 Each model runs as a separate subprocess in its own virtual environment, so VRAM and host RAM are reclaimed by process exit rather than by a `del` inside the kernel. The two stacks cannot share one environment: STT pins `transformers==4.51.0` plus the checkpoint's remote code, while TTS needs `transformers` 5.x through SGLang-Omni.
 
-TTS availability is hardware-gated. `bosonai/higgs-tts-3-4b` ships no remote code and its `higgs_multimodal_qwen3` architecture is not implemented in `transformers`, so the only documented first-party CUDA path is `sgl-omni serve` from [SGLang-Omni](https://github.com/sgl-project/sglang-omni), whose pinned `flash-attn-4` / `flashinfer` kernels require compute capability 8.0 or newer.
+The local M1 run and the Colab run do not share an implementation. On Apple Silicon, TTS goes through MLX-Audio, an independent MLX port of Higgs v3. `bosonai/higgs-tts-3-4b` itself ships no remote code and its `higgs_multimodal_qwen3` architecture is not implemented in `transformers`, so on CUDA the only documented first-party path is `sgl-omni serve` from [SGLang-Omni](https://github.com/sgl-project/sglang-omni). Working synthesis on Metal therefore says nothing about a given CUDA device.
 
-| Colab GPU | Compute | STT | TTS |
-| --- | --- | --- | --- |
-| T4 | 7.5 | supported | `SKIPPED` — kernels require ≥ 8.0 |
-| L4 | 8.9 | supported | supported |
-| A100 | 8.0 | supported | supported |
+SGLang-Omni publishes no supported-hardware floor. Its pinned `flash-attn-4` and `flashinfer` wheels target recent architectures, and `higgs_tts/sampler.py` calls flashinfer renorm kernels, so an older device such as Colab's T4 (compute 7.5) is expected to fail — but SGLang also ships `triton` and `torch_native` attention backends, so that is an expectation, not a documented requirement.
 
-On a T4 the notebook benchmarks STT and reports TTS as `SKIPPED` with the unmet requirement; it never substitutes a placeholder value. Details and source links are in [`docs/research/higgs-current-apis.md`](docs/research/higgs-current-apis.md).
+The runner therefore does not refuse to start on an older GPU. It warns, attempts the run, and records the actual outcome together with the server log, so the repository accumulates evidence instead of a guess. `--min-capability` turns the expectation into a hard skip when spending GPU quota on a likely failure is not wanted, and `--server-arg KEY=VALUE` passes extra `sgl-omni` arguments through (for example `--server-arg attention_backend=triton`). L4 and A100 are the most likely to succeed.
+
+`SKIPPED` is reported only for genuinely missing prerequisites: no CUDA device, no `sgl-omni` CLI, a capability below an explicitly requested `--min-capability`, or a missing input file. Details and source links are in [`docs/research/higgs-current-apis.md`](docs/research/higgs-current-apis.md).
 
 Inputs and outputs live in `MyDrive/higgs-benchmark`; model weights are cached on the VM's local disk. A missing `stt_ru.wav`, TTS text, or cloning reference yields `SKIPPED` rather than synthetic input. Automatic runtime disconnect is off by default (`AUTO_DISCONNECT`).
 

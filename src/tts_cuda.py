@@ -28,9 +28,16 @@ MODEL_ID = "bosonai/higgs-tts-3-4b"
 # Immutable revision of the weights this benchmark is pinned to.
 REVISION = "7556c17e05201fccd9c8cc120bc216dcc7b5d561"
 
-# SGLang-Omni pins flash-attn-4 and flashinfer, whose kernels require an Ampere-class
-# or newer device. Colab's T4 (compute 7.5) therefore cannot run this stack.
-MIN_COMPUTE_CAPABILITY = (8, 0)
+# SGLang-Omni publishes no supported-hardware floor. Its pinned flash-attn-4 and
+# flashinfer wheels target recent datacenter architectures, and `higgs_tts/sampler.py`
+# calls flashinfer renorm kernels, so an older device such as Colab's T4 (compute 7.5)
+# is expected to fail — but SGLang also ships `triton` and `torch_native` attention
+# backends, so this is an untested expectation, not a documented requirement.
+#
+# Therefore the runner does NOT refuse to start below this line. It warns, attempts the
+# run, and records whatever actually happens. Pass --min-capability to turn the
+# expectation into a hard skip when burning GPU quota on a likely failure is not wanted.
+ADVISORY_COMPUTE_CAPABILITY = (8, 9)
 
 CONTROL_TEXT = (
     "<|emotion:contentment|><|prosody:speed_slow|>Начнём спокойно и внимательно. "
@@ -116,25 +123,39 @@ def gpu_facts() -> dict:
     }
 
 
-def check_requirements() -> tuple[bool, str, dict]:
-    """Return (supported, reason, facts). `reason` is empty when supported."""
+def check_requirements(min_capability: tuple[int, int] | None) -> tuple[bool, str, dict]:
+    """Return (runnable, reason, facts).
+
+    Only genuinely missing prerequisites block the run. A low compute capability
+    produces an advisory, because the expectation that it fails is unverified and
+    skipping would prevent ever recording what actually happens.
+    """
     facts = gpu_facts()
     if facts.get("gate") == "torch_missing":
         return False, "torch is not installed in this environment", facts
     if facts.get("gate") == "no_cuda":
         return False, "no CUDA device is visible to torch", facts
-    capability = facts["cuda_capability_tuple"]
-    if capability < MIN_COMPUTE_CAPABILITY:
-        return False, (
-            f"{facts['cuda_device']} has compute capability {facts['cuda_capability']}, "
-            f"below the {'.'.join(map(str, MIN_COMPUTE_CAPABILITY))} required by the "
-            "flash-attn-4 / flashinfer kernels that SGLang-Omni pins. "
-            "Allocate an Ampere-class or newer GPU (L4, A100)."
-        ), facts
     if shutil.which("sgl-omni") is None:
         return False, (
             "the `sgl-omni` CLI is not installed; SGLang-Omni is the only documented "
             "first-party CUDA inference path for this checkpoint"
+        ), facts
+
+    capability = facts["cuda_capability_tuple"]
+    if capability < ADVISORY_COMPUTE_CAPABILITY:
+        facts["capability_advisory"] = (
+            f"{facts['cuda_device']} reports compute capability {facts['cuda_capability']}. "
+            "SGLang-Omni states no supported-hardware floor, but its pinned flash-attn-4 / "
+            "flashinfer wheels target newer architectures, so this run may fail during "
+            "install or server startup. Any failure is recorded with its log rather than "
+            "hidden. A `triton` or `torch_native` attention backend may help: pass it "
+            "through with --server-arg attention_backend=triton."
+        )
+    if min_capability is not None and capability < min_capability:
+        return False, (
+            f"{facts['cuda_device']} has compute capability {facts['cuda_capability']}, "
+            f"below the --min-capability {'.'.join(map(str, min_capability))} requested "
+            "for this run"
         ), facts
     return True, "", facts
 
@@ -246,6 +267,13 @@ def main() -> None:
     parser.add_argument("--server-timeout", type=float, default=1800.0)
     parser.add_argument("--mem-fraction-static", type=float, default=None,
                         help="Passed through to sgl-omni to cap the static VRAM pool.")
+    parser.add_argument("--min-capability", default=None, metavar="MAJOR.MINOR",
+                        help="Skip instead of attempting when the GPU compute capability is "
+                             "below this value. Omitted by default: the runner attempts the "
+                             "run and records the real outcome.")
+    parser.add_argument("--server-arg", action="append", default=[], metavar="KEY=VALUE",
+                        help="Extra `sgl-omni serve` argument, repeatable "
+                             "(e.g. --server-arg attention_backend=triton).")
     parser.add_argument("--request-timeout", type=float, default=900.0)
     args = parser.parse_args()
 
@@ -256,8 +284,14 @@ def main() -> None:
         "backend": "sglang-omni",
         "python": platform.python_version(),
     }
-    supported, reason, facts = check_requirements()
+    min_capability = None
+    if args.min_capability:
+        major, _, minor = args.min_capability.partition(".")
+        min_capability = (int(major), int(minor or 0))
+    runnable, reason, facts = check_requirements(min_capability)
     report.update({k: v for k, v in facts.items() if k != "cuda_capability_tuple"})
+    if facts.get("capability_advisory"):
+        print(f"⚠️  {facts['capability_advisory']}")
 
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
 
@@ -265,7 +299,7 @@ def main() -> None:
         args.metrics.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(report, ensure_ascii=False, indent=2))
 
-    if not supported:
+    if not runnable:
         report.update({"status": "SKIPPED", "reason": reason, "results": [], **peak_memory()})
         write_report()
         return
@@ -289,6 +323,9 @@ def main() -> None:
                    "--host", "127.0.0.1"]
         if args.mem_fraction_static is not None:
             command += ["--mem-fraction-static", str(args.mem_fraction_static)]
+        for extra in args.server_arg:
+            key, _, value = extra.partition("=")
+            command += [f"--{key.strip().lstrip('-').replace('_', '-')}", value.strip()]
         if args.ref_audio is not None:
             # Local reference files are only readable by the server when their
             # directory is explicitly allowlisted.
