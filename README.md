@@ -67,6 +67,32 @@ Each model runs as a separate subprocess in its own virtual environment, so VRAM
 
 Inputs and outputs live in `MyDrive/higgs-benchmark`; model weights are cached on the VM's local disk, since 15 GB through the Drive FUSE mount would be far slower and would consume Drive quota. A missing `stt_ru.wav`, TTS text, or cloning reference yields `SKIPPED` rather than synthetic input.
 
+### Qwen3-TTS — second, independent TTS backend (#52)
+
+Qwen3-TTS is added as a **second, independent** TTS backend, never a replacement for Higgs: it serves two purposes — a diagnostic control on the same Colab T4 that reproducibly fails to produce real speech with Higgs ([#48](https://github.com/vedmalex/higgs-local-test/issues/48)), and a separate audiobook-production candidate to evaluate on its own merits. `src/tts_qwen_cuda.py` drives it through the same `vllm serve --omni` stack already used for Higgs, so the notebook installs, runs, and tears it down with the same subprocess-per-stage pattern. Results are written to a separate metrics file per model variant and are never merged into or reported as a Higgs result.
+
+Model variants (exact upstream IDs; sources and full research trail in [`docs/research/qwen3-tts-notes.md`](docs/research/qwen3-tts-notes.md)):
+
+| Variant | 0.6B (Phase 1, T4 diagnostic) | 1.7B (Phase 2, audiobook capability) | Supports |
+| --- | --- | --- | --- |
+| Base | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | `Qwen/Qwen3-TTS-12Hz-1.7B-Base` | voice cloning from a ~3s reference |
+| CustomVoice | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | 9 predefined timbres + free-text `instructions` (style/emotion) |
+| VoiceDesign | not published | `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` | narrator voice from a natural-language description |
+
+One server serves one variant at a time — a request's `task_type` only works against the checkpoint trained for it, so `--model-variant` selects which of `qwen_tts_basic` / `qwen_tts_clone` / `qwen_tts_style` / `qwen_tts_voicedesign` the run can actually attempt; the rest are reported `SKIPPED` with the loaded variant named in the reason, never silently attempted against the wrong checkpoint. Every produced WAV goes through the exact same anti-false-positive waveform checks as Higgs (`src/tts_cuda_common.py`, shared by both runners after #52's refactor) — an `HTTP 200` and a well-formed WAV are not `PASSED` on their own.
+
+All three variants' model cards claim the same 10 languages, including **Russian**, as a first-party, documented claim (unlike Higgs STT, where Russian is empirical). Every published Qwen3-TTS model card checked so far uses the **Apache-2.0** license — no research/non-commercial restriction, unlike Higgs TTS 3 — which is the direct answer to this project's "licensing implications for generated audiobooks" question, pending the actual quality/RTF numbers from a real run.
+
+Unlike Higgs's deploy profile, vllm-omni's upstream Qwen3-TTS deploy config does not pin `FLASHINFER`, so the FlashInfer compute-capability-8.0 startup abort that forced `configs/higgs_multimodal_qwen3_turing.yaml` is **not known to reproduce** for Qwen3-TTS — this is recorded as unconfirmed and must be measured on a real T4 run, not assumed. If a real run does hit an analogous attention-backend or fp16-downcast failure, the fix is a `configs/qwen3_tts_turing.yaml` analogous to Higgs's, added once that evidence exists.
+
+**Status: not yet executed on real GPU hardware.** This backend was implemented and researched from primary sources (see `docs/research/qwen3-tts-notes.md`) in an environment with no CUDA device; running it on Colab/Kaggle T4 and recording real PASSED/FAILED/SKIPPED results and RTF/VRAM numbers is the remaining step before the comparison matrix below can be filled in.
+
+## Kaggle Notebooks
+
+The same CUDA benchmark (Higgs and Qwen3-TTS, plus STT) can be tried outside Colab on [Kaggle Notebooks](https://www.kaggle.com/code). Kaggle's GPU type and availability are **dynamic and not guaranteed** — it does not promise a T4 or any particular GPU for a given session, so the notebook's GPU-detection cell (name, VRAM, compute capability, printed prominently) is exactly as necessary there as on Colab; do not assume the T4-specific code paths in `configs/higgs_multimodal_qwen3_turing.yaml` or the Turing dtype/attention-backend forcing apply until that cell confirms a T4.
+
+The notebook and `src/*.py` runners are the shared implementation for both platforms — nothing here is Colab-specific beyond the `google.colab.drive` mount (guarded by `USE_DRIVE`) and the Colab-badge link above. To run on Kaggle: upload or import [`notebooks/higgs_colab_benchmark.ipynb`](notebooks/higgs_colab_benchmark.ipynb) as a Kaggle Notebook, enable a GPU accelerator in the session settings, set `USE_DRIVE = False` (Kaggle has its own persistent `/kaggle/working` output, not a Drive mount) or adapt `WORKSPACE` to a Kaggle-writable path, and run all cells. If Kaggle's filesystem layout needs a small adapter beyond that, keep it minimal and documented here rather than maintaining a second notebook.
+
 ## Voice Cloning & Audiobook Production Guides
 
 - **Voice Cloning Guide & Reference Texts**: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) — rules for recording clean 7–12s audio samples, phonetically balanced text templates, and voice profile export.
@@ -102,6 +128,17 @@ Russian transcription: PASSED (coherent Cyrillic; WER not measured, no matching 
 Suspected cause, not yet isolated: `--dtype float16`, which the runner must force because vLLM refuses the checkpoint's declared bfloat16 below compute 8.0, and possibly the `TRITON_ATTN` substitution the same profile makes. Distinguishing "Turing configuration" from "this profile" needs an Ampere-class run, where neither applies. Tracked in [#48](https://github.com/vedmalex/higgs-local-test/issues/48).
 
 Neither Boson nor either serving stack claims Turing support.
+
+### Higgs vs Qwen3-TTS comparison (#52)
+
+Qwen3-TTS is an additional backend evaluated on its own merits, not a fallback that turns a Higgs failure into a Higgs pass. The two are always reported separately.
+
+| Backend | Model | GPU | Russian | Basic TTS | Clone | Emotion/style | RTF | Peak VRAM | Audio valid | License |
+| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |
+| Higgs | `higgs-tts-3-4b` | T4 | claimed (empirical failure below) | FAILED — constant `-32768` (#48) | blocked by the same common audio failure | blocked | not meaningful for invalid audio | 11.18 GB | **FAIL** | Boson research/non-commercial |
+| Qwen3-TTS | `12Hz-0.6B-Base` / `-CustomVoice` | T4 | documented claim (model card) | **not yet run** | **not yet run** | model-dependent, **not yet run** | — | — | **NOT RUN** | Apache-2.0 |
+
+RTF is never published for invalid audio, per this project's own rule (see the T4 note above). The Qwen row stays `NOT RUN` until `src/tts_qwen_cuda.py` is actually executed on a Colab/Kaggle T4 and its `metrics/tts_qwen_<variant>.json` results are recorded here — filling this row from the research alone, without a real run, would be exactly the kind of fabricated benchmark this project's rules forbid.
 
 ## Benchmark
 
