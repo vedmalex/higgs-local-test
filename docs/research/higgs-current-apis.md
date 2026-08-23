@@ -264,11 +264,27 @@ reference files require `--allowed-local-media-path`. `sgl-omni serve` has **no
 `--revision` flag**, so a pinned run must `snapshot_download(..., revision=...)`
 first and serve the resolved directory.
 
-Hardware floor: the package pins `flash-attn-4>=4.0.0b18` and
-`flashinfer_python[cu13]==0.6.14`, whose kernels require an Ampere-class device.
-Colab's T4 is compute capability 7.5 and therefore cannot run this stack; L4 (8.9)
-and A100 (8.0) can. Consequently a T4 Colab session can benchmark STT but must
-report TTS as `SKIPPED`, not as a placeholder result.
+Hardware floor: **not documented**. Neither the model card, the SGLang-Omni README,
+nor its installation guide states a minimum compute capability. What can be verified:
+
+- the package pins `flash-attn-4>=4.0.0b18` and `flashinfer_python[cu13]==0.6.14`,
+  wheels that target recent datacenter architectures;
+- `sglang_omni/models/higgs_tts/sampler.py` calls flashinfer renorm kernels, so the
+  sampling path is not merely an optional accelerator;
+- `sglang_omni/utils/gpu_compat.py` names only sm89 (Ada), sm90 (Hopper), and sm100/103/120
+  (Blackwell) in its architecture map, which suggests where it has been exercised;
+- however SGLang 0.5.16 still resolves `torch_native` and `flex_attention` attention
+  backends in `srt/server_args.py`, so it is not hard-locked to those architectures.
+
+An older device such as Colab's T4 (compute 7.5) is therefore *expected* to fail, but
+that expectation is untested. Pre-emptively skipping would guarantee the project never
+learns the real answer, so `src/tts_cuda.py` warns, attempts the run, and records the
+actual failure with the server log. `--min-capability` converts the expectation into a
+hard skip on request, and `--server-arg KEY=VALUE` forwards extra `sgl-omni` arguments
+such as `attention_backend=triton`.
+
+Note that a working MLX-Audio run on M1 is not evidence about CUDA: MLX-Audio is an
+independent implementation, so the two paths share only the weights.
 
 Sources:
 
