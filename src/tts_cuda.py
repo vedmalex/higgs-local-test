@@ -42,6 +42,11 @@ REVISION = "7556c17e05201fccd9c8cc120bc216dcc7b5d561"
 # it only auto-applies it for sm100+. So the runner sets it for pre-Ampere devices.
 NORM_FALLBACK_BELOW_CAPABILITY = (8, 0)
 
+# vLLM-Omni's speech endpoint rejects a longer voice reference outright:
+# "Reference audio too long (60.0s). Maximum 30s supported — use a shorter clip."
+# docs/guides/voice_cloning_guide.md recommends 7-12s anyway.
+MAX_REFERENCE_SECONDS = {"vllm": 30.0, "sglang": None}
+
 # Below this, bfloat16 has no hardware support and vLLM refuses to load with it.
 BF16_CAPABILITY = (8, 0)
 
@@ -127,7 +132,7 @@ class DeviceMemorySampler:
                     "peak_device_vram_note": "nvidia-smi sampling produced no reading"}
         return {"peak_device_vram_bytes": self.peak_bytes,
                 "peak_device_vram_samples": self.samples,
-                "peak_device_vram_note": "device-wide nvidia-smi peak while the sgl-omni server was alive"}
+                "peak_device_vram_note": "device-wide nvidia-smi peak while the server was alive"}
 
 
 def gpu_facts() -> dict:
@@ -251,6 +256,7 @@ def wait_for_server(base_url: str, process: subprocess.Popen, timeout: float,
 
 
 def synthesize(base_url: str, payload: dict, destination: Path, timeout: float) -> dict:
+    import urllib.error
     import urllib.request
 
     request = urllib.request.Request(
@@ -259,8 +265,14 @@ def synthesize(base_url: str, payload: dict, destination: Path, timeout: float) 
         headers={"Content-Type": "application/json"},
     )
     started = time.perf_counter()
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        audio_bytes = response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            audio_bytes = response.read()
+    except urllib.error.HTTPError as error:
+        # The body says what is actually wrong ("Reference audio too long (60.0s)…").
+        # Raising the bare status would hide it and send the operator to the log.
+        detail = error.read().decode("utf-8", "replace").strip()
+        raise RuntimeError(f"HTTP {error.code} from {error.url}: {detail}") from error
     processing = time.perf_counter() - started
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(audio_bytes)
@@ -305,7 +317,24 @@ def build_jobs(args, model_dir: str) -> list[dict]:
         "output": args.output_dir / "tts_ru_controls.wav",
     })
 
-    if args.ref_audio and args.ref_text and args.ref_audio.exists() and args.ref_text.exists():
+    reference_limit = MAX_REFERENCE_SECONDS.get(args.backend)
+    reference_seconds = None
+    if args.ref_audio and args.ref_audio.exists():
+        try:
+            reference_seconds = wav_duration(args.ref_audio)
+        except Exception:
+            # Not a WAV, or unreadable: let the server judge it rather than guess.
+            reference_seconds = None
+
+    if (reference_limit is not None and reference_seconds is not None
+            and reference_seconds > reference_limit):
+        jobs.append({
+            "name": "tts_clone",
+            "skipped": (f"reference audio is {reference_seconds:.1f}s, above the "
+                        f"{reference_limit:.0f}s the {args.backend} backend accepts. "
+                        "docs/guides/voice_cloning_guide.md recommends 7-12s"),
+        })
+    elif args.ref_audio and args.ref_text and args.ref_audio.exists() and args.ref_text.exists():
         reference_text = args.ref_text.read_text(encoding="utf-8").strip()
         clone_text = basic_text or CONTROL_TEXT
         jobs.append({

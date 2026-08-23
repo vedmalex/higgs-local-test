@@ -72,25 +72,29 @@ Inputs and outputs live in `MyDrive/higgs-benchmark`; model weights are cached o
 
 ## Status
 
-Benchmarked on Apple Silicon M1 (16 GB unified memory, macOS 14.6.1, native `arm64`, Python 3.11.7).
-
-### TTS status
+### Apple Silicon M1 (16 GB unified memory, macOS 14.6.1, native `arm64`, Python 3.11.7)
 
 ```text
-MLX: PASSED
-TTS: PASSED (bosonai/higgs-tts-3-4b via MLX-Audio)
-Russian: PASSED (Natural Cyrillic Russian speech generated)
-Voice cloning: PASSED (60s reference audio cloned into 25.2s Russian speech)
-Control tags: PASSED ([whispering], [sigh], [laughter], [screaming] generated)
+TTS via MLX-Audio:     PASSED (bosonai/higgs-tts-3-4b)
+Russian speech:        PASSED (natural Cyrillic Russian generated)
+Voice cloning:         PASSED (60s reference cloned into 25.2s Russian speech)
+Control tags:          PASSED
+STT MPS FP16:          PASSED (complete inference on Metal GPU)
+STT CPU fallback:      NOT NEEDED (MPS FP16 succeeded end-to-end)
+Russian transcription: PASSED (accurate Cyrillic and Vaishnava terminology)
 ```
 
-### STT status
+### Google Colab, Tesla T4 (15 GB, compute 7.5, Python 3.13, driver 580.82.07 / CUDA 13.0)
 
 ```text
-MPS loading/inference: PASSED (Complete FP16 inference on Metal GPU)
-CPU loading/inference: NOT NEEDED (MPS FP16 succeeded end-to-end)
-Russian transcription: PASSED (Accurate Cyrillic transcription and Vaishnava terminology)
+TTS via vLLM-Omni:     PASSED (basic RTF 2.330, control tags RTF 1.654, 10.45 GB peak VRAM)
+TTS voice cloning:     SKIPPED (60s reference exceeds the endpoint's 30s limit)
+TTS via SGLang-Omni:   FAILED (KeyError: 'sm_75' in flashinfer CUTLASS-DSL RMSNorm)
+STT CUDA FP16:         PASSED (RTF 0.18-0.21 across three runs)
+Russian transcription: PASSED (coherent Cyrillic; WER not measured, no matching reference)
 ```
+
+The T4 result required a repository-supplied deploy profile, [`configs/higgs_multimodal_qwen3_turing.yaml`](configs/higgs_multimodal_qwen3_turing.yaml); neither Boson nor either serving stack claims Turing support.
 
 ## Benchmark
 
@@ -109,21 +113,20 @@ RTF is processing seconds divided by output audio duration (TTS) or input audio 
 
 | Test | Device | Load | Processing | Audio | RTF | Peak VRAM | Peak RSS |
 | ---- | ------ | ---: | ---------: | ----: | --: | --------: | -------: |
+| TTS basic | CUDA T4 (FP16, vLLM) | 195.70s | 56.02s | 24.04s | 2.330 | 10.45 GB | 2.90 GB |
+| TTS controls | CUDA T4 (FP16, vLLM) | (same server) | 22.62s | 13.68s | 1.654 | 10.45 GB | 2.90 GB |
+| TTS clone | CUDA T4 (FP16, vLLM) | — | — | — | `SKIPPED` | — | — |
 | STT (run 1) | CUDA T4 (FP16) | 81.23s | 10.71s | 60.00s | 0.178 | 5.97 GB | 6.25 GB |
 | STT (run 2) | CUDA T4 (FP16) | 76.94s | 11.69s | 60.00s | 0.195 | 5.97 GB | 6.25 GB |
-| TTS (all modes) | CUDA T4 | — | — | — | — | 12.95 GB peak during startup | — |
+| STT (run 3) | CUDA T4 (FP16) | 89.34s | 12.40s | 60.00s | 0.207 | 5.97 GB | 6.25 GB |
 
-Two runs of the same input give RTF 0.178 and 0.195, so read the figure as approximately 0.18–0.20 — roughly 7–8× faster than the M1 MPS run (1.40) rather than a single exact ratio. WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
+**TTS runs on a T4.** With `configs/higgs_multimodal_qwen3_turing.yaml`, `vllm serve --omni` loaded the model (7.61 GiB of weights, 1.25 GiB KV cache, 10.45 GB device peak of 14.56 GB) and synthesized Russian speech: RTF 2.330 for plain text and 1.654 with control tags, against 7.02 and 12.61 on M1 MLX — roughly 3× and 7.6× faster. TTS load time is the server startup, which is paid once for all requests.
 
-TTS is a **documented reproducible failure on T4, not a pass and not a skip**. `sglang-omni==0.1.3` installed on a `uv`-fetched Python 3.12, the weights downloaded, and `sgl-omni serve` loaded the model — then died during CUDA graph capture:
+Voice cloning is `SKIPPED`, not failed: vLLM-Omni's speech endpoint answers `Reference audio too long (60.0s). Maximum 30s supported — use a shorter clip.` The repository's reference clip is 60 s, which the M1 MLX path accepts. Supply a shorter clip — [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) recommends 7–12 s — and the runner will attempt it; it now checks the duration up front rather than spending a request to learn this.
 
-```
-File ".../flashinfer/norm/kernels/rmsnorm.py", line 1148, in _get_compiled_rmsnorm_kernel
-File ".../cutlass/base_dsl/arch.py", line 106, in from_string
-KeyError: 'sm_75'
-```
+Three STT runs of the same input give RTF 0.178, 0.195 and 0.207, so read it as approximately 0.18–0.21 — roughly 7–8× faster than the M1 MPS run (1.40) rather than a single exact ratio. WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
 
-flashinfer's CUTLASS-DSL RMSNorm kernel has no entry for Turing. flashinfer documents `FLASHINFER_USE_CUDA_NORM=1` as the CUDA-JIT fallback for that exact path, and SGLang-Omni honours a pre-set value while auto-applying it only for sm100+. `src/tts_cuda.py` now sets it for anything below compute 8.0; whether that carries the T4 through the rest of startup is not yet measured.
+The `sglang` backend remains a **documented reproducible failure on T4**: it installs and loads the model, then dies during CUDA graph capture with `KeyError: 'sm_75'` in flashinfer's CUTLASS-DSL RMSNorm, which has no Turing entry. `FLASHINFER_USE_CUDA_NORM=1` is applied below compute 8.0 as flashinfer's documented CUDA-JIT fallback for that path, but whether it carries a T4 through the rest of startup is untested — the vLLM backend made it unnecessary to find out.
 
 ## Expected honest outcomes
 
