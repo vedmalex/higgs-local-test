@@ -37,6 +37,8 @@ make download-gdrive FOLDER_ID=<id> # download results from Google Drive
 make clean-output
 ```
 
+The 60-second reference behind the recorded cloning result was a copy of `samples/stt_ru.wav`; `samples/reference.wav` now holds a 7.4-second clip instead, so reproducing that figure means copying `samples/stt_ru.wav` back over it. The 60-second pair is also preserved on Drive as `reference_60s.wav` / `reference_60s.txt`.
+
 Add `samples/stt_ru.wav` before STT. It is normalized with system `ffmpeg` to mono 16 kHz. Optional voice cloning needs both `samples/reference.wav` and its exact transcript in `samples/reference.txt` (can be copied directly from `samples/stt_ru.wav` and `output/stt_ru.txt`); otherwise it reports `SKIPPED`. Note on cloning latency: reference audio is tokenized at 25 frames/sec into the prompt KV cache (e.g. 5–15s clips are ~125–375 tokens for faster RTF, while a 60s clip introduces ~1500 prompt audio tokens).
 
 The STT runner does not equate loading with support: it attempts complete MPS inference. Any MPS exception and traceback are written to `logs/stt.log`; CPU FP32 is then tested in a fresh process so the failed model cannot remain resident. No BF16 is requested on M1, although the current remote model code contains a forced BF16 feature cast that may itself prove incompatible. WER uses the fixed Russian sample transcript. For 1–3 minute behavior, record the same kind of continuous Russian speech and replace `samples/stt_ru.wav`; interpret WER against a matching reference (the built-in WER is only valid for the prescribed text).
@@ -77,7 +79,8 @@ Inputs and outputs live in `MyDrive/higgs-benchmark`; model weights are cached o
 ```text
 TTS via MLX-Audio:     PASSED (bosonai/higgs-tts-3-4b)
 Russian speech:        PASSED (natural Cyrillic Russian generated)
-Voice cloning:         PASSED (60s reference cloned into 25.2s Russian speech)
+Voice cloning:         PASSED (60s reference cloned into 25.2s Russian speech, RTF 822.09)
+Voice cloning (7.4s):  NOT MEASURED (aborted after 30+ min; the host became unresponsive)
 Control tags:          PASSED
 STT MPS FP16:          PASSED (complete inference on Metal GPU)
 STT CPU fallback:      NOT NEEDED (MPS FP16 succeeded end-to-end)
