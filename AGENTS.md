@@ -42,6 +42,7 @@ GitHub Issues are the canonical surface for task state and development history. 
 - `src/benchmark.py`: sequential orchestration only; it must not retain either model.
 - `samples/`: committed text fixtures and instructions; user audio is ignored.
 - `output/` and `logs/`: generated artifacts; only `.gitkeep` files are tracked.
+- `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
 
 Keep TTS and STT environments and processes isolated. Do not introduce a shared daemon or module that holds both models in memory.
 
