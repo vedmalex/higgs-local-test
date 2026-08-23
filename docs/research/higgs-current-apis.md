@@ -481,3 +481,43 @@ Sources:
 - [vLLM FlashInfer capability gate](https://github.com/vllm-project/vllm/blob/v0.26.0/vllm/v1/attention/backends/flashinfer.py)
 - [vLLM Triton attention capability gate](https://github.com/vllm-project/vllm/blob/v0.26.0/vllm/v1/attention/backends/triton_attn.py)
 - [vLLM-Omni serve CLI (`--deploy-config`)](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/entrypoints/cli/serve.py)
+
+### The T4 vLLM path starts but does not synthesize: measured 2026-08-23
+
+The Turing profile cleared startup. It did not produce speech.
+
+`vllm serve --omni --dtype float16 --deploy-config configs/higgs_multimodal_qwen3_turing.yaml`
+loads the model (7.61 GiB weights, 1.25 GiB KV cache, 11.18 GB device peak of 14.56 GB) and
+answers `POST /v1/audio/speech` with HTTP 200 and a well-formed WAV: `fmt` = 1, 16-bit,
+24000 Hz, plausible duration, plausible byte count. The payload is the two bytes `00 80`
+repeated to the end of the file — little-endian int16 `0x8000`, a constant `-32768`:
+
+```
+00000020: 0200 1000 6461 7461 809b 1100 0080 0080  ....data........
+00000030: 0080 0080 0080 0080 0080 0080 0080 0080  ................
+```
+
+Measured across all three request types (plain text, control tags, voice cloning with a
+7.4 s reference): peak 32768, RMS 32768.0, 100.00% of samples above 32000, exactly one
+distinct sample value per file. The repository's own speech reference measures peak 16338,
+RMS 1989.4, 0.00% at full scale — so the check separates the two cleanly.
+
+A constant `INT16_MIN` across an entire file is the signature of the codec decoder's float
+output being non-finite or far out of range at the point of int16 conversion: NaN and
+overflowing floats both land on `INT16_MIN` in common conversion paths. Candidates, in
+order of suspicion:
+
+1. `--dtype float16`. The checkpoint declares bfloat16; vLLM refuses bfloat16 below compute
+   8.0, so fp16 is forced. fp16 carries far less dynamic range, and the audio codec path is
+   the part of this model least likely to have been exercised in fp16.
+2. The `TRITON_ATTN` substitution the same profile makes, also Turing-only.
+3. Stage 1 (code2wav) under a configuration nothing upstream tests.
+
+Separating "Turing configuration" from "this profile" requires an Ampere-class run, where
+neither the dtype forcing nor the attention substitution applies.
+
+Method note worth keeping: HTTP 200 plus a parseable WAV of non-zero duration is not
+evidence of synthesis. `src/tts_cuda.py` now measures peak, RMS, the fraction of samples at
+full scale, and the count of distinct values, and reports a job FAILED when the signal is
+constant, saturated or silent. Three earlier `PASSED` results with RTF figures were
+produced by the weaker criterion and were wrong.

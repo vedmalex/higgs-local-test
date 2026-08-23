@@ -87,14 +87,18 @@ Russian transcription: PASSED (accurate Cyrillic and Vaishnava terminology)
 ### Google Colab, Tesla T4 (15 GB, compute 7.5, Python 3.13, driver 580.82.07 / CUDA 13.0)
 
 ```text
-TTS via vLLM-Omni:     PASSED (basic RTF 2.330, control tags RTF 1.654, 10.45 GB peak VRAM)
-TTS voice cloning:     SKIPPED (60s reference exceeds the endpoint's 30s limit)
+TTS via vLLM-Omni:     FAILED (server runs, but every sample of the output is -32768;
+                               constant full-scale DC, not speech)
 TTS via SGLang-Omni:   FAILED (KeyError: 'sm_75' in flashinfer CUTLASS-DSL RMSNorm)
-STT CUDA FP16:         PASSED (RTF 0.18-0.21 across three runs)
+STT CUDA FP16:         PASSED (RTF 0.18-0.21 across four runs)
 Russian transcription: PASSED (coherent Cyrillic; WER not measured, no matching reference)
 ```
 
-The T4 result required a repository-supplied deploy profile, [`configs/higgs_multimodal_qwen3_turing.yaml`](configs/higgs_multimodal_qwen3_turing.yaml); neither Boson nor either serving stack claims Turing support.
+**No usable Russian speech has been produced on a T4.** With [`configs/higgs_multimodal_qwen3_turing.yaml`](configs/higgs_multimodal_qwen3_turing.yaml) the vLLM path completes startup and answers every request with a correctly sized, correctly headed 24 kHz mono WAV — whose payload is the two bytes `00 80` repeated end to end, i.e. a constant `-32768`. Basic, control-tag and voice-cloning requests all produce this. Timings were recorded and are reported below as diagnostics only; an RTF for the production of a constant is not a synthesis measurement.
+
+Suspected cause, not yet isolated: `--dtype float16`, which the runner must force because vLLM refuses the checkpoint's declared bfloat16 below compute 8.0, and possibly the `TRITON_ATTN` substitution the same profile makes. Distinguishing "Turing configuration" from "this profile" needs an Ampere-class run, where neither applies. Tracked in [#48](https://github.com/vedmalex/higgs-local-test/issues/48).
+
+Neither Boson nor either serving stack claims Turing support.
 
 ## Benchmark
 
@@ -113,20 +117,26 @@ RTF is processing seconds divided by output audio duration (TTS) or input audio 
 
 | Test | Device | Load | Processing | Audio | RTF | Peak VRAM | Peak RSS |
 | ---- | ------ | ---: | ---------: | ----: | --: | --------: | -------: |
-| TTS basic | CUDA T4 (FP16, vLLM) | 195.70s | 56.02s | 24.04s | 2.330 | 10.45 GB | 2.90 GB |
-| TTS controls | CUDA T4 (FP16, vLLM) | (same server) | 22.62s | 13.68s | 1.654 | 10.45 GB | 2.90 GB |
-| TTS clone | CUDA T4 (FP16, vLLM) | — | — | — | `SKIPPED` | — | — |
 | STT (run 1) | CUDA T4 (FP16) | 81.23s | 10.71s | 60.00s | 0.178 | 5.97 GB | 6.25 GB |
 | STT (run 2) | CUDA T4 (FP16) | 76.94s | 11.69s | 60.00s | 0.195 | 5.97 GB | 6.25 GB |
 | STT (run 3) | CUDA T4 (FP16) | 89.34s | 12.40s | 60.00s | 0.207 | 5.97 GB | 6.25 GB |
+| STT (run 4) | CUDA T4 (FP16) | 92.30s | 11.93s | 60.00s | 0.199 | 5.97 GB | 6.25 GB |
+| TTS all modes | CUDA T4 (FP16, vLLM) | 205.30s | see note | — | not measurable | 11.18 GB | 2.97 GB |
 
-**TTS runs on a T4.** With `configs/higgs_multimodal_qwen3_turing.yaml`, `vllm serve --omni` loaded the model (7.61 GiB of weights, 1.25 GiB KV cache, 10.45 GB device peak of 14.56 GB) and synthesized Russian speech: RTF 2.330 for plain text and 1.654 with control tags, against 7.02 and 12.61 on M1 MLX — roughly 3× and 7.6× faster. TTS load time is the server startup, which is paid once for all requests.
+**TTS has produced no usable audio on a T4.** `vllm serve --omni` completes startup with `configs/higgs_multimodal_qwen3_turing.yaml` (7.61 GiB weights, 1.25 GiB KV cache, 11.18 GB device peak of 14.56 GB) and answers every request 200 with a correctly headed 24 kHz mono WAV. Every sample in every file is `-32768`. Verified byte-wise:
 
-Voice cloning is `SKIPPED`, not failed: vLLM-Omni's speech endpoint answers `Reference audio too long (60.0s). Maximum 30s supported — use a shorter clip.` The repository's reference clip is 60 s, which the M1 MLX path accepts. Supply a shorter clip — [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) recommends 7–12 s — and the runner will attempt it; it now checks the duration up front rather than spending a request to learn this.
+```
+00000020: 0200 1000 6461 7461 809b 1100 0080 0080  ....data........
+00000030: 0080 0080 0080 0080 0080 0080 0080 0080  ................
+```
 
-Three STT runs of the same input give RTF 0.178, 0.195 and 0.207, so read it as approximately 0.18–0.21 — roughly 7–8× faster than the M1 MPS run (1.40) rather than a single exact ratio. WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
+Measured on all three outputs: peak 32768, RMS 32768.0, 100.00% of samples at full scale, one distinct value across the file. For contrast, the repository's own speech reference measures peak 16338, RMS 1989.4, 0.00% at full scale.
 
-The `sglang` backend remains a **documented reproducible failure on T4**: it installs and loads the model, then dies during CUDA graph capture with `KeyError: 'sm_75'` in flashinfer's CUTLASS-DSL RMSNorm, which has no Turing entry. `FLASHINFER_USE_CUDA_NORM=1` is applied below compute 8.0 as flashinfer's documented CUDA-JIT fallback for that path, but whether it carries a T4 through the rest of startup is untested — the vLLM backend made it unnecessary to find out.
+Request timings for the record — **diagnostics, not synthesis measurements**: basic 61.05 s for 24.04 s of output, control tags 25.40 s for 13.68 s, cloning 43.47 s for 18.60 s. `src/tts_cuda.py` now inspects the samples and reports such a job `FAILED`; the earlier `PASSED` results and their RTF figures were wrong and have been removed from this table.
+
+Four STT runs of the same input give RTF 0.178, 0.195, 0.199 and 0.207, so read it as approximately 0.18–0.21 — roughly 7–8× faster than the M1 MPS run (1.40) rather than a single exact ratio. WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
+
+The `sglang` backend fails earlier and differently — a **documented reproducible failure on T4**: it installs and loads the model, then dies during CUDA graph capture with `KeyError: 'sm_75'` in flashinfer's CUTLASS-DSL RMSNorm, which has no Turing entry. `FLASHINFER_USE_CUDA_NORM=1` is applied below compute 8.0 as flashinfer's documented CUDA-JIT fallback for that path, but whether it carries a T4 through the rest of startup is untested — the vLLM backend made it unnecessary to find out.
 
 ## Expected honest outcomes
 

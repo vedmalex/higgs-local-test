@@ -16,6 +16,7 @@ reference is passed. This runner never fabricates a result: an unmet requirement
 reported as SKIPPED with the reason, and a failure keeps its traceback.
 """
 import argparse
+import array
 import base64
 import json
 import os
@@ -237,6 +238,51 @@ def wav_duration(path: Path) -> float:
         return handle.getnframes() / handle.getframerate()
 
 
+def audio_statistics(path: Path) -> dict:
+    """Measure whether a WAV actually contains a varying signal.
+
+    A server can answer 200 with a correctly sized, correctly headed WAV whose
+    every sample is identical. That happened on a T4: the payload was the bytes
+    `00 80` repeated, i.e. a constant -32768. Duration and byte count look
+    healthy there, so only the samples distinguish speech from a dead signal.
+    """
+    with wave.open(str(path), "rb") as handle:
+        width = handle.getsampwidth()
+        frames = handle.readframes(handle.getnframes())
+    if width != 2:
+        return {"checked": False, "reason": f"unsupported sample width {width}"}
+    samples = array.array("h")
+    samples.frombytes(frames[: len(frames) - len(frames) % 2])
+    if not samples:
+        return {"checked": True, "empty": True}
+    peak = max(max(samples), -min(samples))
+    rms = (sum(int(value) * int(value) for value in samples) / len(samples)) ** 0.5
+    full_scale = sum(1 for value in samples if abs(value) > 32000) / len(samples)
+    return {
+        "checked": True, "empty": False, "samples": len(samples),
+        "peak": peak, "rms": round(rms, 1),
+        "full_scale_fraction": round(full_scale, 6),
+        "distinct_values_in_first_4096": len(set(samples[:4096])),
+    }
+
+
+def audio_defect(statistics: dict) -> str | None:
+    """Return why the audio is unusable, or None when it looks like a signal."""
+    if not statistics.get("checked"):
+        return None
+    if statistics.get("empty"):
+        return "the WAV contains no samples"
+    if statistics["distinct_values_in_first_4096"] <= 1:
+        return (f"the signal is constant (one value repeated, "
+                f"peak={statistics['peak']})")
+    if statistics["full_scale_fraction"] > 0.9:
+        return (f"{statistics['full_scale_fraction']:.2%} of samples sit at full scale — "
+                "saturated output, not speech")
+    if statistics["peak"] < 64:
+        return f"the signal is silent (peak={statistics['peak']})"
+    return None
+
+
 def wait_for_server(base_url: str, process: subprocess.Popen, timeout: float,
                     name: str = "server") -> None:
     import urllib.error
@@ -277,14 +323,22 @@ def synthesize(base_url: str, payload: dict, destination: Path, timeout: float) 
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(audio_bytes)
     duration = wav_duration(destination)
-    return {
-        "status": "PASSED",
+    statistics = audio_statistics(destination)
+    defect = audio_defect(statistics)
+    result = {
+        "status": "FAILED" if defect else "PASSED",
         "processing_seconds": processing,
         "audio_duration_seconds": duration,
         "rtf": processing / duration if duration else None,
         "output": str(destination),
         "output_bytes": len(audio_bytes),
+        "audio_statistics": statistics,
     }
+    if defect:
+        # An RTF for a constant signal is a number about nothing. Keep the timing
+        # visible for diagnosis, but never let the job count as a pass.
+        result["reason"] = f"the server returned audio that is not speech: {defect}"
+    return result
 
 
 def build_jobs(args, model_dir: str) -> list[dict]:
