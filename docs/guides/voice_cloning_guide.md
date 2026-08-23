@@ -56,6 +56,41 @@ Higgs Audio v3 использует механизм **Zero-Shot In-Context Lear
 5. **Формат аудио**:
    - Моно, 16 кГц или 24 кГц WAV (16-bit PCM).
 
+### Конвертация записи в нужный формат
+
+Диктофон телефона обычно выдаёт `.m4a` (AAC). Приводим к формату из правила 5:
+
+```bash
+ffmpeg -hide_banner -loglevel error -y \
+  -i samples/reference.m4a \
+  -ac 1 -ar 24000 -c:a pcm_s16le \
+  samples/reference.wav
+```
+
+Проверка результата:
+
+```bash
+ffprobe -v error -show_entries format=duration \
+  -show_entries stream=codec_name,sample_rate,channels,bits_per_sample \
+  -of default=noprint_wrappers=1 samples/reference.wav
+```
+
+Ожидаем `pcm_s16le`, `sample_rate=24000`, `channels=1`, `bits_per_sample=16`.
+Исходный `.m4a` в Git не попадает — это пользовательское аудио.
+
+### Ограничение длительности на CUDA
+
+Путь MLX на M1 принимает эталон любой длины (проверено на 60 с). Речевой эндпоинт
+vLLM-Omni — нет:
+
+```text
+Reference audio too long (60.0s). Maximum 30s supported — use a shorter clip.
+```
+
+`src/tts_cuda.py` измеряет длительность до отправки запроса и сообщает `SKIPPED`
+с указанием измеренной длины и лимита бэкенда, вместо того чтобы тратить запрос.
+Правило 7–12 секунд удовлетворяет оба стенда — держитесь его.
+
 ---
 
 ## 4. Как сохранить и переиспользовать профиль голоса (Voice Profile)
