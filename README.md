@@ -52,7 +52,7 @@ The local M1 run and the Colab run do not share an implementation. On Apple Sili
 
 | Backend | Server | Notes |
 | --- | --- | --- |
-| `vllm` (default) | `vllm serve --omni` from [vllm-omni](https://github.com/vllm-project/vllm-omni) | Supports Python 3.13, runs the Higgs stages eager, does not reach flashinfer's CuTe kernels. Voice reference passed as a `data:` base64 URL. |
+| `vllm` (default) | `vllm serve --omni` from [vllm-omni](https://github.com/vllm-project/vllm-omni) | Supports Python 3.13, runs the Higgs stages eager, does not reach flashinfer's CuTe kernels. Installed with `uv` as `vllm==0.26.0 --torch-backend=auto` then `vllm-omni==0.26.0`, in that order — the vllm-omni wheel does not declare `vllm` as a dependency. Voice reference passed as a `data:` base64 URL. |
 | `sglang` | `sgl-omni serve` — the path named on the model card | Needs Python <3.13 and CUDA graph capture, which fails on a T4 with `KeyError: 'sm_75'`. Voice reference read from an allowlisted directory. |
 
 Neither stack claims Turing support, so a T4 remains an experiment — but nothing identified in advance rules out the vLLM path, unlike the SGLang one. Below compute 8.0 the runner passes `--dtype float16`, because the checkpoint declares bfloat16 and vLLM refuses it on pre-Ampere hardware. `--min-capability` turns the expectation into a deliberate skip, `--server-arg KEY=VALUE` and `--server-env KEY=VALUE` pass extra server flags and environment variables through.
