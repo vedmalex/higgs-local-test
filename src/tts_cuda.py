@@ -16,20 +16,26 @@ reference is passed. This runner never fabricates a result: an unmet requirement
 reported as SKIPPED with the reason, and a failure keeps its traceback.
 """
 import argparse
-import array
 import base64
 import json
 import os
 import platform
-import resource
 import shutil
-import signal
 import subprocess
-import threading
 import time
 import traceback
-import wave
 from pathlib import Path
+
+from tts_cuda_common import (
+    BF16_CAPABILITY,
+    DeviceMemorySampler,
+    gpu_facts,
+    peak_memory,
+    synthesize,
+    terminate_server,
+    wait_for_server,
+    wav_duration,
+)
 
 DEFAULT_BACKEND = "vllm"
 MODEL_ID = "bosonai/higgs-tts-3-4b"
@@ -47,9 +53,6 @@ NORM_FALLBACK_BELOW_CAPABILITY = (8, 0)
 # "Reference audio too long (60.0s). Maximum 30s supported — use a shorter clip."
 # docs/guides/voice_cloning_guide.md recommends 7-12s anyway.
 MAX_REFERENCE_SECONDS = {"vllm": 30.0, "sglang": None}
-
-# Below this, bfloat16 has no hardware support and vLLM refuses to load with it.
-BF16_CAPABILITY = (8, 0)
 
 # Below this, vLLM's own FlashInfer gate rejects the attention backend that
 # vllm-omni's default Higgs deploy profile pins, aborting startup with
@@ -75,82 +78,6 @@ CONTROL_TEXT = (
     "<|emotion:enthusiasm|><|prosody:expressive_high|>Это важная и радостная проверка! "
     "<|prosody:long_pause|><|style:whispering|>А теперь тихое завершение."
 )
-
-
-def peak_memory() -> dict:
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return {"peak_host_rss_bytes": rss if platform.system() == "Darwin" else rss * 1024}
-
-
-class DeviceMemorySampler:
-    """Samples device-wide VRAM use via nvidia-smi.
-
-    The weights live in the `sgl-omni` server process, not in this one, so
-    `torch.cuda.max_memory_allocated()` here would report roughly zero. Only a
-    device-wide sample describes what the TTS stage actually occupies.
-    """
-
-    def __init__(self, interval: float = 2.0) -> None:
-        self.interval = interval
-        self.peak_bytes = 0
-        self.samples = 0
-        self._stop = threading.Event()
-        self._started = False
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-
-    def _sample(self) -> None:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=20,
-        )
-        if result.returncode != 0:
-            return
-        used_mib = max(int(line) for line in result.stdout.split() if line.isdigit())
-        self.peak_bytes = max(self.peak_bytes, used_mib * 1024 * 1024)
-        self.samples += 1
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self.interval):
-            try:
-                self._sample()
-            except Exception:
-                # A sampling failure must never mask the benchmark result.
-                pass
-
-    def __enter__(self) -> "DeviceMemorySampler":
-        self._thread.start()
-        self._started = True
-        return self
-
-    def __exit__(self, *exc_info) -> None:
-        self._stop.set()
-        if self._started:
-            self._thread.join(timeout=self.interval + 5)
-
-    def report(self) -> dict:
-        if not self.samples:
-            return {"peak_device_vram_bytes": None,
-                    "peak_device_vram_note": "nvidia-smi sampling produced no reading"}
-        return {"peak_device_vram_bytes": self.peak_bytes,
-                "peak_device_vram_samples": self.samples,
-                "peak_device_vram_note": "device-wide nvidia-smi peak while the server was alive"}
-
-
-def gpu_facts() -> dict:
-    try:
-        import torch
-    except ImportError as exc:
-        return {"gate": "torch_missing", "detail": repr(exc)}
-    if not torch.cuda.is_available():
-        return {"gate": "no_cuda", "torch": torch.__version__}
-    props = torch.cuda.get_device_properties(0)
-    return {
-        "torch": torch.__version__,
-        "cuda_device": props.name,
-        "cuda_capability": f"{props.major}.{props.minor}",
-        "cuda_capability_tuple": (props.major, props.minor),
-        "cuda_total_memory_bytes": props.total_memory,
-    }
 
 
 def check_requirements(backend: str, min_capability: tuple[int, int] | None) -> tuple[bool, str, dict]:
@@ -233,56 +160,6 @@ def reference_payload(backend: str, ref_audio: Path, ref_text: str) -> dict:
     return {"references": [{"audio_path": str(ref_audio.resolve()), "text": ref_text}]}
 
 
-def wav_duration(path: Path) -> float:
-    with wave.open(str(path), "rb") as handle:
-        return handle.getnframes() / handle.getframerate()
-
-
-def audio_statistics(path: Path) -> dict:
-    """Measure whether a WAV actually contains a varying signal.
-
-    A server can answer 200 with a correctly sized, correctly headed WAV whose
-    every sample is identical. That happened on a T4: the payload was the bytes
-    `00 80` repeated, i.e. a constant -32768. Duration and byte count look
-    healthy there, so only the samples distinguish speech from a dead signal.
-    """
-    with wave.open(str(path), "rb") as handle:
-        width = handle.getsampwidth()
-        frames = handle.readframes(handle.getnframes())
-    if width != 2:
-        return {"checked": False, "reason": f"unsupported sample width {width}"}
-    samples = array.array("h")
-    samples.frombytes(frames[: len(frames) - len(frames) % 2])
-    if not samples:
-        return {"checked": True, "empty": True}
-    peak = max(max(samples), -min(samples))
-    rms = (sum(int(value) * int(value) for value in samples) / len(samples)) ** 0.5
-    full_scale = sum(1 for value in samples if abs(value) > 32000) / len(samples)
-    return {
-        "checked": True, "empty": False, "samples": len(samples),
-        "peak": peak, "rms": round(rms, 1),
-        "full_scale_fraction": round(full_scale, 6),
-        "distinct_values_in_first_4096": len(set(samples[:4096])),
-    }
-
-
-def audio_defect(statistics: dict) -> str | None:
-    """Return why the audio is unusable, or None when it looks like a signal."""
-    if not statistics.get("checked"):
-        return None
-    if statistics.get("empty"):
-        return "the WAV contains no samples"
-    if statistics["distinct_values_in_first_4096"] <= 1:
-        return (f"the signal is constant (one value repeated, "
-                f"peak={statistics['peak']})")
-    if statistics["full_scale_fraction"] > 0.9:
-        return (f"{statistics['full_scale_fraction']:.2%} of samples sit at full scale — "
-                "saturated output, not speech")
-    if statistics["peak"] < 64:
-        return f"the signal is silent (peak={statistics['peak']})"
-    return None
-
-
 def fp16_cast_diagnostics(log_path: Path) -> dict:
     """Count vLLM's per-stage bf16->fp16 downcast log line.
 
@@ -306,64 +183,6 @@ def fp16_cast_diagnostics(log_path: Path) -> dict:
         1: "one stage cast to fp16 -- consistent with the stage 1 codec decoder staying fp32",
     }.get(count, f"{count} stages cast to fp16 -- the codec decoder is likely still fp16 (#48)")
     return {"fp16_cast_count": count, "fp16_cast_note": note}
-
-
-def wait_for_server(base_url: str, process: subprocess.Popen, timeout: float,
-                    name: str = "server") -> None:
-    import urllib.error
-    import urllib.request
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError(f"{name} exited with code {process.returncode} before becoming ready")
-        try:
-            with urllib.request.urlopen(f"{base_url}/health", timeout=5) as response:
-                if response.status == 200:
-                    return
-        except (urllib.error.URLError, OSError):
-            time.sleep(3)
-    raise TimeoutError(f"sgl-omni did not become ready within {timeout:.0f}s")
-
-
-def synthesize(base_url: str, payload: dict, destination: Path, timeout: float) -> dict:
-    import urllib.error
-    import urllib.request
-
-    request = urllib.request.Request(
-        f"{base_url}/v1/audio/speech",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    started = time.perf_counter()
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            audio_bytes = response.read()
-    except urllib.error.HTTPError as error:
-        # The body says what is actually wrong ("Reference audio too long (60.0s)…").
-        # Raising the bare status would hide it and send the operator to the log.
-        detail = error.read().decode("utf-8", "replace").strip()
-        raise RuntimeError(f"HTTP {error.code} from {error.url}: {detail}") from error
-    processing = time.perf_counter() - started
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(audio_bytes)
-    duration = wav_duration(destination)
-    statistics = audio_statistics(destination)
-    defect = audio_defect(statistics)
-    result = {
-        "status": "FAILED" if defect else "PASSED",
-        "processing_seconds": processing,
-        "audio_duration_seconds": duration,
-        "rtf": processing / duration if duration else None,
-        "output": str(destination),
-        "output_bytes": len(audio_bytes),
-        "audio_statistics": statistics,
-    }
-    if defect:
-        # An RTF for a constant signal is a number about nothing. Keep the timing
-        # visible for diagnosis, but never let the job count as a pass.
-        result["reason"] = f"the server returned audio that is not speech: {defect}"
-    return result
 
 
 def build_jobs(args, model_dir: str) -> list[dict]:
@@ -559,15 +378,9 @@ def main() -> None:
         report.update({"status": "FAILED", "exception": repr(exc), "traceback": traceback.format_exc(),
                        "server_log": str(log_path), "results": report.get("results", [])})
     finally:
-        if server is not None and server.poll() is None:
-            # The server holds every byte of TTS VRAM; terminating its process group is
-            # what actually frees the device before the next stage.
-            os.killpg(os.getpgid(server.pid), signal.SIGTERM)
-            try:
-                server.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(server.pid), signal.SIGKILL)
-                server.wait(timeout=60)
+        # The server holds every byte of TTS VRAM; terminating its process group is
+        # what actually frees the device before the next stage.
+        terminate_server(server)
         sampler.__exit__(None, None, None)
         report.update(peak_memory())
         report.update(sampler.report())
