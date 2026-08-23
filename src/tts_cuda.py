@@ -28,6 +28,13 @@ MODEL_ID = "bosonai/higgs-tts-3-4b"
 # Immutable revision of the weights this benchmark is pinned to.
 REVISION = "7556c17e05201fccd9c8cc120bc216dcc7b5d561"
 
+# Observed on a Tesla T4 (sm75): the server loads the weights, then dies during CUDA
+# graph capture inside flashinfer's CUTLASS-DSL RMSNorm with `KeyError: 'sm_75'`
+# (cutlass/base_dsl/arch.py). flashinfer documents `FLASHINFER_USE_CUDA_NORM=1` as the
+# CUDA-JIT fallback for exactly that path, and SGLang-Omni honours a pre-set value —
+# it only auto-applies it for sm100+. So the runner sets it for pre-Ampere devices.
+NORM_FALLBACK_BELOW_CAPABILITY = (8, 0)
+
 # SGLang-Omni publishes no supported-hardware floor. Its pinned flash-attn-4 and
 # flashinfer wheels target recent datacenter architectures, and `higgs_tts/sampler.py`
 # calls flashinfer renorm kernels, so an older device such as Colab's T4 (compute 7.5)
@@ -152,8 +159,9 @@ def check_requirements(min_capability: tuple[int, int] | None) -> tuple[bool, st
             "SGLang-Omni states no supported-hardware floor, but its pinned flash-attn-4 / "
             "flashinfer wheels target newer architectures, so this run may fail during "
             "install or server startup. Any failure is recorded with its log rather than "
-            "hidden. A `triton` or `torch_native` attention backend may help: pass it "
-            "through with --server-arg attention_backend=triton."
+            "hidden. The runner already applies FLASHINFER_USE_CUDA_NORM=1 below "
+            "compute 8.0; if graph capture still fails, try "
+            "--server-arg talker-cuda-graph=off."
         )
     if min_capability is not None and capability < min_capability:
         return False, (
@@ -277,7 +285,10 @@ def main() -> None:
                              "run and records the real outcome.")
     parser.add_argument("--server-arg", action="append", default=[], metavar="KEY=VALUE",
                         help="Extra `sgl-omni serve` argument, repeatable "
-                             "(e.g. --server-arg attention_backend=triton).")
+                             "(e.g. --server-arg talker-cuda-graph=off).")
+    parser.add_argument("--server-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="Extra environment variable for the server process, "
+                             "repeatable. Overrides the runner's own defaults.")
     parser.add_argument("--request-timeout", type=float, default=900.0)
     args = parser.parse_args()
 
@@ -323,6 +334,21 @@ def main() -> None:
         report["model_dir"] = model_dir
         report["weights_download_seconds"] = time.perf_counter() - download_started
 
+        server_env = os.environ.copy()
+        capability = facts["cuda_capability_tuple"]
+        if capability < NORM_FALLBACK_BELOW_CAPABILITY:
+            server_env["FLASHINFER_USE_CUDA_NORM"] = "1"
+        for item in args.server_env:
+            key, _, value = item.partition("=")
+            server_env[key.strip()] = value.strip()
+        applied = {k: server_env[k] for k in ("FLASHINFER_USE_CUDA_NORM",)
+                   if k in server_env}
+        applied.update({item.partition("=")[0].strip(): item.partition("=")[2].strip()
+                        for item in args.server_env})
+        report["server_env"] = applied
+        if applied:
+            print(f"Переменные окружения сервера: {applied}")
+
         command = ["sgl-omni", "serve", "--model-path", model_dir, "--port", str(args.port),
                    "--host", "127.0.0.1"]
         if args.mem_fraction_static is not None:
@@ -341,7 +367,7 @@ def main() -> None:
         with log_path.open("w", encoding="utf-8") as log_file:
             server = subprocess.Popen(
                 command, stdout=log_file, stderr=subprocess.STDOUT,
-                env=os.environ.copy(), start_new_session=True,
+                env=server_env, start_new_session=True,
             )
             wait_for_server(base_url, server, args.server_timeout)
         report["server_startup_seconds"] = time.perf_counter() - started

@@ -104,6 +104,25 @@ Measurements recorded from real sequential runs on native Apple Silicon M1 (16 G
 
 RTF is processing seconds divided by output audio duration (TTS) or input audio duration (STT). Values below 1.0 are faster than real time.
 
+### Google Colab, Tesla T4 (recorded 2026-08-23)
+
+| Test | Device | Load | Processing | Audio | RTF | Peak VRAM | Peak RSS |
+| ---- | ------ | ---: | ---------: | ----: | --: | --------: | -------: |
+| STT | CUDA T4 (FP16) | 81.23s | 10.71s | 60.00s | 0.178 | 5.97 GB | 6.25 GB |
+| TTS (all modes) | CUDA T4 | — | — | — | — | 12.95 GB peak during startup | — |
+
+STT transcribed 60 s of Russian speech 7.9× faster than the M1 MPS run (0.178 vs 1.40). WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
+
+TTS is a **documented reproducible failure on T4, not a pass and not a skip**. `sglang-omni==0.1.3` installed on a `uv`-fetched Python 3.12, the weights downloaded, and `sgl-omni serve` loaded the model — then died during CUDA graph capture:
+
+```
+File ".../flashinfer/norm/kernels/rmsnorm.py", line 1148, in _get_compiled_rmsnorm_kernel
+File ".../cutlass/base_dsl/arch.py", line 106, in from_string
+KeyError: 'sm_75'
+```
+
+flashinfer's CUTLASS-DSL RMSNorm kernel has no entry for Turing. flashinfer documents `FLASHINFER_USE_CUDA_NORM=1` as the CUDA-JIT fallback for that exact path, and SGLang-Omni honours a pre-set value while auto-applying it only for sm100+. `src/tts_cuda.py` now sets it for anything below compute 8.0; whether that carries the T4 through the rest of startup is not yet measured.
+
 ## Expected honest outcomes
 
 Success or partial success are both valid. A load-only result is not a pass. Keep TTS and STT in separate processes and never try to keep both models resident.
