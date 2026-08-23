@@ -395,3 +395,37 @@ Sources:
 - [vLLM-Omni Higgs pipeline](https://github.com/vllm-project/vllm-omni/tree/main/vllm_omni/model_executor/models/higgs_audio_v3)
 - [vLLM-Omni online speech client example](https://github.com/vllm-project/vllm-omni/blob/main/examples/online_serving/text_to_speech/higgs_audio_v3/batch_speech_client.py)
 - [vLLM-Omni packaging metadata](https://github.com/vllm-project/vllm-omni/blob/main/pyproject.toml)
+
+### vLLM-Omni install path, measured on Colab T4 2026-08-23
+
+`pip install vllm-omni` is **not** a working install, for two independent reasons found by
+running it and by reading the published wheel:
+
+1. It failed while building `openai-whisper` — sdist-only, and the download size in the log
+   (803.2 kB) matches `openai_whisper-20250625.tar.gz` byte for byte (803191). The
+   underlying build error was lost because the install ran with `-q`, leaving only
+   "Getting requirements to build wheel did not run successfully / See above for output".
+   The same install succeeds locally in an equivalent `--without-pip --system-site-packages`
+   venv, so the cause is Colab-specific and still unidentified.
+2. `vllm_omni-0.26.0-py3-none-any.whl` declares 84 `Requires-Dist` entries and **`vllm` is
+   not among them**. vLLM must be installed separately, before vllm-omni.
+
+The documented path (`docs/getting_started/installation/gpu/cuda.inc.md`) is:
+
+```bash
+uv pip install vllm==0.26.0 --torch-backend=auto
+uv pip install vllm-omni
+```
+
+`--torch-backend=auto` matters: the 0.26.0 vLLM wheels ship CUDA 13.0 binaries by default.
+Colab reports driver 580.82.07 / CUDA 13.0, so those binaries match the host, but the flag
+is what keeps the choice correct rather than accidental.
+
+Consequences for this repository: the notebook installs the TTS stack through `uv`, in the
+documented order, and never with `-q` — a suppressed installer error costs a whole GPU
+session.
+
+Sources:
+
+- [vLLM-Omni CUDA installation](https://github.com/vllm-project/vllm-omni/blob/main/docs/getting_started/installation/gpu/cuda.inc.md)
+- [vLLM-Omni CUDA requirements](https://github.com/vllm-project/vllm-omni/blob/main/requirements/cuda.txt)
