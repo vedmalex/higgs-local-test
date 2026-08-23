@@ -27,6 +27,28 @@
 # 3. stage 0 `gpu_memory_utilization: 0.6` -> 0.62, stage 1 `0.25` -> 0.30.
 #    Same reason: absolute headroom, not fraction, is what runs out here.
 #
+# 4. stage 1 `engine_extras.dtype: float32` (weights and activations stay fp32
+#    for the codec decoder only; stage 0 keeps the pipeline-wide fp16).
+#    Every recorded T4 run wrote WAV files where every sample is int16 -32768
+#    (min == max) -- the clip signature of NaN/-inf, not of a zero or
+#    mis-shaped tensor (#48). `model.py:2123` logs "Casting torch.bfloat16 to
+#    torch.float16" twice per run: once for the talker (stage 0), once for
+#    HiggsAudioV3Code2WavForConditionalGeneration (stage 1). The global
+#    `--dtype float16`, forced because FlashInfer needs compute capability
+#    >= 8.0, silently also casts the codec decoder. vllm-omni fixed the
+#    identical failure mode -- fp16 attention/MLP intermediates overflowing on
+#    a fp16-only GPU -- for a sibling model in
+#    https://github.com/vllm-project/vllm-omni/pull/3253, tested on the same
+#    T4/sm75 class. `higgs_audio_v3_code2wav.py` on vllm-omni main (sha
+#    45b5d68) casts its RVQ input to the decoder weights' own dtype and only
+#    casts the final PCM to float32 after decoding, with no upcast protection
+#    inside -- unlike the code predictor #3253 fixed. This key is undocumented
+#    (vllm-omni's stage-config docs describe `dtype` as pipeline-wide and say
+#    unknown per-stage keys fall through to `engine_extras` and are forwarded
+#    to the stage engine, but do not state whether that overrides the
+#    top-level `--dtype`); confirm on the next run that "Casting ... to
+#    torch.float16" now appears only once, for stage 0.
+#
 # This profile is a hypothesis about a device neither upstream nor Boson claims to
 # support. Whether it produces audio is an empirical question; the runner records
 # the outcome either way.
@@ -73,6 +95,8 @@ stages:
     max_num_seqs: 1
     gpu_memory_utilization: 0.30
     enforce_eager: true
+    engine_extras:
+      dtype: float32
     trust_remote_code: true
     enable_prefix_caching: false
     async_scheduling: false
