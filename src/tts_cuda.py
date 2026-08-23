@@ -45,6 +45,13 @@ NORM_FALLBACK_BELOW_CAPABILITY = (8, 0)
 # Below this, bfloat16 has no hardware support and vLLM refuses to load with it.
 BF16_CAPABILITY = (8, 0)
 
+# Below this, vLLM's own FlashInfer gate rejects the attention backend that
+# vllm-omni's default Higgs deploy profile pins, aborting startup with
+# "Reason: ['compute capability not supported']". This repository ships a profile
+# that selects TRITON_ATTN instead, which accepts every capability.
+TURING_DEPLOY_CONFIG = (Path(__file__).resolve().parents[1]
+                        / "configs/higgs_multimodal_qwen3_turing.yaml")
+
 # SGLang-Omni publishes no supported-hardware floor. Its pinned flash-attn-4 and
 # flashinfer wheels target recent datacenter architectures, and `higgs_tts/sampler.py`
 # calls flashinfer renorm kernels, so an older device such as Colab's T4 (compute 7.5)
@@ -190,6 +197,10 @@ def server_command(backend: str, model_dir: str, args, capability: tuple) -> lis
         if capability < BF16_CAPABILITY:
             # The checkpoint declares bfloat16; vLLM refuses it below compute 8.0.
             command += ["--dtype", "float16"]
+            if args.deploy_config is None and TURING_DEPLOY_CONFIG.exists():
+                command += ["--deploy-config", str(TURING_DEPLOY_CONFIG)]
+        if args.deploy_config is not None:
+            command += ["--deploy-config", str(args.deploy_config)]
         if args.mem_fraction_static is not None:
             command += ["--gpu-memory-utilization", str(args.mem_fraction_static)]
         return command
@@ -221,14 +232,15 @@ def wav_duration(path: Path) -> float:
         return handle.getnframes() / handle.getframerate()
 
 
-def wait_for_server(base_url: str, process: subprocess.Popen, timeout: float) -> None:
+def wait_for_server(base_url: str, process: subprocess.Popen, timeout: float,
+                    name: str = "server") -> None:
     import urllib.error
     import urllib.request
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"sgl-omni exited with code {process.returncode} before becoming ready")
+            raise RuntimeError(f"{name} exited with code {process.returncode} before becoming ready")
         try:
             with urllib.request.urlopen(f"{base_url}/health", timeout=5) as response:
                 if response.status == 200:
@@ -336,6 +348,11 @@ def main() -> None:
     parser.add_argument("--server-arg", action="append", default=[], metavar="KEY=VALUE",
                         help="Extra `sgl-omni serve` argument, repeatable "
                              "(e.g. --server-arg talker-cuda-graph=off).")
+    parser.add_argument("--deploy-config", type=Path, default=None,
+                        help="vLLM-Omni deploy YAML. Below compute 8.0 the runner "
+                             "defaults to configs/higgs_multimodal_qwen3_turing.yaml, "
+                             "because the auto-discovered profile pins an attention "
+                             "backend that pre-Ampere devices reject.")
     parser.add_argument("--server-env", action="append", default=[], metavar="KEY=VALUE",
                         help="Extra environment variable for the server process, "
                              "repeatable. Overrides the runner's own defaults.")
@@ -372,7 +389,7 @@ def main() -> None:
     base_url = f"http://127.0.0.1:{args.port}"
     server = None
     sampler = DeviceMemorySampler()
-    log_path = args.output_dir / "sgl_omni_server.log"
+    log_path = args.output_dir / f"{args.backend}_server.log"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     try:
         # `sgl-omni serve` has no --revision flag, so the pin is applied by resolving
@@ -404,6 +421,8 @@ def main() -> None:
             key, _, value = extra.partition("=")
             command += [f"--{key.strip().lstrip('-').replace('_', '-')}", value.strip()]
         report["server_command"] = command
+        if "--deploy-config" in command:
+            report["deploy_config"] = command[command.index("--deploy-config") + 1]
 
         sampler.__enter__()
         started = time.perf_counter()
@@ -412,7 +431,7 @@ def main() -> None:
                 command, stdout=log_file, stderr=subprocess.STDOUT,
                 env=server_env, start_new_session=True,
             )
-            wait_for_server(base_url, server, args.server_timeout)
+            wait_for_server(base_url, server, args.server_timeout, name=command[0])
         report["server_startup_seconds"] = time.perf_counter() - started
 
         results = []

@@ -429,3 +429,55 @@ Sources:
 
 - [vLLM-Omni CUDA installation](https://github.com/vllm-project/vllm-omni/blob/main/docs/getting_started/installation/gpu/cuda.inc.md)
 - [vLLM-Omni CUDA requirements](https://github.com/vllm-project/vllm-omni/blob/main/requirements/cuda.txt)
+
+### vLLM-Omni on a T4: measured 2026-08-23 07:40
+
+The documented install works. `uv pip install vllm==0.26.0 --torch-backend=auto` followed
+by `uv pip install vllm-omni==0.26.0` completed on Colab's Python 3.13, the weights
+resolved in 59 s, and `vllm serve --omni --dtype float16` started.
+
+Startup then failed at model construction, with only ~1.1 GB of device memory touched:
+
+```
+vllm_omni/model_executor/models/higgs_audio_v3/higgs_audio_v3_talker.py:159  Qwen3Model(...)
+  vllm/model_executor/models/qwen3.py:133   self.attn = attn_cls(...)
+    vllm/v1/attention/selector.py:170       get_attn_backend(...)
+      vllm/platforms/cuda.py:417            raise ValueError
+ValueError: Selected backend AttentionBackendEnum.FLASHINFER is not valid for this
+configuration. Reason: ['compute capability not supported']
+```
+
+The backend is not auto-selected — `vllm_omni/deploy/higgs_multimodal_qwen3.yaml` pins
+`attention_backend: FLASHINFER` on stage 0, and that file is auto-discovered from HF
+`model_type=higgs_multimodal_qwen3`. In vLLM 0.26.0,
+`FlashInferBackend.supports_compute_capability` requires `>= (8, 0)`; the source comment
+records that the floor was deliberately raised from 7.5 while
+flashinfer-ai/flashinfer#3620 is open. `TritonAttentionBackend.supports_compute_capability`
+returns `True` unconditionally.
+
+`vllm serve --omni` accepts `--deploy-config PATH`, so the profile is replaceable. This
+repository ships `configs/higgs_multimodal_qwen3_turing.yaml`, applied automatically below
+compute 8.0, which changes four values from upstream and documents why each one:
+`TRITON_ATTN` instead of FLASHINFER, and reduced concurrency and context budget
+(`max_num_seqs` 16 to 1, `max_num_batched_tokens` 4096 to 2048, `max_model_len` 8192 to
+4096) because upstream targets 1xH100 where stage 0's 0.6 share is ~48 GB, while on a
+14.56 GB T4 the same share is ~8.7 GB and the fp16 talker weights nearly fill it.
+
+Also observed and handled by vLLM itself, not fatal:
+
+```
+WARNING topk_topp_sampler.py:62 FlashInfer top-p/top-k sampling unavailable:
+unsupported compute capability 7.5; falling back.
+```
+
+Whether the Turing profile reaches audio is still unmeasured. What is now established is
+that the T4 obstacle in this stack is configuration-level, not a missing kernel: unlike
+SGLang-Omni's `KeyError: 'sm_75'` inside a CuTe kernel lookup, every component vLLM needs
+here has a Turing-capable implementation available.
+
+Sources:
+
+- [vLLM-Omni default Higgs deploy profile](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/deploy/higgs_multimodal_qwen3.yaml)
+- [vLLM FlashInfer capability gate](https://github.com/vllm-project/vllm/blob/v0.26.0/vllm/v1/attention/backends/flashinfer.py)
+- [vLLM Triton attention capability gate](https://github.com/vllm-project/vllm/blob/v0.26.0/vllm/v1/attention/backends/triton_attn.py)
+- [vLLM-Omni serve CLI (`--deploy-config`)](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/entrypoints/cli/serve.py)
