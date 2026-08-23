@@ -143,14 +143,126 @@ Sources:
 - [vLLM-Omni Qwen3-TTS support PR #895](https://github.com/vllm-project/vllm-omni/pull/895)
 - [vLLM-Omni default Qwen3-TTS deploy profile](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/deploy/qwen3_tts.yaml)
 
-## T4 / Turing compatibility — not documented, must be measured
+## T4 / Turing compatibility — MEASURED on a real Colab T4 (2026-08-23)
+
+**Result: FAILED for every job on both `0.6b-base` and `0.6b-customvoice`.**
+`src/tts_qwen_cuda.py` was actually run on a Colab Tesla T4 (compute 7.5,
+vllm-omni 0.26.0, `--dtype float16` forced as this project's runner already
+does below compute 8.0). Full server logs recovered from Google Drive
+(`qwen_vllm_server_0.6b-customvoice.log`; the `0.6b-base` run's log was lost to
+a since-fixed filename-clobbering bug, see below) show:
+
+- **The FlashInfer compute-8.0 abort predicted as a possibility below does
+  NOT happen.** The log's own line confirms it: `Using TRITON_ATTN attention
+  backend out of potential backends: ['TRITON_ATTN', 'FLEX_ATTENTION']`. So
+  the open question from the first research pass is answered: vLLM's
+  auto-selector avoided FlashInfer on this T4 without any deploy-config
+  override, unlike Higgs.
+- **A different, previously unmeasured failure occurs instead**, on every
+  synthesis request, at the point where the Talker stage batches per-request
+  embeddings:
+
+  ```
+  File ".../vllm_omni/worker/gpu_model_runner.py", line 1723, in flush_decode_batch
+      inputs_embeds.index_copy_(0, offsets_t, req_embeds)
+  RuntimeError: index_copy_(): self and source expected to have the same dtype, but got (self) Half and (source) BFloat16
+  ```
+
+  `inputs_embeds` follows the forced `--dtype float16`, but `req_embeds` (the
+  embeddings for a specific request, produced by a submodule this research
+  pass has not yet localized in vllm-omni's Qwen3-TTS integration — see the
+  "Выводы" section below for what to check next) stays in the checkpoint's
+  native `bfloat16` regardless of that global override. This is an
+  `EngineDeadError` that kills the whole server process for every subsequent
+  request in that run, not a silent bad-audio case like Higgs's #48 — it is a
+  harder failure (a crash, not degenerate output), but the same root category:
+  a component that the global `--dtype float16` override does not actually
+  reach on a GPU with no BF16 hardware support.
+- This happened for `qwen_tts_clone` (`0.6b-base`) and for both
+  `qwen_tts_basic` and `qwen_tts_style` (`0.6b-customvoice`) — i.e. for every
+  attempted request regardless of `task_type`, so it is not specific to voice
+  cloning or to CustomVoice's `instructions` field.
+- Two bugs in this project's own runner were found from this run and are
+  already fixed (`src/tts_qwen_cuda.py`, `fix/52-qwen-t4-run-followups`): (1)
+  `attention_backend_diagnostics()` did a bare-substring search for
+  `"FLASHINFER"` that false-positived on the unrelated
+  `VLLM_USE_FLASHINFER_SAMPLER` env-var name in an unrelated warning line,
+  reporting `FLASHINFER` even though `TRITON_ATTN` was what actually ran; (2)
+  the per-run server log used a fixed filename (`qwen_vllm_server.log`)
+  shared across every `--model-variant`, so the notebook's per-variant loop
+  silently clobbered the previous variant's log — the `0.6b-base` run's full
+  log is lost for exactly this reason. Both are fixed; logs are now named
+  `qwen_vllm_server_<variant>.log` and the diagnostic matches vLLM's actual
+  `"Using X attention backend"` line.
+
+### Where `req_embeds`'s dtype comes from, and related upstream evidence
+
+Reading `vllm_omni/worker/gpu_model_runner.py` at the `v0.26.0` tag
+([source](https://raw.githubusercontent.com/vllm-project/vllm-omni/v0.26.0/vllm_omni/worker/gpu_model_runner.py)):
+`inputs_embeds` is allocated lazily inside `flush_decode_batch` and its dtype
+is copied **from** `req_embeds`, not forced to the engine's configured dtype:
+
+```python
+if inputs_embeds is None:
+    inputs_embeds = torch.empty(
+        (preprocess_input_ids.shape[0], req_embeds.shape[-1]),
+        device=req_embeds.device,
+        dtype=req_embeds.dtype,
+    )
+```
+
+So the crash means two *different* `req_embeds` tensors arrived with two
+different dtypes across calls (one float16, one still bfloat16) — `req_embeds`
+itself comes from an optional per-model hook,
+`getattr(self.model, "preprocess_decode_batch", None)`. Which specific
+Qwen3-TTS submodule that hook calls, and why it doesn't uniformly follow
+`--dtype float16`, was **not resolved** — the model's own `modeling_qwen3_tts`
+source was not reachable via raw GitHub fetch in this research pass. This is
+recorded as unresolved, not guessed.
+
+Two directly relevant, independent upstream data points found:
+
+- **[vllm-omni PR #3253](https://github.com/vllm-project/vllm-omni/pull/3253)
+  (merged)**: "`[Bugfix][Qwen3TTS] Use float32 for code predictor on
+  fp16-only GPUs`" — wraps `CodePredictorBaseModel` in a `torch.amp.autocast`
+  to `float32` specifically when running fp16-only on T4/SM75-class hardware,
+  tested on a `g4dn.xlarge` (T4). This is Qwen3-TTS-specific and already
+  merged, so it likely **is** present in the pinned `vllm-omni==0.26.0` — but
+  it targets the *code predictor* submodule, not whatever produces the
+  Talker-stage `req_embeds` that actually crashed here. It confirms this
+  general class of fp16-only-GPU dtype bug in Qwen3-TTS's vllm-omni
+  integration was already known and partially fixed upstream, in a different
+  submodule than the one this run hit.
+- **[vllm-omni issue #4838](https://github.com/vllm-project/vllm-omni/issues/4838)
+  (open)**: a **different** Omni TTS model (Voxtral TTS) crashes on a T4 with
+  the same error class — "expected scalar type BFloat16 but found Half" —
+  described as "Stage-1 has hardcoded `torch.bfloat16`, Stage-0's fallback to
+  float16 doesn't apply." This is not Qwen3-TTS and does not confirm the exact
+  same code path, but it is independent evidence that this class of
+  "one submodule silently keeps bfloat16 despite a global fp16 override, and
+  it crashes rather than degrades on hardware with no bf16 support" bug is a
+  recurring, still-open pattern in vllm-omni's serving of multi-stage TTS
+  models on Turing-class GPUs — not something specific to this project's
+  configuration.
+- `engine_extras`'s per-stage dtype override (used for Higgs's stage-1 codec
+  decoder in `configs/higgs_multimodal_qwen3_turing.yaml`) is **not
+  documented** anywhere in vllm-omni's docs found by this search — it is only
+  known to work empirically from that existing config. Whether a similar
+  `engine_extras: {dtype: float16}` on Qwen3-TTS's stage 0 would reach the
+  submodule that produces `req_embeds` is unconfirmed and was not testable
+  without a GPU. **No speculative `configs/qwen3_tts_turing.yaml` is added
+  in this pass** — inventing an unverified deploy-config fix and reporting it
+  as a solution would violate this project's own reproducibility rule, and a
+  GPU is required to test whether any override actually reaches the right
+  submodule.
 
 No primary source (model card, `QwenLM/Qwen3-TTS`, vLLM-Omni docs, the Qwen3-TTS
 deploy YAML, or the vLLM-Omni PR/RFC issues found) states a minimum GPU compute
 capability for Qwen3-TTS, and none mentions T4/Turing/sm75 specifically. This
 mirrors Higgs's situation exactly (also undocumented on Turing) — the issue's own
 framing ("diagnostic control on T4") anticipates this gap rather than a resolved
-answer.
+answer. The paragraphs below are the original, pre-run analysis; the actual
+measured result is above.
 
 What is verifiable from the deploy config and the checkpoint metadata:
 
@@ -229,14 +341,27 @@ Follow the same architecture as `src/tts_cuda.py`, not a rewrite:
    gate as Higgs) and log whatever attention backend vLLM actually selects
    (do not assume Triton — read it from the server log, same spirit as
    `fp16_cast_diagnostics`).
-4. **Deploy config**: start with vLLM-Omni's own
-   `vllm_omni/deploy/qwen3_tts.yaml` unmodified (it does not pin FlashInfer, so it
-   may not need a Turing override at all). Add a
-   `configs/qwen3_tts_turing.yaml` **only if** a real T4 run shows a
-   startup-time attention-backend or dtype failure analogous to Higgs's — do not
-   pre-author a speculative override before that evidence exists, unlike the
-   Higgs case where the FlashInfer pin was verified in the upstream YAML before
-   the override was written.
+4. **Deploy config — UPDATED after the real T4 run (2026-08-23)**: the
+   FlashInfer/attention-backend concern this point originally flagged did
+   **not** materialize (TRITON_ATTN was selected correctly, unmodified). A
+   *different* failure did: `RuntimeError: index_copy_(): ... Half ...
+   BFloat16` inside vllm-omni's own `flush_decode_batch`, on every request,
+   independent of `task_type` — see the measured section above. This is
+   evidenced as a known, still-partially-unresolved upstream pattern
+   (merged fix for a *different* Qwen3-TTS submodule in
+   [vllm-omni#3253](https://github.com/vllm-project/vllm-omni/pull/3253); an
+   open, same-symptom issue for a *different* model in
+   [vllm-omni#4838](https://github.com/vllm-project/vllm-omni/issues/4838)),
+   not something this project introduced by misconfiguration. **Still no
+   speculative `configs/qwen3_tts_turing.yaml` is authored**: `engine_extras`'s
+   per-stage dtype override is undocumented, and which submodule actually
+   produces the crashing `req_embeds` tensor was not located in this research
+   pass — writing an unverified override and calling it a fix would be exactly
+   the kind of unearned "PASSED" this project's rules forbid. The next
+   concrete step, when GPU time is available again, is either (a) try
+   `engine_extras: {dtype: float16}` on stage 0 as an experiment and record
+   whether it actually changes anything, or (b) file/track an upstream issue
+   analogous to #4838 but for Qwen3-TTS's Talker-stage `req_embeds` path.
 5. **Payload**: `POST /v1/audio/speech` with `task_type`, `language="Russian"`,
    and `instructions` fields as documented above. Reuse `audio_statistics()` /
    `audio_defect()` from `src/tts_cuda.py` verbatim (import or factor into a
