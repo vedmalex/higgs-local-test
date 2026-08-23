@@ -7,6 +7,11 @@ logs/*
 samples/reference.wav
 samples/reference.txt
 samples/stt_ru.wav
+# Исходные записи для эталона: пользовательское аудио в Git не хранится.
+samples/*.m4a
+samples/*.mp3
+samples/*.flac
+samples/*.ogg
 *.pyc
 __pycache__/
 .hf-helper-cache/
