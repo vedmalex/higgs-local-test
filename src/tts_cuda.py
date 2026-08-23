@@ -132,7 +132,11 @@ def check_requirements(min_capability: tuple[int, int] | None) -> tuple[bool, st
     """
     facts = gpu_facts()
     if facts.get("gate") == "torch_missing":
-        return False, "torch is not installed in this environment", facts
+        return False, (
+            "torch is missing from this environment, which means the SGLang-Omni "
+            "install never completed here — `sglang-omni` pins its own torch. "
+            "Check the pip output from the environment setup step"
+        ), facts
     if facts.get("gate") == "no_cuda":
         return False, "no CUDA device is visible to torch", facts
     if shutil.which("sgl-omni") is None:
