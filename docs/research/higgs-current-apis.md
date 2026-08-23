@@ -355,3 +355,43 @@ Sources:
 - [flashinfer norm backend switch](https://github.com/flashinfer-ai/flashinfer/blob/main/flashinfer/norm/__init__.py)
 - [SGLang-Omni GPU compatibility defaults](https://github.com/sgl-project/sglang-omni/blob/main/sglang_omni/utils/gpu_compat.py)
 - [SGLang-Omni CUDA-graph stage overrides](https://github.com/sgl-project/sglang-omni/blob/main/sglang_omni/cli/serve.py)
+
+### Second CUDA implementation: vLLM-Omni
+
+Research snapshot: 2026-08-23. Found while looking for a path that a T4 can execute.
+
+`vllm-project/vllm-omni` implements the same model at
+`vllm_omni/model_executor/models/higgs_audio_v3/`, with a maintained recipe at
+`recipes/BosonAI/Higgs-Audio-V3-TTS.md` and a deploy config auto-discovered from HF
+`model_type=higgs_multimodal_qwen3`. Published on PyPI as `vllm-omni`, currently 0.26.0,
+`requires-python >=3.10,<3.14`.
+
+Why it fits this stand better than SGLang-Omni:
+
+- Python 3.13 is in range, so Colab's own interpreter works — no `uv`-fetched 3.12.
+- The recipe states Stage 0 keeps `enforce_eager=true` as its throughput default and
+  Stage 1 must (`@torch.inference_mode` is incompatible with graph capture). The phase
+  that killed `sgl-omni` on a T4 is not entered.
+- No flashinfer CuTe reference appears in the model pipeline, so the `sm_75` arch-enum
+  gap is not on the path.
+- It serves the same `POST /v1/audio/speech` returning WAV bytes.
+
+Request-shape differences that the runner has to encode:
+
+| | SGLang-Omni | vLLM-Omni |
+| --- | --- | --- |
+| Server | `sgl-omni serve --model-path DIR` | `vllm serve MODEL --trust-remote-code --omni` |
+| Voice reference | `references: [{audio_path, text}]`, needs `--allowed-local-media-path` | `ref_audio` as a `data:<mime>;base64,…` URL plus `ref_text` |
+| `model` field | absent | required |
+| VRAM cap flag | `--mem-fraction-static` | `--gpu-memory-utilization` |
+
+The recipe documents 1xH100 only, so Turing support is unclaimed by both stacks. One
+additional pre-Ampere requirement is known from vLLM itself: the checkpoint declares
+bfloat16, which vLLM refuses below compute 8.0, so `--dtype float16` must be passed.
+
+Sources:
+
+- [vLLM-Omni Higgs Audio V3 recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/BosonAI/Higgs-Audio-V3-TTS.md)
+- [vLLM-Omni Higgs pipeline](https://github.com/vllm-project/vllm-omni/tree/main/vllm_omni/model_executor/models/higgs_audio_v3)
+- [vLLM-Omni online speech client example](https://github.com/vllm-project/vllm-omni/blob/main/examples/online_serving/text_to_speech/higgs_audio_v3/batch_speech_client.py)
+- [vLLM-Omni packaging metadata](https://github.com/vllm-project/vllm-omni/blob/main/pyproject.toml)

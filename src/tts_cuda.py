@@ -2,15 +2,21 @@
 """CUDA TTS runner for `bosonai/higgs-tts-3-4b`.
 
 The checkpoint ships no remote code and its `higgs_multimodal_qwen3` architecture is
-not implemented in `transformers`, so there is no plain `from_pretrained` +
-`generate` path. The model card documents exactly one first-party CUDA path:
-SGLang-Omni (`sgl-omni serve`), whose `higgs_tts` model implementation owns the
-multi-codebook decoding and the vocoder.
+not implemented in `transformers`, so there is no plain `from_pretrained` + `generate`
+path. Two first-party serving stacks implement it, and this runner drives either:
 
-This runner drives that server. It never fabricates a result: an unmet requirement
-is reported as SKIPPED with the reason, and a failure keeps its traceback.
+* **vllm** (default) — `vllm serve --omni` from `vllm-omni`. Supports Python 3.13, runs
+  its Higgs stages eager, and does not reach flashinfer's CuTe kernels, so it is the
+  only one of the two with a plausible path on a pre-Ampere device.
+* **sglang** — `sgl-omni serve`, the path named on the model card. On a Tesla T4 it
+  loads the weights and then dies during CUDA graph capture with `KeyError: 'sm_75'`.
+
+Both expose `POST /v1/audio/speech` returning WAV bytes; they differ in how a voice
+reference is passed. This runner never fabricates a result: an unmet requirement is
+reported as SKIPPED with the reason, and a failure keeps its traceback.
 """
 import argparse
+import base64
 import json
 import os
 import platform
@@ -24,6 +30,7 @@ import traceback
 import wave
 from pathlib import Path
 
+DEFAULT_BACKEND = "vllm"
 MODEL_ID = "bosonai/higgs-tts-3-4b"
 # Immutable revision of the weights this benchmark is pinned to.
 REVISION = "7556c17e05201fccd9c8cc120bc216dcc7b5d561"
@@ -34,6 +41,9 @@ REVISION = "7556c17e05201fccd9c8cc120bc216dcc7b5d561"
 # CUDA-JIT fallback for exactly that path, and SGLang-Omni honours a pre-set value —
 # it only auto-applies it for sm100+. So the runner sets it for pre-Ampere devices.
 NORM_FALLBACK_BELOW_CAPABILITY = (8, 0)
+
+# Below this, bfloat16 has no hardware support and vLLM refuses to load with it.
+BF16_CAPABILITY = (8, 0)
 
 # SGLang-Omni publishes no supported-hardware floor. Its pinned flash-attn-4 and
 # flashinfer wheels target recent datacenter architectures, and `higgs_tts/sampler.py`
@@ -130,7 +140,7 @@ def gpu_facts() -> dict:
     }
 
 
-def check_requirements(min_capability: tuple[int, int] | None) -> tuple[bool, str, dict]:
+def check_requirements(backend: str, min_capability: tuple[int, int] | None) -> tuple[bool, str, dict]:
     """Return (runnable, reason, facts).
 
     Only genuinely missing prerequisites block the run. A low compute capability
@@ -146,14 +156,14 @@ def check_requirements(min_capability: tuple[int, int] | None) -> tuple[bool, st
         ), facts
     if facts.get("gate") == "no_cuda":
         return False, "no CUDA device is visible to torch", facts
-    if shutil.which("sgl-omni") is None:
+    executable = "vllm" if backend == "vllm" else "sgl-omni"
+    if shutil.which(executable) is None:
         return False, (
-            "the `sgl-omni` CLI is not installed; SGLang-Omni is the only documented "
-            "first-party CUDA inference path for this checkpoint"
+            f"the `{executable}` CLI is not installed, so the {backend} backend cannot run"
         ), facts
 
     capability = facts["cuda_capability_tuple"]
-    if capability < ADVISORY_COMPUTE_CAPABILITY:
+    if backend == "sglang" and capability < ADVISORY_COMPUTE_CAPABILITY:
         facts["capability_advisory"] = (
             f"{facts['cuda_device']} reports compute capability {facts['cuda_capability']}. "
             "SGLang-Omni states no supported-hardware floor, but its pinned flash-attn-4 / "
@@ -170,6 +180,40 @@ def check_requirements(min_capability: tuple[int, int] | None) -> tuple[bool, st
             "for this run"
         ), facts
     return True, "", facts
+
+
+def server_command(backend: str, model_dir: str, args, capability: tuple) -> list:
+    """Command line for the chosen server, plus the flags a pre-Ampere GPU needs."""
+    if backend == "vllm":
+        command = ["vllm", "serve", model_dir, "--trust-remote-code", "--omni",
+                   "--host", "127.0.0.1", "--port", str(args.port)]
+        if capability < BF16_CAPABILITY:
+            # The checkpoint declares bfloat16; vLLM refuses it below compute 8.0.
+            command += ["--dtype", "float16"]
+        if args.mem_fraction_static is not None:
+            command += ["--gpu-memory-utilization", str(args.mem_fraction_static)]
+        return command
+
+    command = ["sgl-omni", "serve", "--model-path", model_dir,
+               "--host", "127.0.0.1", "--port", str(args.port)]
+    if args.mem_fraction_static is not None:
+        command += ["--mem-fraction-static", str(args.mem_fraction_static)]
+    if args.ref_audio is not None:
+        # SGLang reads the reference from disk, so its directory must be allowlisted.
+        command += ["--allowed-local-media-path", str(args.ref_audio.resolve().parent)]
+    return command
+
+
+def reference_payload(backend: str, ref_audio: Path, ref_text: str) -> dict:
+    """Voice-reference fields, which differ between the two servers."""
+    if backend == "vllm":
+        mime = "audio/wav" if ref_audio.suffix.lower() == ".wav" else "audio/mpeg"
+        encoded = base64.b64encode(ref_audio.read_bytes()).decode("ascii")
+        payload = {"ref_audio": f"data:{mime};base64,{encoded}"}
+        if ref_text:
+            payload["ref_text"] = ref_text
+        return payload
+    return {"references": [{"audio_path": str(ref_audio.resolve()), "text": ref_text}]}
 
 
 def wav_duration(path: Path) -> float:
@@ -219,8 +263,13 @@ def synthesize(base_url: str, payload: dict, destination: Path, timeout: float) 
     }
 
 
-def build_jobs(args) -> list[dict]:
+def build_jobs(args, model_dir: str) -> list[dict]:
+    """One job per synthesis mode. Missing inputs become SKIPPED, never substituted."""
     jobs = []
+    # vLLM validates the `model` field against what it was served with.
+    common = {"response_format": "wav", "max_new_tokens": args.max_new_tokens}
+    if args.backend == "vllm":
+        common["model"] = model_dir
 
     if args.text_file and args.text_file.exists():
         basic_text = args.text_file.read_text(encoding="utf-8").strip()
@@ -229,8 +278,7 @@ def build_jobs(args) -> list[dict]:
     if basic_text:
         jobs.append({
             "name": "tts_basic",
-            "payload": {"input": basic_text, "response_format": "wav",
-                        "max_new_tokens": args.max_new_tokens},
+            "payload": {"input": basic_text, **common},
             "output": args.output_dir / "tts_ru_basic.wav",
         })
     else:
@@ -241,8 +289,7 @@ def build_jobs(args) -> list[dict]:
 
     jobs.append({
         "name": "tts_controls",
-        "payload": {"input": CONTROL_TEXT, "response_format": "wav",
-                    "max_new_tokens": args.max_new_tokens},
+        "payload": {"input": CONTROL_TEXT, **common},
         "output": args.output_dir / "tts_ru_controls.wav",
     })
 
@@ -253,9 +300,8 @@ def build_jobs(args) -> list[dict]:
             "name": "tts_clone",
             "payload": {
                 "input": clone_text,
-                "response_format": "wav",
-                "references": [{"audio_path": str(args.ref_audio.resolve()), "text": reference_text}],
-                "max_new_tokens": args.max_new_tokens,
+                **common,
+                **reference_payload(args.backend, args.ref_audio, reference_text),
             },
             "output": args.output_dir / "tts_ru_clone.wav",
         })
@@ -269,6 +315,10 @@ def build_jobs(args) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=("vllm", "sglang"), default=DEFAULT_BACKEND,
+                        help="Serving stack. vllm (default) supports Python 3.13 and runs "
+                             "the Higgs stages eager; sglang is the path named on the model "
+                             "card but needs CUDA graph capture that fails on Turing.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--metrics", type=Path, required=True)
     parser.add_argument("--text-file", type=Path, default=None)
@@ -296,14 +346,14 @@ def main() -> None:
         "test": "tts_cuda",
         "model": MODEL_ID,
         "revision": REVISION,
-        "backend": "sglang-omni",
+        "backend": args.backend,
         "python": platform.python_version(),
     }
     min_capability = None
     if args.min_capability:
         major, _, minor = args.min_capability.partition(".")
         min_capability = (int(major), int(minor or 0))
-    runnable, reason, facts = check_requirements(min_capability)
+    runnable, reason, facts = check_requirements(args.backend, min_capability)
     report.update({k: v for k, v in facts.items() if k != "cuda_capability_tuple"})
     if facts.get("capability_advisory"):
         print(f"⚠️  {facts['capability_advisory']}")
@@ -336,7 +386,7 @@ def main() -> None:
 
         server_env = os.environ.copy()
         capability = facts["cuda_capability_tuple"]
-        if capability < NORM_FALLBACK_BELOW_CAPABILITY:
+        if args.backend == "sglang" and capability < NORM_FALLBACK_BELOW_CAPABILITY:
             server_env["FLASHINFER_USE_CUDA_NORM"] = "1"
         for item in args.server_env:
             key, _, value = item.partition("=")
@@ -349,17 +399,10 @@ def main() -> None:
         if applied:
             print(f"Переменные окружения сервера: {applied}")
 
-        command = ["sgl-omni", "serve", "--model-path", model_dir, "--port", str(args.port),
-                   "--host", "127.0.0.1"]
-        if args.mem_fraction_static is not None:
-            command += ["--mem-fraction-static", str(args.mem_fraction_static)]
+        command = server_command(args.backend, model_dir, args, capability)
         for extra in args.server_arg:
             key, _, value = extra.partition("=")
             command += [f"--{key.strip().lstrip('-').replace('_', '-')}", value.strip()]
-        if args.ref_audio is not None:
-            # Local reference files are only readable by the server when their
-            # directory is explicitly allowlisted.
-            command += ["--allowed-local-media-path", str(args.ref_audio.resolve().parent)]
         report["server_command"] = command
 
         sampler.__enter__()
@@ -373,7 +416,7 @@ def main() -> None:
         report["server_startup_seconds"] = time.perf_counter() - started
 
         results = []
-        for job in build_jobs(args):
+        for job in build_jobs(args, model_dir):
             if "skipped" in job:
                 results.append({"name": job["name"], "status": "SKIPPED", "reason": job["skipped"]})
                 continue
