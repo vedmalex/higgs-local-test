@@ -1,0 +1,90 @@
+# Higgs Audio v3 TTS deploy profile for pre-Ampere NVIDIA GPUs (Turing, sm75).
+#
+# Derived from vllm-omni's auto-discovered default
+# `vllm_omni/deploy/higgs_multimodal_qwen3.yaml` (upstream commit as of 2026-08-23).
+# Only the values that a 15 GB Turing device forces are changed; everything else,
+# including the connector streaming geometry, is upstream's.
+#
+# Delta from upstream, with the reason for each change:
+#
+# 1. stage 0 `attention_backend: FLASHINFER` -> `TRITON_ATTN`.
+#    Upstream's FLASHINFER pick aborts startup on sm75:
+#      ValueError: Selected backend AttentionBackendEnum.FLASHINFER is not valid
+#      for this configuration. Reason: ['compute capability not supported']
+#    In vLLM 0.26.0 `FlashInferBackend.supports_compute_capability` requires >= 8.0
+#    (deliberately raised from 7.5 while flashinfer-ai/flashinfer#3620 is open),
+#    while `TritonAttentionBackend.supports_compute_capability` returns True for
+#    every capability.
+#
+# 2. stage 0 `max_num_seqs: 16` -> 1, `max_num_batched_tokens: 4096` -> 2048,
+#    `max_model_len: 8192` -> 4096.
+#    Upstream targets 1xH100, where stage 0's 0.6 memory share is ~48 GB. On a
+#    14.56 GB T4 the same share is ~8.7 GB, which the fp16 talker weights nearly
+#    consume on their own. This benchmark issues one request at a time, so the
+#    concurrency and context budget are reduced to what it actually uses rather
+#    than paying KV cache for 16 concurrent sequences.
+#
+# 3. stage 0 `gpu_memory_utilization: 0.6` -> 0.62, stage 1 `0.25` -> 0.30.
+#    Same reason: absolute headroom, not fraction, is what runs out here.
+#
+# This profile is a hypothesis about a device neither upstream nor Boson claims to
+# support. Whether it produces audio is an empirical question; the runner records
+# the outcome either way.
+async_chunk: true
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      codec_streaming: true
+      codec_chunk_frames: 25
+      codec_left_context_frames: 25
+      codec_right_holdback_frames: 4
+      initial_codec_chunk_frames: 1
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 5000
+      connector_get_max_wait: 500
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.62
+    enforce_eager: true
+    attention_backend: TRITON_ATTN
+    attention_config:
+      use_trtllm_attention: false
+    trust_remote_code: true
+    enable_prefix_caching: true
+    async_scheduling: false
+    max_num_batched_tokens: 2048
+    max_model_len: 4096
+    devices: "0"
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 50
+      max_tokens: 2048
+      seed: 42
+      repetition_penalty: 1.0
+
+  - stage_id: 1
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.30
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: false
+    max_num_batched_tokens: 65536
+    max_model_len: 65536
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      seed: 42
+      repetition_penalty: 1.0
