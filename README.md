@@ -56,7 +56,11 @@ SGLang-Omni publishes no supported-hardware floor. Its pinned `flash-attn-4` and
 
 The runner therefore does not refuse to start on an older GPU. It warns, attempts the run, and records the actual outcome together with the server log, so the repository accumulates evidence instead of a guess. `--min-capability` turns the expectation into a hard skip when spending GPU quota on a likely failure is not wanted, and `--server-arg KEY=VALUE` passes extra `sgl-omni` arguments through (for example `--server-arg attention_backend=triton`). L4 and A100 are the most likely to succeed.
 
-`SKIPPED` is reported only for genuinely missing prerequisites: no CUDA device, no `sgl-omni` CLI, a capability below an explicitly requested `--min-capability`, or a missing input file. Details and source links are in [`docs/research/higgs-current-apis.md`](docs/research/higgs-current-apis.md).
+A second, harder blocker is the interpreter: `sglang-omni` declares `Requires-Python >=3.10,<3.13`, and Colab now runs Python 3.13, so `pip install` refuses before downloading anything. The notebook checks this up front and names it. Setting `TTS_PYTHON = "3.12"` makes `uv` fetch a standalone interpreter and build a fully independent environment (its own torch — tens of minutes and several gigabytes); left at `None`, the stage is skipped with that reason.
+
+Note that the Colab environments intentionally reuse the preinstalled `torch`: each venv is created with `--without-pip` (Colab's Debian build has no `ensurepip`, so plain `python -m venv` fails) and inherits system packages, while its own pinned packages still shadow them.
+
+`SKIPPED` is reported only for genuinely missing prerequisites: no CUDA device, no `sgl-omni` CLI, an unsupported interpreter, a capability below an explicitly requested `--min-capability`, or a missing input file. Details and source links are in [`docs/research/higgs-current-apis.md`](docs/research/higgs-current-apis.md).
 
 Inputs and outputs live in `MyDrive/higgs-benchmark`; model weights are cached on the VM's local disk. A missing `stt_ru.wav`, TTS text, or cloning reference yields `SKIPPED` rather than synthetic input. Automatic runtime disconnect is off by default (`AUTO_DISCONNECT`).
 

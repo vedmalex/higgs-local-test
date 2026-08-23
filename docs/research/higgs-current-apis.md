@@ -284,7 +284,23 @@ hard skip on request, and `--server-arg KEY=VALUE` forwards extra `sgl-omni` arg
 such as `attention_backend=triton`.
 
 Note that a working MLX-Audio run on M1 is not evidence about CUDA: MLX-Audio is an
-independent implementation, so the two paths share only the weights.
+independent implementation, so the two paths share only the weights. In particular, no
+version of the Colab notebook has ever synthesized speech — the only audio-writing call
+in its history was a 440 Hz sine used as STT input.
+
+Interpreter constraint, measured 2026-08-23: `sglang-omni==0.1.3` declares
+`Requires-Python >=3.10,<3.13`, while Colab now runs Python 3.13 (packages under
+`/usr/local/lib/python3.13/dist-packages`, `torch 2.11.0+cu128`). `pip install` therefore
+refuses before downloading anything, independently of the GPU. Reaching the stack at all
+requires a separate interpreter, e.g. `uv venv --python 3.12`, which also forfeits reuse
+of the preinstalled torch.
+
+Colab environment mechanics worth recording: the Debian build of Python has no
+`ensurepip`, so `python -m venv` fails while still leaving a directory behind. Creating
+the venv with `--without-pip --system-site-packages` and invoking the system `pip`
+through the venv's interpreter installs into the venv (its `sys.prefix`), which both
+avoids the failure and reuses the preinstalled `torch`. Verified locally: a package
+installed this way resolves from the venv's own `site-packages`.
 
 Sources:
 
