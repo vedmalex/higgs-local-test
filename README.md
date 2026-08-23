@@ -109,10 +109,11 @@ RTF is processing seconds divided by output audio duration (TTS) or input audio 
 
 | Test | Device | Load | Processing | Audio | RTF | Peak VRAM | Peak RSS |
 | ---- | ------ | ---: | ---------: | ----: | --: | --------: | -------: |
-| STT | CUDA T4 (FP16) | 81.23s | 10.71s | 60.00s | 0.178 | 5.97 GB | 6.25 GB |
+| STT (run 1) | CUDA T4 (FP16) | 81.23s | 10.71s | 60.00s | 0.178 | 5.97 GB | 6.25 GB |
+| STT (run 2) | CUDA T4 (FP16) | 76.94s | 11.69s | 60.00s | 0.195 | 5.97 GB | 6.25 GB |
 | TTS (all modes) | CUDA T4 | — | — | — | — | 12.95 GB peak during startup | — |
 
-STT transcribed 60 s of Russian speech 7.9× faster than the M1 MPS run (0.178 vs 1.40). WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
+Two runs of the same input give RTF 0.178 and 0.195, so read the figure as approximately 0.18–0.20 — roughly 7–8× faster than the M1 MPS run (1.40) rather than a single exact ratio. WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
 
 TTS is a **documented reproducible failure on T4, not a pass and not a skip**. `sglang-omni==0.1.3` installed on a `uv`-fetched Python 3.12, the weights downloaded, and `sgl-omni serve` loaded the model — then died during CUDA graph capture:
 
