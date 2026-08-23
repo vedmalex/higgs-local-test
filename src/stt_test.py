@@ -43,9 +43,11 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", choices=("mps", "cpu", "cuda"), required=True)
     parser.add_argument("--dtype", choices=("float16", "float32", "bfloat16"), required=True)
-    parser.add_argument("--reference", type=Path, default=None,
-                        help="Reference transcript for WER. Defaults to the built-in Russian fixture; "
-                             "pass a file when the audio does not match it.")
+    parser.add_argument("--reference", default=None,
+                        help="Reference transcript for WER: a file path, or the literal "
+                             "'builtin' for the repository's Russian fixture. Omit it and no "
+                             "WER is reported — comparing arbitrary audio against the fixture "
+                             "produces a number that measures nothing.")
     parser.add_argument("--metrics", type=Path, default=None, help="Write the metrics JSON to this file.")
     args = parser.parse_args()
     dtype = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.bfloat16}[args.dtype]
@@ -122,12 +124,21 @@ def main() -> None:
         processing = time.perf_counter() - started
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(transcript + "\n", encoding="utf-8")
-        reference = args.reference.read_text(encoding="utf-8").strip() if args.reference else REFERENCE
+        if args.reference is None:
+            reference, reference_label = None, None
+        elif args.reference == "builtin":
+            reference, reference_label = REFERENCE, "builtin"
+        else:
+            reference_path = Path(args.reference)
+            reference = reference_path.read_text(encoding="utf-8").strip()
+            reference_label = str(reference_path)
         diagnostics.update({
             "status": "PASSED", "model_load_seconds": load_seconds, "processing_seconds": processing,
             "audio_duration_seconds": duration, "rtf": processing / duration,
             "wer": wer(reference.lower(), transcript.lower()) if reference else None,
-            "wer_reference": "builtin" if reference is REFERENCE else (str(args.reference) if reference else None),
+            "wer_reference": reference_label,
+            "wer_note": None if reference else
+                        "no reference transcript supplied; WER not measured",
             "transcript": transcript, "output": str(args.output),
             **peak_memory(),
         })

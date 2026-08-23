@@ -325,3 +325,33 @@ Because the two stacks pin incompatible `transformers` versions, and because a
 notebook kernel cannot reliably release a model held by a global name, each model
 must run as a **separate subprocess in its own virtual environment**. Process exit is
 what returns VRAM and host RAM; `del` on a function argument does not.
+
+### Measured on Colab T4, 2026-08-23
+
+The expectation recorded above was tested. Results, from a run whose logs are kept in
+the issue thread:
+
+- `sglang-omni==0.1.3` **installs** on a `uv`-fetched CPython 3.12 (`torch 2.11.0+cu130`).
+  The earlier assumption that the dependency stack itself would not resolve was wrong.
+- The weights download and `sgl-omni serve` loads the model, reaching a device-wide peak
+  of 12.95 GB on a 14.56 GB T4.
+- Startup then dies during CUDA graph capture, in flashinfer's CUTLASS-DSL RMSNorm:
+  `_get_compiled_rmsnorm_kernel` → `cutlass/base_dsl/arch.py:from_string` →
+  `KeyError: 'sm_75'`. The blocking kernel is RMSNorm, not attention — an attention
+  backend override would not have addressed it.
+
+So the hardware floor is real but narrower than assumed: it is a missing Turing entry in
+the CUTLASS-DSL arch enum reached through `sgl_kernel.elementwise.rmsnorm`.
+
+flashinfer's `norm/__init__.py` reads `FLASHINFER_USE_CUDA_NORM`, documented in-source as
+"Use CUDA JIT implementation instead of CuTe DSL (for debugging/fallback)". SGLang-Omni's
+`utils/gpu_compat.py` honours a pre-set value and auto-applies it only when a visible GPU
+reports sm >= 100. `src/tts_cuda.py` therefore sets it for devices below compute 8.0.
+If graph capture still fails, `--server-arg talker-cuda-graph=off` maps to the stage's
+`disable_cuda_graph` in `sglang_omni/cli/serve.py`.
+
+Sources:
+
+- [flashinfer norm backend switch](https://github.com/flashinfer-ai/flashinfer/blob/main/flashinfer/norm/__init__.py)
+- [SGLang-Omni GPU compatibility defaults](https://github.com/sgl-project/sglang-omni/blob/main/sglang_omni/utils/gpu_compat.py)
+- [SGLang-Omni CUDA-graph stage overrides](https://github.com/sgl-project/sglang-omni/blob/main/sglang_omni/cli/serve.py)
