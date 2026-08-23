@@ -283,6 +283,31 @@ def audio_defect(statistics: dict) -> str | None:
     return None
 
 
+def fp16_cast_diagnostics(log_path: Path) -> dict:
+    """Count vLLM's per-stage bf16->fp16 downcast log line.
+
+    The checkpoint declares bfloat16. Below compute capability 8.0 the runner
+    forces `--dtype float16`, and vLLM logs "Casting torch.bfloat16 to
+    torch.float16" once per stage that actually loads that way. Every recorded
+    T4 run logged this line twice -- once for the talker (stage 0), once for
+    the codec decoder (stage 1, HiggsAudioV3Code2WavForConditionalGeneration)
+    -- and every one of those runs wrote WAV files whose samples are a
+    constant -32768 rather than speech (#48). `TURING_DEPLOY_CONFIG` now sets
+    `engine_extras: {dtype: float32}` on stage 1 to keep the codec decoder out
+    of that cast; this count is how a run confirms whether that took effect,
+    without grepping the server log by hand.
+    """
+    if not log_path.exists():
+        return {}
+    marker = "Casting torch.bfloat16 to torch.float16"
+    count = log_path.read_text(encoding="utf-8", errors="replace").count(marker)
+    note = {
+        0: "no bf16->fp16 cast logged (server may not have started, or the GPU is bf16-capable)",
+        1: "one stage cast to fp16 -- consistent with the stage 1 codec decoder staying fp32",
+    }.get(count, f"{count} stages cast to fp16 -- the codec decoder is likely still fp16 (#48)")
+    return {"fp16_cast_count": count, "fp16_cast_note": note}
+
+
 def wait_for_server(base_url: str, process: subprocess.Popen, timeout: float,
                     name: str = "server") -> None:
     import urllib.error
@@ -546,6 +571,8 @@ def main() -> None:
         sampler.__exit__(None, None, None)
         report.update(peak_memory())
         report.update(sampler.report())
+        if args.backend == "vllm":
+            report.update(fp16_cast_diagnostics(log_path))
         write_report()
 
     if report.get("status") == "FAILED":
