@@ -113,6 +113,20 @@ STT CPU fallback:      NOT NEEDED (MPS FP16 succeeded end-to-end)
 Russian transcription: PASSED (accurate Cyrillic and Vaishnava terminology)
 ```
 
+### Qwen3-TTS / Qwen3-ASR on the same M1 host — separate backend, separate result (#52)
+
+```text
+Qwen3-TTS basic:       PASSED (Qwen3-TTS-12Hz-0.6B-Base-bf16, RTF 1.71)
+Qwen3-TTS clone:       PASSED (same 60s reference as Higgs, RTF 1.58 vs Higgs 822.09)
+Qwen3-TTS instruct:    PASSED (1.7B CustomVoice, generate_custom_voice(instruct=...))
+Qwen3-ASR:             PASSED (Qwen3-ASR-0.6B-8bit, RTF 0.093)
+Russian speech:        PASSED (all nine fixture lines round-trip through ASR)
+Sanskrit terminology:  WEAK (proper nouns garbled in both TTS and ASR)
+Qwen3-ASR WER:         NOT MEASURED (no reference transcript matches samples/stt_ru.wav)
+```
+
+Numbers, waveform validity checks and the round-trip evidence are in the Benchmark section below. This is a Qwen result and stays one; it does not turn any Higgs failure into a Higgs pass.
+
 ### Google Colab, Tesla T4 (15 GB, compute 7.5, Python 3.13, driver 580.82.07 / CUDA 13.0)
 
 ```text
@@ -138,9 +152,13 @@ Qwen3-TTS is an additional backend evaluated on its own merits, not a fallback t
 | Higgs | `higgs-tts-3-4b` | T4 | claimed (empirical failure below) | FAILED — constant `-32768` (#48) | blocked by the same common audio failure | blocked | not meaningful for invalid audio | 11.18 GB | **FAIL** | Boson research/non-commercial |
 | Qwen3-TTS | `12Hz-0.6B-Base` / `-CustomVoice` | T4 | documented claim (model card) | **not yet run** | **not yet run** | model-dependent, **not yet run** | — | — | **NOT RUN** | Apache-2.0 |
 
+This table is about the T4. Qwen3-TTS **has** now produced real, validated Russian speech — including voice cloning and `instruct`-driven style — but on Apple Silicon M1 through MLX, not on a T4 through vLLM; those are different code paths and the M1 result is reported in its own Benchmark block rather than pasted into this row.
+
 RTF is never published for invalid audio, per this project's own rule (see the T4 note above). The Qwen row stays `NOT RUN` until `src/tts_qwen_cuda.py` is actually executed on a Colab/Kaggle T4 and its `metrics/tts_qwen_<variant>.json` results are recorded here — filling this row from the research alone, without a real run, would be exactly the kind of fabricated benchmark this project's rules forbid.
 
 ## Benchmark
+
+### Higgs Audio v3, Apple Silicon M1
 
 Measurements recorded from real sequential runs on native Apple Silicon M1 (16 GB unified memory):
 
@@ -152,6 +170,55 @@ Measurements recorded from real sequential runs on native Apple Silicon M1 (16 G
 | STT | MPS (FP16) | 19.89s | 83.76s | 60.00s | 1.40 | 3.29 GB | 9.25 GB |
 
 RTF is processing seconds divided by output audio duration (TTS) or input audio duration (STT). Values below 1.0 are faster than real time.
+
+### Qwen3-TTS / Qwen3-ASR — local Apple Silicon M1 test (recorded 2026-08-24)
+
+A **separate** benchmark from the Higgs rows above — different model family, different weights, never merged into or reported as a Higgs result. Motivation: Higgs voice cloning on this machine runs at RTF 822, which is not usable for iterative testing. This path uses the native MLX implementations shipped in `mlx-audio` 0.5.0 (`mlx_audio.tts.models.qwen3_tts`, `mlx_audio.stt.models.qwen3_asr`) with published MLX weights, so no CUDA and no server process is involved.
+
+Same host as the Higgs rows: native `arm64` M1, 16 GB unified memory, Python 3.11.7, `mlx` 0.32.1, `mlx-audio` 0.5.0.
+
+| Test | Model | Load | Processing | Audio | RTF | Peak RSS | Peak MLX | Status |
+| ---- | ----- | ---: | ---------: | ----: | --: | -------: | -------: | ------ |
+| TTS basic | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | 7.04s | 42.89s | 25.04s | 1.71 | 0.65 GB | 4.68 GB | PASSED |
+| TTS clone (60s ref) | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | 4.66s | 30.77s | 19.44s | 1.58 | 2.45 GB | 6.32 GB | PASSED |
+| TTS CustomVoice (`instruct`) | `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16` | 5.24s | 46.90s | 24.32s | 1.93 | 2.10 GB | 8.07 GB | PASSED |
+| ASR | `mlx-community/Qwen3-ASR-0.6B-8bit` | 3.14s | 5.59s | 60.00s | 0.093 | 1.41 GB | 2.18 GB | PASSED |
+
+Peak RSS is the worker process's `ru_maxrss`; Peak MLX is `mx.get_peak_memory()`, which counts MLX's unified-memory allocations and is therefore the larger and more relevant ceiling on a 16 GB machine.
+
+**Voice cloning is ~520× faster than the Higgs clone path on the same host and the same reference pair** (`samples/reference.wav` + `samples/reference.txt`): RTF 1.58 against 822.09. This is the practical reason the Qwen path exists here.
+
+Generated audio was checked for the same false-positive failure mode the CUDA runners guard against — a well-formed WAV that is not speech. All three outputs are real waveforms with speech-like statistics, next to the repository's own human reference for scale:
+
+| File | Peak | RMS | % at full scale | Distinct values |
+| ---- | ---: | --: | --------------: | --------------: |
+| `output/qwen_tts_ru_basic.wav` | 21770 | 2000.4 | 0.00% | 20035 |
+| `output/qwen_tts_ru_clone.wav` | 13430 | 1697.6 | 0.00% | 14859 |
+| `output/qwen_tts_ru_custom.wav` | 16466 | 1676.6 | 0.00% | 15775 |
+| `samples/reference.wav` (human) | 16338 | 1989.4 | 0.00% | 14061 |
+
+The cloning and CustomVoice paths return the whole utterance as one segment rather than splitting on newlines like the basic path, so coverage was verified rather than assumed: each generated WAV was transcribed back with the same Qwen3-ASR model and all nine lines of `samples/tts_ru.txt` are present in all three. Russian words come back accurate; Sanskrit proper nouns are the weak spot in both directions (`Шри Чайтанья Махапрабху` round-trips as `Шричая таня маха правку` in the clone output).
+
+**ASR WER is not reported, and this is not an omission.** `samples/stt_ru.wav` is a real lecture recording, not the scripted fixture text that `REFERENCE` in `src/stt_test.py` holds, and no matching reference transcript exists in the repository — exactly the situation already noted for the T4 STT runs below. Measuring against the fixture anyway produced WER 2.73, a number that describes nothing; the recorded run therefore passes no `--reference` and reports `wer: null` with the reason. Supply `--reference <path>` once a matching transcript exists. Qualitatively, the transcript is usable Russian with garbled Sanskrit terminology (`Хари Крешна`, `вошнавы`, `брамана`, and Sanskrit verse quotation reduced to phonetic mush) and is written out as returned — no transliteration, no LLM repair.
+
+Emotion and style go through the documented `generate_custom_voice(instruct=...)` argument only; no control tags are invented for this model. The 1.7B CustomVoice checkpoint reports nine speakers: `serena`, `vivian`, `uncle_fu`, `ryan`, `aiden`, `ono_anna`, `sohee`, `eric`, `dylan`. The recorded run used `serena` with `instruct="Speak calmly and warmly, like a narrator reading a spiritual book."`.
+
+Commands, each running the model in its own child process so the runner never holds a model resident:
+
+```bash
+.venv-tts/bin/python src/tts_qwen_local_test.py --mode basic \
+  --output output/qwen_tts_ru_basic.wav --metrics output/qwen_tts_basic.json
+.venv-tts/bin/python src/tts_qwen_local_test.py --mode clone \
+  --output output/qwen_tts_ru_clone.wav --metrics output/qwen_tts_clone.json
+.venv-tts/bin/python src/tts_qwen_local_test.py --mode custom_voice \
+  --speaker serena --language russian \
+  --instruct "Speak calmly and warmly, like a narrator reading a spiritual book." \
+  --output output/qwen_tts_ru_custom.wav --metrics output/qwen_tts_custom.json
+.venv-tts/bin/python src/stt_qwen_local_test.py --audio samples/stt_ru.wav \
+  --language ru --output output/qwen_stt_ru.txt --metrics output/qwen_stt.json
+```
+
+`--mode clone` reports `SKIPPED` when either reference file is missing, and the ASR runner reports `SKIPPED` when the audio file is missing; neither substitutes synthetic input. WER needs `jiwer` in `.venv-tts` (`scripts/bootstrap.sh` installs it); without it the run still passes and says so in `wer_note`.
 
 ### Google Colab, Tesla T4 (recorded 2026-08-23)
 
