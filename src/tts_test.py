@@ -23,6 +23,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("basic", "controls", "clone"), default="basic")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--text", default=None,
+                        help="Override the text for this generation (research use, e.g. "
+                             "issue #57 M4-T0 sentiment-tag baseline probes). Ignored for "
+                             "--mode clone, which always uses the cloning reference text.")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -36,6 +40,9 @@ def main() -> None:
             print("Voice cloning: SKIPPED")
             return
         kwargs = {"ref_audio": str(ref_audio), "ref_text": ref_text.read_text(encoding="utf-8").strip()}
+
+    if args.text is not None and args.mode != "clone":
+        text = args.text
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
