@@ -62,43 +62,71 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-# ---- shapes for the stride=5 DecoderBlock(512, 256, stride=5) --------------------------------
-INPUT_DIM = 512
-OUTPUT_DIM = 256
-STRIDE = 5
-CT_KERNEL = 2 * STRIDE  # 10
-CT_PADDING = 3  # ceil(stride/2) = ceil(5/2) = 3
-CT_OUTPUT_PADDING = STRIDE % 2  # 1
+# ---- shapes, made stride-generic for M3-7 (issue #57) ----------------------------------------
+# M3-5/M3-6 hard-coded stride=5 (DecoderBlock(512, 256, stride=5)) as module-level constants.
+# M3-7 adds stride=8 (DecoderBlock(1024, 512, stride=8), output_padding=0) as a SECOND,
+# INDEPENDENT case -- not chained with stride-5 (see this file's module docstring and
+# m3-plan.md's M3-7 section for the explicit non-goal statement). Rather than duplicate the
+# whole module for a second stride, every function that used to read module-level constants
+# now takes a `cfg` dict built by `make_config()`; the stride=5 numbers below are IDENTICAL to
+# the old constants, so M3-5/M3-6 behavior is unchanged.
 RU_KERNEL = 7
 RU_DILATIONS = (1, 3, 9)
-RU_PADDINGS = tuple((RU_KERNEL - 1) * d // 2 for d in RU_DILATIONS)  # (3, 9, 27)
-SEQ_LEN = 20  # matches m3_block_reference.py's stride-5 synthetic case
 BATCH = 1
 
 STAGE_NAMES = ["after_snake1", "after_conv_t1", "after_res_unit1", "after_res_unit2", "after_res_unit3_final"]
+
+# per-stride case parameters. seq_len for stride=8 matches m3_block_reference.py's own
+# stride8_1024x512_synthetic cross-check (seq_len=12) so the two scripts' synthetic cases align.
+STRIDE_CASES = {
+    5: dict(input_dim=512, output_dim=256, seq_len=20, default_synth_seed=57305),
+    8: dict(input_dim=1024, output_dim=512, seq_len=12, default_synth_seed=24601),
+}
+
+
+def make_config(stride: int) -> dict:
+    if stride not in STRIDE_CASES:
+        raise ValueError(f"stride={stride} not configured -- supported: {sorted(STRIDE_CASES)}")
+    case = STRIDE_CASES[stride]
+    ru_paddings = tuple((RU_KERNEL - 1) * d // 2 for d in RU_DILATIONS)
+    return {
+        "stride": stride,
+        "input_dim": case["input_dim"],
+        "output_dim": case["output_dim"],
+        "seq_len": case["seq_len"],
+        "default_synth_seed": case["default_synth_seed"],
+        "ct_kernel": 2 * stride,
+        "ct_padding": -(-stride // 2),  # ceil(stride/2), matches m3-plan.md's formula
+        "ct_output_padding": stride % 2,
+        "ru_kernel": RU_KERNEL,
+        "ru_dilations": RU_DILATIONS,
+        "ru_paddings": ru_paddings,
+    }
 
 
 # ------------------------------------------------------------------------------------------
 # Synthetic weight generation -- one seed, fed identically to the MAX graph and the FP64 ref.
 # ------------------------------------------------------------------------------------------
-def make_synthetic_weights(seed: int) -> dict:
+def make_synthetic_weights(seed: int, cfg: dict) -> dict:
     rng = np.random.default_rng(seed)
+    input_dim, output_dim, seq_len = cfg["input_dim"], cfg["output_dim"], cfg["seq_len"]
+    ct_kernel, ru_kernel = cfg["ct_kernel"], cfg["ru_kernel"]
 
-    x = rng.uniform(-2.0, 2.0, size=(BATCH, INPUT_DIM, SEQ_LEN)).astype(np.float32)
-    alpha0 = rng.uniform(-0.3, 1.2, size=(1, INPUT_DIM, 1)).astype(np.float32)
+    x = rng.uniform(-2.0, 2.0, size=(BATCH, input_dim, seq_len)).astype(np.float32)
+    alpha0 = rng.uniform(-0.3, 1.2, size=(1, input_dim, 1)).astype(np.float32)
 
     # PyTorch ConvTranspose1d weight layout: [C_in, C_out, K].
-    ct_weight = rng.normal(0, 0.05, size=(INPUT_DIM, OUTPUT_DIM, CT_KERNEL)).astype(np.float32)
-    ct_bias = rng.normal(0, 0.05, size=(OUTPUT_DIM,)).astype(np.float32)
+    ct_weight = rng.normal(0, 0.05, size=(input_dim, output_dim, ct_kernel)).astype(np.float32)
+    ct_bias = rng.normal(0, 0.05, size=(output_dim,)).astype(np.float32)
 
     res_units = []
-    for dilation in RU_DILATIONS:
-        alpha1 = rng.uniform(-0.3, 1.2, size=(1, OUTPUT_DIM, 1)).astype(np.float32)
-        w1 = rng.normal(0, 0.05, size=(OUTPUT_DIM, OUTPUT_DIM, RU_KERNEL)).astype(np.float32)  # [C_out,C_in,K]
-        b1 = rng.normal(0, 0.05, size=(OUTPUT_DIM,)).astype(np.float32)
-        alpha2 = rng.uniform(-0.3, 1.2, size=(1, OUTPUT_DIM, 1)).astype(np.float32)
-        w2 = rng.normal(0, 0.05, size=(OUTPUT_DIM, OUTPUT_DIM, 1)).astype(np.float32)  # pointwise
-        b2 = rng.normal(0, 0.05, size=(OUTPUT_DIM,)).astype(np.float32)
+    for dilation in cfg["ru_dilations"]:
+        alpha1 = rng.uniform(-0.3, 1.2, size=(1, output_dim, 1)).astype(np.float32)
+        w1 = rng.normal(0, 0.05, size=(output_dim, output_dim, ru_kernel)).astype(np.float32)  # [C_out,C_in,K]
+        b1 = rng.normal(0, 0.05, size=(output_dim,)).astype(np.float32)
+        alpha2 = rng.uniform(-0.3, 1.2, size=(1, output_dim, 1)).astype(np.float32)
+        w2 = rng.normal(0, 0.05, size=(output_dim, output_dim, 1)).astype(np.float32)  # pointwise
+        b2 = rng.normal(0, 0.05, size=(output_dim,)).astype(np.float32)
         res_units.append((alpha1, w1, b1, alpha2, w2, b2))
 
     return {
@@ -166,7 +194,7 @@ def _ensure_real_weights_cache(seed: int, seq_len: int, cache_path: Path) -> Non
         raise RuntimeError(f"m3_real_weights_export.py failed with exit code {proc.returncode}")
 
 
-def make_real_weights(seed: int = REAL_WEIGHTS_SEED_DEFAULT, seq_len: int = SEQ_LEN) -> dict:
+def make_real_weights(seed: int = REAL_WEIGHTS_SEED_DEFAULT, seq_len: int = STRIDE_CASES[5]["seq_len"]) -> dict:
     _ensure_real_weights_cache(seed, seq_len, REAL_WEIGHTS_CACHE)
     with np.load(REAL_WEIGHTS_CACHE) as npz:
         x = npz["x"].astype(np.float32)
@@ -236,7 +264,7 @@ class _NullContext:
         return False
 
 
-def fp64_reference_chain(weights: dict) -> list[np.ndarray]:
+def fp64_reference_chain(weights: dict, cfg: dict) -> list[np.ndarray]:
     _stub_torch_for_import()
     from m2_residual_unit_prototype import numpy_residual_unit  # noqa: E402
     from m3_block_reference import numpy_conv_transpose1d  # noqa: E402
@@ -244,11 +272,14 @@ def fp64_reference_chain(weights: dict) -> list[np.ndarray]:
     x = weights["x"]
     y0 = _numpy_snake_local(x, weights["alpha0"])
     y1 = numpy_conv_transpose1d(
-        y0, weights["ct_weight"], weights["ct_bias"], stride=STRIDE, padding=CT_PADDING, output_padding=CT_OUTPUT_PADDING
+        y0, weights["ct_weight"], weights["ct_bias"],
+        stride=cfg["stride"], padding=cfg["ct_padding"], output_padding=cfg["ct_output_padding"],
     )
     stages = [y0, y1]
     y = y1
-    for (alpha1, w1, b1, alpha2, w2, b2), dilation, padding in zip(weights["res_units"], RU_DILATIONS, RU_PADDINGS):
+    for (alpha1, w1, b1, alpha2, w2, b2), dilation, padding in zip(
+        weights["res_units"], cfg["ru_dilations"], cfg["ru_paddings"]
+    ):
         y = numpy_residual_unit(y, alpha1, w1, b1, alpha2, w2, b2, dilation, padding)
         stages.append(y)
     return stages  # [after_snake1, after_conv_t1, after_ru1, after_ru2, after_ru3]
@@ -323,10 +354,15 @@ def residual_unit_expr(x, alpha1, filter1, bias1, alpha2, filter2, bias2, dilati
     return ops.add(xc, y)
 
 
-def build_decoder_block_graph(gpu_device, cpu_device):
+def build_decoder_block_graph(gpu_device, cpu_device, cfg: dict):
     from max.dtype import DType
     from max.graph import Graph, TensorType
     from m2_residual_unit_prototype import snake_expr
+
+    stride = cfg["stride"]
+    input_dim, output_dim, seq_len = cfg["input_dim"], cfg["output_dim"], cfg["seq_len"]
+    ct_kernel, ct_padding, ct_output_padding = cfg["ct_kernel"], cfg["ct_padding"], cfg["ct_output_padding"]
+    ru_kernel, ru_paddings = cfg["ru_kernel"], cfg["ru_paddings"]
 
     def forward(
         x,
@@ -352,55 +388,61 @@ def build_decoder_block_graph(gpu_device, cpu_device):
         filter2_3,
         bias2_3,
     ):
-        # -- GPU: Snake1d(512) --
+        # -- GPU: Snake1d(input_dim) --
         y0 = snake_expr(x, alpha0, gpu_device)
 
-        # -- cross to CPU: wn_conv_transpose1d(512, 256, k=10, stride=5, pad=3, out_pad=1) --
+        # -- cross to CPU: wn_conv_transpose1d(input_dim, output_dim, k=2*stride, stride, --
+        # -- padding=ceil(stride/2), output_padding=stride%2) --
         from max.graph import ops as _ops
 
         y0_cpu = _ops.transfer_to(y0, cpu_device)
         y1_cpu = conv_transpose_expr(
-            y0_cpu, ct_filter, ct_bias, STRIDE, CT_OUTPUT_PADDING, OUTPUT_DIM, padding=CT_PADDING
+            y0_cpu, ct_filter, ct_bias, stride, ct_output_padding, output_dim, padding=ct_padding
         )
 
         # -- cross back to GPU --
         y1 = _ops.transfer_to(y1_cpu, gpu_device)
 
-        # -- GPU: ResidualUnit(256, dilation=1) --
-        y2 = residual_unit_expr(y1, alpha1_1, filter1_1, bias1_1, alpha2_1, filter2_1, bias2_1, 1, RU_PADDINGS[0], gpu_device)
-        # -- GPU: ResidualUnit(256, dilation=3) --
-        y3 = residual_unit_expr(y2, alpha1_2, filter1_2, bias1_2, alpha2_2, filter2_2, bias2_2, 3, RU_PADDINGS[1], gpu_device)
-        # -- GPU: ResidualUnit(256, dilation=9) --
-        y4 = residual_unit_expr(y3, alpha1_3, filter1_3, bias1_3, alpha2_3, filter2_3, bias2_3, 9, RU_PADDINGS[2], gpu_device)
+        # -- GPU: ResidualUnit(output_dim, dilation=1) --
+        y2 = residual_unit_expr(y1, alpha1_1, filter1_1, bias1_1, alpha2_1, filter2_1, bias2_1, 1, ru_paddings[0], gpu_device)
+        # -- GPU: ResidualUnit(output_dim, dilation=3) --
+        y3 = residual_unit_expr(y2, alpha1_2, filter1_2, bias1_2, alpha2_2, filter2_2, bias2_2, 3, ru_paddings[1], gpu_device)
+        # -- GPU: ResidualUnit(output_dim, dilation=9) --
+        y4 = residual_unit_expr(y3, alpha1_3, filter1_3, bias1_3, alpha2_3, filter2_3, bias2_3, 9, ru_paddings[2], gpu_device)
 
         return y0, y1, y2, y3, y4
 
     input_types = [
-        TensorType(DType.float32, shape=(BATCH, INPUT_DIM, SEQ_LEN), device=gpu_device),
-        TensorType(DType.float32, shape=(1, INPUT_DIM, 1), device=gpu_device),
-        TensorType(DType.float32, shape=(1, CT_KERNEL, OUTPUT_DIM, INPUT_DIM), device=cpu_device),
-        TensorType(DType.float32, shape=(OUTPUT_DIM,), device=cpu_device),
+        TensorType(DType.float32, shape=(BATCH, input_dim, seq_len), device=gpu_device),
+        TensorType(DType.float32, shape=(1, input_dim, 1), device=gpu_device),
+        TensorType(DType.float32, shape=(1, ct_kernel, output_dim, input_dim), device=cpu_device),
+        TensorType(DType.float32, shape=(output_dim,), device=cpu_device),
     ]
     for _ in range(3):
         input_types += [
-            TensorType(DType.float32, shape=(1, OUTPUT_DIM, 1), device=gpu_device),
-            TensorType(DType.float32, shape=(1, RU_KERNEL, OUTPUT_DIM, OUTPUT_DIM), device=gpu_device),
-            TensorType(DType.float32, shape=(OUTPUT_DIM,), device=gpu_device),
-            TensorType(DType.float32, shape=(1, OUTPUT_DIM, 1), device=gpu_device),
-            TensorType(DType.float32, shape=(1, 1, OUTPUT_DIM, OUTPUT_DIM), device=gpu_device),
-            TensorType(DType.float32, shape=(OUTPUT_DIM,), device=gpu_device),
+            TensorType(DType.float32, shape=(1, output_dim, 1), device=gpu_device),
+            TensorType(DType.float32, shape=(1, ru_kernel, output_dim, output_dim), device=gpu_device),
+            TensorType(DType.float32, shape=(output_dim,), device=gpu_device),
+            TensorType(DType.float32, shape=(1, output_dim, 1), device=gpu_device),
+            TensorType(DType.float32, shape=(1, 1, output_dim, output_dim), device=gpu_device),
+            TensorType(DType.float32, shape=(output_dim,), device=gpu_device),
         ]
 
-    return Graph("m3_decoder_block_stride5", forward=forward, input_types=input_types)
+    return Graph(f"m3_decoder_block_stride{stride}", forward=forward, input_types=input_types)
 
 
 # ------------------------------------------------------------------------------------------
 # Graph execution (run ONLY inside the isolated subprocess -- see main()).
 # ------------------------------------------------------------------------------------------
-def run_graph(mode: str, seed: int = 57305) -> int:
+def run_graph(mode: str, seed: int = 57305, stride: int = 5) -> int:
     if mode not in ("synthetic", "real-weights"):
         print(f"mode={mode!r} not implemented -- exiting.", flush=True)
         return 0
+    if mode == "real-weights" and stride != 5:
+        # Per m3-plan.md M3-7: stride=8 uses SYNTHETIC weights only -- real checkpoint
+        # weight extraction (M3-3/M3-6) exists only for the real stride-5 block.
+        print(f"real-weights mode is only defined for stride=5 (M3-6); stride={stride} requested -- exiting.", flush=True)
+        return 2
 
     from max.driver import CPU, Accelerator, Buffer, accelerator_count
     from max.engine import InferenceSession
@@ -408,6 +450,7 @@ def run_graph(mode: str, seed: int = 57305) -> int:
 
     import m3_divergence as m3div
 
+    cfg = make_config(stride)
     print(f"accelerator_count={accelerator_count()}", flush=True)
     if accelerator_count() == 0:
         print("No accelerator on this host -- cannot test the mixed CPU/GPU block. Exiting.", flush=True)
@@ -416,9 +459,9 @@ def run_graph(mode: str, seed: int = 57305) -> int:
     if mode == "real-weights":
         weights = make_real_weights(seed=seed)
     else:
-        weights = make_synthetic_weights(seed=seed)
-        print(f"synthetic weight seed={seed}", flush=True)
-    ref_stages = fp64_reference_chain(weights)
+        weights = make_synthetic_weights(seed, cfg)
+        print(f"stride={stride} synthetic weight seed={seed}", flush=True)
+    ref_stages = fp64_reference_chain(weights, cfg)
     for name, ref in zip(STAGE_NAMES, ref_stages):
         print(f"FP64 reference {name}: shape={ref.shape}", flush=True)
 
@@ -432,7 +475,7 @@ def run_graph(mode: str, seed: int = 57305) -> int:
         flush=True,
     )
 
-    graph = build_decoder_block_graph(gpu_device, cpu_device)
+    graph = build_decoder_block_graph(gpu_device, cpu_device, cfg)
     session = InferenceSession(devices=[accel])
     model = session.load(graph)
 
@@ -517,21 +560,28 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-graph", action="store_true", help="(internal) actually build+run the graph")
     parser.add_argument(
+        "--stride", type=int, default=5, choices=sorted(STRIDE_CASES),
+        help="which DecoderBlock stride case to build (M3-7 adds stride=8; each case is fed "
+             "its own independent synthetic/real input -- NOT chained with any other stride).",
+    )
+    parser.add_argument(
         "--seed", type=int, default=None,
-        help="weight seed for --synthetic (default 57305) or input-generation seed for "
-             "--real-weights (default 99, matching m3_block_reference.py's real-weight "
-             "cross-check convention)",
+        help="weight seed for --synthetic (default per-stride, see STRIDE_CASES) or "
+             "input-generation seed for --real-weights (default 99, matching "
+             "m3_block_reference.py's real-weight cross-check convention; stride=5 only)",
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--synthetic", action="store_true", default=True)
     mode_group.add_argument("--real-weights", action="store_true")
     args = parser.parse_args()
     mode = "real-weights" if args.real_weights else "synthetic"
+    if mode == "real-weights" and args.stride != 5:
+        parser.error("--real-weights is only defined for --stride 5 (M3-6); M3-7's stride=8 case is synthetic-only.")
     if args.seed is None:
-        args.seed = REAL_WEIGHTS_SEED_DEFAULT if mode == "real-weights" else 57305
+        args.seed = REAL_WEIGHTS_SEED_DEFAULT if mode == "real-weights" else STRIDE_CASES[args.stride]["default_synth_seed"]
 
     if args.run_graph:
-        raise SystemExit(run_graph(mode, args.seed))
+        raise SystemExit(run_graph(mode, args.seed, args.stride))
 
     # Driver: isolate the actual graph build+execute in its own subprocess, exactly as
     # m3_device_mixing_spike.py / m2_convtranspose1d_prototype.py do -- a Metal
@@ -539,7 +589,8 @@ def main() -> None:
     # Python exception, per m2-convtranspose1d-results.md.
     mode_flag = "--real-weights" if mode == "real-weights" else "--synthetic"
     proc = subprocess.run(
-        [sys.executable, "-u", __file__, "--run-graph", mode_flag, "--seed", str(args.seed)],
+        [sys.executable, "-u", __file__, "--run-graph", mode_flag,
+         "--stride", str(args.stride), "--seed", str(args.seed)],
         capture_output=True,
         text=True,
     )
