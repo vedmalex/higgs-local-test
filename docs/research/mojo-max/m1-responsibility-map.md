@@ -481,8 +481,28 @@ worth pinning down now:
 
 ## 8. OPEN QUESTION (a) — which decoder does the real v3 checkpoint load?
 
-**Status: mechanism resolved by reading the source; the branch taken by a real checkpoint is
-NOT resolved and is BLOCKING FOR M2.**
+**Status: RESOLVED 2026-08-24, by direct inspection of the real `bosonai/higgs-tts-3-4b`
+checkpoint (no download of weights needed — HTTP range request on `model.safetensors`'s own
+header). Full detail: [`m1-facts-checkpoint-inspection.md`](m1-facts-checkpoint-inspection.md).**
+
+The real checkpoint's codec keys (`acoustic_decoder.block.N.conv_t1`, `res_unit{1,2,3}.conv{1,2}`,
+`snake{1,2}.alpha`, none starting with `"model."`) confirm `is_boson_layout = False` — **the real
+v3 checkpoint takes the HF `DacModel` branch, not `BosonDacDecoder`**, exactly as upstream's
+source comment asserted. **The weight-name tables in §5–§7 above describe `BosonDacDecoder`'s
+flat positional layout and are the WRONG architecture for a port** — the real layout has one
+level of named `block.N.{conv_t1,res_unit1,res_unit2,res_unit3,snake1}` nesting. A port must
+target the HF `DacModel`/`decoder` architecture, not `BosonDacDecoder`.
+
+Also newly found by the same inspection: the real quantizer keys include `project_in` and
+EMA-training buffers (`embed_avg`, `cluster_size`, `inited`) that `HiggsAudioVQLayer` (the class
+`_load_from_bundled_state` actually builds) does not have fields for — the wrapper's loader must
+be dropping/remapping these, not doing a 1:1 rename. Not fully traced; flagged for the port's
+weight-loader implementation.
+
+**Superseded text below** (kept for the record of what this pass originally didn't know; the
+mechanism description is still accurate, the "not resolved" framing is not):
+
+---
 
 `build_boson_dac_decoder` and `build_higgs_audio_acoustic_decoder` are two *independent* decoder
 implementations (`higgs_audio_decoder.py:47` and `:50-56`). The second builds a HuggingFace
@@ -524,7 +544,26 @@ wrong one is the largest single wasted-effort risk in M2.**
 
 ---
 
-## 9. Precision policy — carried forward from M0
+## 9. Precision policy — carried forward from M0, revised after checkpoint inspection
+
+**Important correction, 2026-08-24**: the real `bosonai/higgs-tts-3-4b` checkpoint stores its
+entire codec stack (every conv, every Snake `alpha`, every RVQ projection) in **BF16**, not
+FP16 — confirmed by reading the actual `model.safetensors` tensor headers (see
+[`m1-facts-checkpoint-inspection.md`](m1-facts-checkpoint-inspection.md)), sampled across the
+codec and the LLM backbone alike. BF16 has FP32's exponent range (8 bits) and does not suffer
+FP16's ±65504 overflow ceiling — so **M0's FP16-overflow finding does not directly explain a
+BF16 checkpoint's behavior on T4**, and the paragraphs below (written before this inspection)
+should be read as "what M0 established about FP16 specifically," not as the confirmed mechanism
+of #48. Two hypotheses now rank above pure FP16-style overflow, neither resolved yet: (1) a
+genuine BF16-on-Turing correctness gap in the specific ops used (not just a performance gap —
+T4 has no BF16 tensor cores), or (2) an FP16 intermediate introduced elsewhere in the pipeline by
+vLLM-Omni's `--dtype float16` server flag (used on T4 because vLLM refuses BF16 checkpoints on
+pre-Ampere hardware for the LLM stage), propagating into Code2Wav's *input* even though the
+codec's own weights stay BF16. E2 must capture actual runtime dtypes at the Talker→Code2Wav
+boundary on a real T4 run to settle this, not assume either dtype.
+
+The general MAX precision-mechanism facts below are unaffected by this correction — only the
+"which dtype is actually at risk" conclusion changes.
 
 **MAX has no per-operator `compute_dtype` / `accumulate_dtype` parameter.** Dtype behavior is
 governed by a global promotion rule (`graph/dtype_promotion.py`) that picks the highest-category,
@@ -590,18 +629,21 @@ numerics.* It can start when all of the following are true. These are checks, no
 none is more than a few hours.
 
 ```text
-E1  Decoder identity resolved (§8).
-    Dump acoustic_decoder.* keys from the real v3 codec state; evaluate
-    any(k.startswith("model.")). Record which branch a real checkpoint takes.
-    BLOCKING — porting the wrong architecture invalidates everything downstream.
+E1  DONE 2026-08-24. Decoder identity resolved (§8): real checkpoint uses the HF
+    DacModel branch, block.N-nested key layout, not BosonDacDecoder's flat
+    positional layout. See m1-facts-checkpoint-inspection.md.
 
 E2  Reference fixture captured on T4.
     From the run that reproduces #48: save audio_codes [B,8,T] int64 (post-
-    _revert_delay_pattern), the vLLM-Omni output waveform, the checkpoint's actual
-    parameter dtype (next(acoustic_decoder.parameters()).dtype), and per-layer FP32
-    activations from a CPU FP32 forward pass of the SAME weights.
-    The FP32-CPU trace is the reference the MAX port is compared against — NOT the
-    broken T4 FP16 output.
+    _revert_delay_pattern), the vLLM-Omni output waveform, and — per the BF16
+    correction in §9 — the ACTUAL runtime dtype at every stage boundary
+    (Talker output, fc1/fc2, each acoustic_decoder layer), not an assumption of
+    either FP16 or BF16. Checkpoint storage dtype is now known to be BF16
+    (confirmed by inspection); what matters for #48 is whether vLLM's runtime
+    --dtype float16 forcing on T4 introduces an FP16 intermediate anywhere
+    upstream of or inside Code2Wav. Also capture per-layer FP32 activations
+    from a CPU FP32 forward pass of the SAME weights as the comparison
+    reference — NOT the broken T4 output.
 
 E3  Weight-norm fold verified.
     Host-side FP32 fold of g*v/||v|| for one conv, compared against PyTorch's
