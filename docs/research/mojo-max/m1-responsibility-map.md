@@ -393,9 +393,18 @@ be CPU-only on the T4 — which would not block a *correctness* parity experimen
 of M2 is numerics, not throughput) but would wreck an M4 performance story and must be known
 before anyone promises a fast MAX vocoder.
 
-**Explicitly unverified:** whether `max.nn.ConvTranspose1d` on a T4 executes on GPU, falls back
-to CPU, or errors. This has not been tested. It is the second thing M2 should establish, right
-after Snake1d.
+**Tested 2026-08-24 on M1/Metal — worse than "unimplemented," see
+[`m2-convtranspose1d-results.md`](m2-convtranspose1d-results.md).** `ops.conv2d_transpose` on
+CPU works cleanly for all five of Higgs's actual `(stride, output_padding)` pairs, including both
+`output_padding=1` cases — the "only 0 supported" docstring text is not enforced here. On the
+Apple GPU (`Accelerator()`), every case is a **fatal process abort**, not a catchable exception:
+`symbol not found: cudnnCreate` — the GPU dispatch path unconditionally tries to load NVIDIA's
+cuDNN library regardless of the actual accelerator backend, and Metal has no such symbol. This
+is a Metal-specific finding, not necessarily a T4/CUDA one — the crash is plausibly specific to
+attempting a CUDA library load on a non-CUDA GPU, so a real T4 run (which has genuine cuDNN
+available) is still the open, undetermined data point, not resolved by this M1-side test. If T4
+also fails, the whole ConvTranspose1d path is CPU-only for now, on both targets; if T4 works,
+this is a Metal-backend bug worth reporting to Modular.
 
 ---
 
