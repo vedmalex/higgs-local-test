@@ -117,6 +117,13 @@ Status: M0 **PASSED** on both Apple M1 and Colab T4 GPUs. M1 (vLLM-Omni → MAX 
 
 - M2 T4 runner (same three prototypes, unchanged): [`notebooks/mojo_max_m2_t4.ipynb`](notebooks/mojo_max_m2_t4.ipynb) — <a href="https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/mojo_max_m2_t4.ipynb" target="_blank" rel="noopener noreferrer"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
 
+**NVIDIA Turing / `sm_75` (Tesla T4, including the default Colab GPU) is NOT supported for this
+project's MAX graphs on MAX 26.5.0** — the full decoder-block graph fatally aborts
+(`LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16`). This is an
+upstream Modular defect (the `ldmatrix` intrinsic is not configured for Turing GPUs in this MAX
+version), not a defect in this project's code, and cannot be fixed on our side. Full evidence,
+upstream references, and status: [`docs/research/mojo-max/m3-t4-blocked-results.md`](docs/research/mojo-max/m3-t4-blocked-results.md).
+
 ## Voice Cloning & Audiobook Production Guides
 
 - **Voice Cloning Guide & Reference Texts**: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) — rules for recording clean 7–12s audio samples, phonetically balanced text templates, and voice profile export.

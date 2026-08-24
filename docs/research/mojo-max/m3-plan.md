@@ -398,7 +398,7 @@ M3-2 detector (which they use), not M3-1.
 
 ### Stage E — Tesla T4 re-validation
 
-- [ ] **M3-10. Re-run M3-1, M3-5/M3-6, M3-7 and M3-9 unchanged on a Colab Tesla T4.**
+- [!] **M3-10. BLOCKED (upstream). Re-run M3-1, M3-5/M3-6, M3-7 and M3-9 unchanged on a Colab Tesla T4.**
   Reuse the `notebooks/mojo_max_m2_t4.ipynb` Drive-workspace pattern; a **new** notebook
   `notebooks/mojo_max_m3_t4.ipynb` is needed because the M2 notebook hardcodes the four M2
   prototype scripts. The M1-only `_BosonResidualUnit` T4 gap
@@ -427,10 +427,29 @@ M3-2 detector (which they use), not M3-1.
   switches to a tensor-core/GEMM kernel above some channel-count threshold, with a Turing/sm_75
   codegen gap in that path) is **REFUTED** — `m3_ldmatrix_channel_sweep.py` swept 32 through 1024
   channels through the exact M2 `ops.conv2d` code path on the same T4 and got 6/6 PASSED, no
-  abort at any size. See the "M3-10 follow-up" section of `m3-block-results.md` for the full
-  result and the remaining candidate list. **M3-10 is still open**: this task's own done-criteria
-  (raw T4 output committed and every M1 result confirmed/contradicted per-case) are not met, and
-  the root cause of the `ldmatrix` abort is still unidentified.
+  abort at any size. See the "M3-10 follow-up" section of `m3-block-results.md` for that result.
+
+  **Final status (2026-08-25): BLOCKED (upstream), not done.** Further op-level bisection was
+  cancelled by project-owner decision once the root cause was independently confirmed via web
+  research against Modular's own forum, issue tracker, and an open pull request: MAX 26.5.0's
+  Mojo/Kernel backend does not have the `ldmatrix`/tensor-core intrinsics configured for Turing
+  (`sm_75`) GPUs — confirmed by a Modular employee on the community forum ("Turing support was a
+  new community addition and the Tensor Core operations haven't been modified to extend support
+  back to that architecture"), by `modular/modular#4692` (open since 2025-05-25) and `#6653` (open
+  since 2026-06-08, Modular team comment: "We don't have many of the intrinsics configured for
+  Turing GPUs"), and by the existence of an as-yet-unmerged fix, `modular/modular#6659`. No runtime
+  workaround exists on this project's side. This task's own done-criteria (raw T4 output committed
+  and every M1 result confirmed/contradicted per-case) are **not met** and are not going to be met
+  on this hardware/MAX-version combination — this is recorded as a blocked task, not a completed
+  or skipped one. Full evidence, all references, and unverified future options (CPU-fallback for
+  the offending ops, Ampere+/Kaggle hardware, waiting on PR #6659):
+  [`m3-t4-blocked-results.md`](m3-t4-blocked-results.md). Raw abort output, all 6 seeds:
+  [`m3-block-output-t4.txt`](m3-block-output-t4.txt). Also flagged prominently in the top-level
+  `README.md`'s Mojo/MAX section, not only in this research doc.
+
+  **M3 overall status:** M3-1 through M3-9 and M3-11 are all DONE (see their sections above and in
+  `m3-block-results.md`). **M3-10 alone is BLOCKED by this external, upstream MAX/Mojo defect** —
+  it is the only M3 task not completed, and it cannot be completed on Tesla T4 with MAX 26.5.0.
 
 ### Stage F — upstream (does not gate anything above)
 
