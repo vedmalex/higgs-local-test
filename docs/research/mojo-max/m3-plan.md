@@ -410,6 +410,15 @@ M3-2 detector (which they use), not M3-1.
   CUDA.
   *Files:* new `notebooks/mojo_max_m3_t4.ipynb`, new `m3-block-output-t4.txt`.
   *Devices:* Colab Tesla T4 GPU + CPU.
+  **Status: notebook built, awaiting a real T4 run.** `notebooks/mojo_max_m3_t4.ipynb` exists
+  (build-only, unexecuted by the agent that wrote it — same handoff as `mojo_max_m2_t4.ipynb`'s
+  own history: a human runs it on real Colab hardware and the raw output comes back for this
+  checkbox and `m3-block-results.md`'s T4 section). It follows the M2 notebook's
+  Drive-workspace/self-healing-clone/incremental-write/unconditional-disconnect pattern, plus a
+  new `.venv-tts` stage (torch/transformers/safetensors) to produce M3-6/M3-9's real-weight
+  `.npz` cache before those runs, since the real checkpoint is not pre-cached on a fresh Colab
+  VM the way it was on the M1 host. Open question for whoever runs it: the
+  `bosonai/higgs-tts-3-4b` download size/time on Colab's network was not measured beforehand.
   *Tier:* **sonnet-deterministic-code** (notebook is mechanical), **opus** for reconciling any
   M1↔Tesla-T4 disagreement.
 
