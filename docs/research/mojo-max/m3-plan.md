@@ -98,7 +98,13 @@ M3-2 detector (which they use), not M3-1.
 
 ### Stage A — resolve the blocker and build the tooling
 
-- [ ] **M3-1 (SPIKE, BLOCKING). Prove or disprove mixed CPU/GPU placement inside one MAX graph.**
+- [x] **M3-1 (SPIKE, BLOCKING). Prove or disprove mixed CPU/GPU placement inside one MAX graph.**
+  **DONE — PASSED.** Ran on the pinned M1 toolchain, isolated subprocess, 3 clean exits (code 0),
+  output matching an inline FP64 reference (max|err|=3.48e-07, max_rel_err=1.68e-05, no NaN/Inf).
+  Mixed-device single-graph placement works; the two-graph fallback is NOT required. Found and
+  worked around an unrelated upstream layout bug (`bias=` into `ops.conv2d_transpose` with H=1
+  NHWC input mis-shapes the output) — added to the M3-11 bug-report candidate list, not conflated
+  with this verdict. Detail: [`m3-device-mixing-results.md`](m3-device-mixing-results.md).
   Minimal graph: GPU Snake1d → `ops.transfer_to(CPU)` → `ops.conv2d_transpose` on CPU-placed
   operands → `ops.transfer_to(GPU)` → GPU Snake1d. Session constructed with
   `InferenceSession(devices=[Accelerator()])` (host CPU is appended automatically —
@@ -131,7 +137,11 @@ M3-2 detector (which they use), not M3-1.
   *Tier:* **sonnet-deterministic-code** (small, mechanical, but the abort-handling needs
   subprocess isolation exactly as `m2_convtranspose1d_prototype.py` needed it).
 
-- [ ] **M3-2. Write the reusable per-layer divergence detector (closes E5).**
+- [x] **M3-2. Write the reusable per-layer divergence detector (closes E5).**
+  **DONE.** `m3_divergence.py`'s `compare()` reproduced the published residual-unit number
+  exactly (4.09571e-06 / 9.91201e-04, rounding to the published 4.10e-06 / 9.91e-04), plus 3
+  self-check assertions (normal case, all-zero-vs-nonzero #48 shape, FP16-saturation case) all
+  pass. Detail: [`m3-divergence-results.md`](m3-divergence-results.md).
   One module, importable by every M3 script: given `got` and an FP64 `ref`, report max abs err,
   max rel err, NaN/Inf count, **exact-zero count**, and saturation count (per §11 E5 — a
   NaN-only scan passes a fully-zeroed tensor, which is the #48 failure shape).
@@ -148,8 +158,19 @@ M3-2 detector (which they use), not M3-1.
 
 ### Stage B — real weights for one block
 
-- [ ] **M3-3. Extract one real decoder block's weights from the checkpoint and verify the
+- [x] **M3-3. Extract one real decoder block's weights from the checkpoint and verify the
   weight-norm fold against PyTorch (closes E3 properly).**
+  **DONE — with a premise correction.** The real checkpoint has NO `weight_g`/`weight_v` split
+  anywhere under `acoustic_decoder.*` (confirmed by grepping all 927 tensor keys) — weight_norm
+  was already folded upstream before this checkpoint was written; `build_higgs_audio_acoustic_
+  decoder()` never calls `apply_weight_norm()`. Used block 1 (`conv_t1.weight` shape
+  `[512,256,10]`, confirming stride=5, 512→256). Verified via PyTorch's own `right_inverse`
+  weight_norm decomposition + FP32 fold vs PyTorch's FP32-materialized `conv.weight` across all 7
+  kernels: max abs err **1.192e-07** (< 1e-6 gate, PASS). Alpha distribution: 2048 values across 7
+  Snake layers; smallest real `|alpha|` ≈ 0.0033, four orders of magnitude from the 1e-7 dangerous
+  regime — **no real alpha crosses it**. Secondary finding: many real alphas are negative (up to
+  74/256 channels in one layer), worth noting for future synthetic fixtures. Detail:
+  [`m3-block-results.md`](m3-block-results.md).
   Pull `acoustic_decoder.block.N.{conv_t1, res_unit1..3.{conv1,conv2}, snake1.alpha}` (+ the
   residual units' own `snake{1,2}.alpha`) for the stride-5 block from `bosonai/higgs-tts-3-4b`.
   **Precision sequencing, made explicit to avoid an incoherent comparison:** the checkpoint's raw
@@ -173,7 +194,17 @@ M3-2 detector (which they use), not M3-1.
   *Tier:* **sonnet-deterministic-code**, with **opus** review of the alpha-distribution
   conclusion (that is an interpretive claim about #48, not a mechanical number).
 
-- [ ] **M3-4. Build the FP32 reference implementation of the whole block in NumPy FP64.**
+- [x] **M3-4. Build the FP32 reference implementation of the whole block in NumPy FP64.**
+  **DONE.** New FP64 `numpy_conv_transpose1d` validated against `torch.nn.functional.
+  conv_transpose1d` to 1.11e-16. Full block cross-checked three ways: synthetic weights stride-5
+  (max|err|=2.25e-06, PASS), synthetic stride-8 (max|err|=2.38e-06, PASS), and real checkpoint
+  weights stride-5 via M3-3's extraction (max|err|=1.27e-05 — misses the literal < 1e-5 gate by a
+  small margin). Diagnosed rather than just reported: a torch FP32-vs-FP64 control run on the
+  identical chain showed the exact same 1.27e-05 gap, while this NumPy-FP64 reference agrees with
+  torch's own FP64 forward to 2.18e-14 — the gap is FP32 rounding-order noise at real-checkpoint
+  depth/magnitude, not a reference bug, and is well inside M3-5/M3-6's actual gating metric (max
+  relative error ≤ 5e-03). FP64 path remains licensed as ground truth. Detail:
+  [`m3-block-results.md`](m3-block-results.md).
   Extend `numpy_residual_unit` (already in `m2_residual_unit_prototype.py`) with a FP64
   `numpy_conv_transpose1d` and the block wiring, cross-checked against a PyTorch FP32 forward of
   the real `DacModel` block for the same inputs.
