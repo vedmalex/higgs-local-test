@@ -1,0 +1,107 @@
+=== M3-5 stride=5 synthetic seed=57305 ===
+--- subprocess stdout ---
+accelerator_count=1
+stride=5 synthetic weight seed=57305
+FP64 reference after_snake1: shape=(1, 512, 20)
+FP64 reference after_conv_t1: shape=(1, 256, 100)
+FP64 reference after_res_unit1: shape=(1, 256, 100)
+FP64 reference after_res_unit2: shape=(1, 256, 100)
+FP64 reference after_res_unit3_final: shape=(1, 256, 100)
+Session devices requested=[Accelerator()] (host CPU auto-appended); GPU stages device=gpu:0, conv_t1 device=cpu:0
+precision=fp32
+
+--- subprocess stderr ---
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+
+--- subprocess exit code: -6 ---
+VERDICT: subprocess was killed/aborted (fatal process abort).
+
+=== M3-5 stride=5 synthetic seed=1 ===
+--- subprocess stdout ---
+accelerator_count=1
+stride=5 synthetic weight seed=1
+FP64 reference after_snake1: shape=(1, 512, 20)
+FP64 reference after_conv_t1: shape=(1, 256, 100)
+FP64 reference after_res_unit1: shape=(1, 256, 100)
+FP64 reference after_res_unit2: shape=(1, 256, 100)
+FP64 reference after_res_unit3_final: shape=(1, 256, 100)
+Session devices requested=[Accelerator()] (host CPU auto-appended); GPU stages device=gpu:0, conv_t1 device=cpu:0
+precision=fp32
+
+--- subprocess stderr ---
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+
+--- subprocess exit code: -6 ---
+VERDICT: subprocess was killed/aborted (fatal process abort).
+
+=== M3-5 stride=5 synthetic seed=2 ===
+--- subprocess stdout ---
+accelerator_count=1
+stride=5 synthetic weight seed=2
+FP64 reference after_snake1: shape=(1, 512, 20)
+FP64 reference after_conv_t1: shape=(1, 256, 100)
+FP64 reference after_res_unit1: shape=(1, 256, 100)
+FP64 reference after_res_unit2: shape=(1, 256, 100)
+FP64 reference after_res_unit3_final: shape=(1, 256, 100)
+Session devices requested=[Accelerator()] (host CPU auto-appended); GPU stages device=gpu:0, conv_t1 device=cpu:0
+precision=fp32
+
+--- subprocess stderr ---
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+
+--- subprocess exit code: -6 ---
+VERDICT: subprocess was killed/aborted (fatal process abort).
+
+=== M3-5 stride=5 synthetic seed=3 ===
+--- subprocess stdout ---
+accelerator_count=1
+stride=5 synthetic weight seed=3
+FP64 reference after_snake1: shape=(1, 512, 20)
+FP64 reference after_conv_t1: shape=(1, 256, 100)
+FP64 reference after_res_unit1: shape=(1, 256, 100)
+FP64 reference after_res_unit2: shape=(1, 256, 100)
+FP64 reference after_res_unit3_final: shape=(1, 256, 100)
+Session devices requested=[Accelerator()] (host CPU auto-appended); GPU stages device=gpu:0, conv_t1 device=cpu:0
+precision=fp32
+
+--- subprocess stderr ---
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+
+--- subprocess exit code: -6 ---
+VERDICT: subprocess was killed/aborted (fatal process abort).
+
+=== M3-5 stride=5 synthetic seed=42 ===
+--- subprocess stdout ---
+accelerator_count=1
+stride=5 synthetic weight seed=42
+FP64 reference after_snake1: shape=(1, 512, 20)
+FP64 reference after_conv_t1: shape=(1, 256, 100)
+FP64 reference after_res_unit1: shape=(1, 256, 100)
+FP64 reference after_res_unit2: shape=(1, 256, 100)
+FP64 reference after_res_unit3_final: shape=(1, 256, 100)
+Session devices requested=[Accelerator()] (host CPU auto-appended); GPU stages device=gpu:0, conv_t1 device=cpu:0
+precision=fp32
+
+--- subprocess stderr ---
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+
+--- subprocess exit code: -6 ---
+VERDICT: subprocess was killed/aborted (fatal process abort).
+
+=== M3-5 stride=5 synthetic seed=12345 ===
+--- subprocess stdout ---
+accelerator_count=1
+stride=5 synthetic weight seed=12345
+FP64 reference after_snake1: shape=(1, 512, 20)
+FP64 reference after_conv_t1: shape=(1, 256, 100)
+FP64 reference after_res_unit1: shape=(1, 256, 100)
+FP64 reference after_res_unit2: shape=(1, 256, 100)
+FP64 reference after_res_unit3_final: shape=(1, 256, 100)
+Session devices requested=[Accelerator()] (host CPU auto-appended); GPU stages device=gpu:0, conv_t1 device=cpu:0
+precision=fp32
+
+--- subprocess stderr ---
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+
+--- subprocess exit code: -6 ---
+VERDICT: subprocess was killed/aborted (fatal process abort).
