@@ -641,3 +641,227 @@ throughout, matching M2's finding that the real config may never reach `pad>0`. 
 (seq_len=20) and one real block (block 1, the only stride-5 block in this checkpoint) were tested;
 cross-block composability of the full 5-block decoder remains out of scope per M3-7's explicit
 non-goal note.
+
+---
+
+## M3-8 — exercise the `pad > 0` crop branch (reachability check + synthetic-only test)
+
+Date: 2026-08-24. Standalone script (kept separate from `m3_decoder_block_prototype.py` for
+concurrency with M3-7): `docs/research/mojo-max/m3_padding_branch_check.py`. Run:
+`cd .mojo-probe-stable && arch -arm64 pixi run python
+../docs/research/mojo-max/m3_padding_branch_check.py`.
+
+### Step 1 — reachability finding (READ THIS FIRST): NOT reachable by any real config
+
+`m2-residual-unit-results.md` already recorded that only `pad==0` had ever run; this task closes
+the open question definitively. `_BosonResidualUnit.__init__` (`higgs_audio_decoder.py:114-130`)
+hardcodes `kernel=7` and computes `pad = ((7-1)*dilation) // 2` for the three real dilations
+`{1, 3, 9}` used inside every real `_BosonDecoderBlock`. For a stride-1 conv, symmetric padding
+`P`, kernel `k`, dilation `d`, on length `T`: `len(y) = T + 2P - (k-1)d`, so
+`diff = len(x) - len(y) = (k-1)d - 2P`. With `k=7`, `(k-1)=6` is **even**, so `6d` is even for
+every integer `d` — the `//` in the padding formula never truncates:
+
+```text
+dilation=1: (k-1)*d=6,  P=6//2=3,  exact P=3   -> 2P=6,  diff=6-6=0
+dilation=3: (k-1)*d=18, P=18//2=9, exact P=9   -> 2P=18, diff=18-18=0
+dilation=9: (k-1)*d=54, P=54//2=27, exact P=27 -> 2P=54, diff=54-54=0
+```
+
+**`diff = 0` for all three real dilations, exactly, always.** This is not a coincidence of any
+particular input length — the arithmetic has no `T`-dependence at all — so **no real
+`_BosonDecoderBlock` residual-unit configuration can ever reach `pad > 0`**. This task is
+therefore **defensive/edge-case-only, per the plan's own instruction**: it validates the crop
+guard's *code path*, not any real Higgs decoder behavior. It should not be read as evidence about
+real-checkpoint numerics (M3-6 already covers that, at `pad==0`).
+
+### Step 2a — synthetic EVEN-diff case: the crop branch runs and matches FP64
+
+Kernel=7, dilation=3 (a real dilation, reused for realism) but padding deliberately set to
+`7` instead of the real formula's `9` (2 less) → `diff = 18 - 14 = 4` (even), `pad_crop = 2 > 0`:
+the guard branch (`if pad > 0: x = x[..., pad:-pad]`) actually executes for the first time in this
+project. Snake→conv→snake→conv ran through both `snake_expr`/`conv1d_expr` (from
+`m2_residual_unit_prototype.py`) on a MAX graph (`InferenceSession(devices=[CPU()])` — no GPU
+placement needed for this branch, per the plan's "Devices: CPU is sufficient" note) and a
+FP64 NumPy mirror; the crop+residual-add itself ran as its own tiny MAX graph using
+`TensorValue` slicing identical to `_BosonResidualUnit`'s own guard.
+
+```text
+x_len=40 y_len=36 diff=4 (even) pad_crop=2
+FP64 reference shape=(1, 16, 36)  (matches y_len: True)
+MAX crop-branch result vs FP64 reference:
+  max|err|=4.06012e-06  max_rel_err=0.000295777
+  combined_ratio=0.00651208 (atol=0.000106259 rtol=0.005)  combined_pass=True  fail_n=0
+  nan=0 inf=0  exact_zero(got)=0 exact_zero(ref)=0
+Step 2a PASS=True
+```
+
+`combined_max_ratio=0.0065` is comfortably inside the M3-5/M3-6 gating band (`<=1`), on par with
+the M2 residual-unit composite's own `max|err|=4.10e-06`. **The `pad>0` crop-branch arithmetic
+itself is correct** — it was simply never exercised by a real config, not broken.
+
+### Step 2b — synthetic ODD-diff case: the §7 asymmetric-crop hazard is a real crash, not a silent divergence
+
+`m1-responsibility-map.md` §7 warns: "when `len_x - len_y` is odd, integer division makes the
+crop asymmetric-by-one in PyTorch's favour." This task checks that literally, against real
+PyTorch, rather than trusting the prose. General arithmetic (`pad = diff // 2`, remove `2*pad`
+total from `x`):
+
+```text
+diff  pad_crop  xc_len  y_len  xc_len==y_len
+   0         0      40     40   True
+   1         0      40     39   False
+   2         1      38     38   True
+   3         1      38     37   False
+   4         2      36     36   True
+   5         2      36     35   False
+```
+
+For every **odd** `diff` with `pad_crop>0`, `xc_len = y_len + 1` — the cropped `x` ends up
+**exactly one element longer than `y`**, not equal to it. That is stronger than "asymmetric": it
+is a genuine shape mismatch. Concrete case forcing this with `pad_crop>0`: `kernel=8` (even, so
+`k-1=7` is odd), `dilation=1` (odd) → `(k-1)*d=7` is odd, so *any* padding choice on this config
+yields an odd `diff` (since `2P` is always even); `padding=2` gives `diff=3`, `pad_crop=1`,
+`x_len=30`, `y_len=27`, cropped `xc_len=28 != y_len=27`.
+
+- **NumPy mirror of the exact guard** (`pixi` env, `.mojo-probe-stable`): attempting
+  `xc + y` raised `ValueError('operands could not be broadcast together with shapes (1,8,28)
+  (1,8,27) ')`, as expected.
+- **Live cross-check against real PyTorch** (same `x`/`w1`/`b1`, run separately under
+  `.venv-tts` since `torch` and `max` cannot coexist in either project env): PyTorch raised
+  `RuntimeError('The size of tensor a (28) must match the size of tensor b (27) at
+  non-singleton dimension 2')` on the identical inputs.
+
+**Both implementations fail in the same way on the same odd-diff config.** "Matches PyTorch's
+actual asymmetric-crop behaviour" here means reproducing the *same failure*, not computing a
+spurious matching number — S7's hazard is real: if a future config (real or otherwise) ever
+produced an odd `len(x)-len(y)` past this guard, `_BosonResidualUnit.forward` would crash with a
+shape-mismatch `RuntimeError`, not silently corrupt output by one sample. No MAX-graph
+equivalent of this crash was additionally exercised (the mismatch is caught at the NumPy/PyTorch
+level before any MAX graph would be built with these shapes) — worth revisiting only if a real
+config is ever found that reaches this state, which Step 1 shows does not happen today.
+
+### Verdict
+
+```text
+reachable_by_real_config=False   (Step 1: pad==0 for all three real dilations, exactly, always)
+even_diff_case_pass=True         (Step 2a: pad>0 branch runs, combined_ratio=0.0065, PASS)
+odd_diff_case_pass=True          (Step 2b: NumPy and real PyTorch fail identically on odd diff)
+OVERALL PASS=True
+```
+
+**RESULT: PASS — defensive/edge-case-only.** No real Higgs decoder-block configuration exercises
+`pad > 0`; this task's value is confirming the crop-guard arithmetic itself is correct where it
+*is* reachable (the even-diff synthetic case), and confirming — against live PyTorch, not just
+the map's prose — that the odd-diff hazard §7 flagged is a genuine shape-mismatch crash rather
+than a subtler numeric divergence, should it ever become reachable in a future config.
+
+## M3-7
+
+Adds the **stride=8 case** (`DecoderBlock(1024, 512, stride=8)`, `k=2*stride=16`,
+`padding=ceil(8/2)=4`, `output_padding=8%2=0`) to `m3_decoder_block_prototype.py`, run on the same
+M1 mixed CPU/GPU MAX graph and the same M3-2 combined-tolerance detector as M3-5/M3-6, with
+SYNTHETIC weights (the plan does not require real weights for this genericity check — that is
+specific to stride-5 in M3-3/M3-6). `seq_len=12` matches `m3_block_reference.py`'s own
+`stride8_1024x512_synthetic` cross-check case.
+
+**Verdict: PASS.** Combined-tolerance gate satisfied at every stage, across 6 input seeds
+(`combined_max_ratio` 0.199–0.282); 0 NaN/Inf; 0 unexplained exact zeros; exact output length
+match (96 == 96) every run.
+
+### What changed in the script, and the stride-5 regression check
+
+`m3_decoder_block_prototype.py`'s module-level constants (`INPUT_DIM`, `OUTPUT_DIM`, `STRIDE`,
+`CT_KERNEL`, `CT_PADDING`, `CT_OUTPUT_PADDING`, `RU_PADDINGS`, `SEQ_LEN`) — hard-coded to the
+stride-5 case by M3-5/M3-6 — were replaced by a `make_config(stride)` function returning a `cfg`
+dict, threaded through `make_synthetic_weights`, `fp64_reference_chain`, and
+`build_decoder_block_graph` (all previously reading the module globals directly). `ct_padding` is
+computed as `-(-stride // 2)` (integer ceiling division), matching `m3-plan.md`'s
+`ceil(stride/2)` formula for both stride=5 (`3`) and stride=8 (`4`). `conv_transpose_expr` and
+`residual_unit_expr` needed no changes — they already took `stride`/`padding`/`output_padding` as
+call arguments, not globals. A new `--stride {5,8}` CLI flag selects the case; `--real-weights`
+is rejected for any stride other than 5 (`parser.error(...)`) since the real checkpoint extraction
+(M3-3) only covers the one real stride-5 block.
+
+**Regression check, as required before trusting this refactor**: re-ran stride=5 synthetic
+(`--seed 57305`) and stride=5 `--real-weights` (`--seed 99`) after the refactor. Both reproduced
+their previously-published numbers **exactly** — synthetic: `combined_ratio=0.103009` at the final
+stage, `atol=0.000879664`, `max|ref|=87.9664`, `RESULT: PASS`; real-weights: `combined_ratio=
+0.029173`, `atol=7.69129e-05`, `max|ref|=7.69129`, `RESULT: PASS` — byte-for-byte identical to the
+M3-5/M3-6 sections above. The stride-generic refactor did not perturb the stride-5 path.
+
+### Per-layer numbers (stride=8, seed=24601)
+
+```text
+after_snake1:           max|err|=4.14003e-07  max_rel_err=5.41298e-07  combined_ratio=0.000107034  (atol=3.43087e-05)  PASS
+after_conv_t1:          max|err|=2.12527e-05  max_rel_err=0.0117281    combined_ratio=0.031077     (atol=0.000129143)  PASS
+after_res_unit1:        max|err|=8.39626e-05  max_rel_err=0.0751533    combined_ratio=0.0818564    (atol=0.000477616)  PASS
+after_res_unit2:        max|err|=0.000463787  max_rel_err=0.0485899    combined_ratio=0.165694     (atol=0.00185249)   PASS
+after_res_unit3_final:  max|err|=0.00248098   max_rel_err=0.208329     combined_ratio=0.218497     (atol=0.00609793)   PASS
+
+PRIMARY GATE (combined tolerance, atol=0.00609793=1e-05*max|ref|(609.793), rtol=0.005):
+  worst-element ratio=0.218497  over-tolerance elements=0/49152 -> PASS
+SECONDARY (reported, not gating): max_abs_err=0.00248098 max_rel_err=0.208329
+  max_rel_err_masked(|ref|>=0.609793)=0.00239995  (literal old 5e-03 max_rel_err gate: FAIL)
+zero NaN/Inf and no unexplained exact-zero tensor across all stages: True
+exact output length match: True (got=96, ref=96)
+RESULT: PASS
+```
+
+All 6 input seeds (same set M3-5/M3-6 swept: 24601/1/2/3/42/12345, 24601 being this case's own
+default synthetic-weight seed in place of M3-5's 57305):
+
+```text
+seed=24601: combined_ratio=0.218497  max_abs_err=0.00248098  max_rel_err=0.208329  max|ref|=609.793  PASS
+seed=1:     combined_ratio=0.246092  max_abs_err=0.00253092  max_rel_err=0.568475  max|ref|=606.634  PASS
+seed=2:     combined_ratio=0.238613  max_abs_err=0.00265507  max_rel_err=0.0950627 max|ref|=701.476  PASS
+seed=3:     combined_ratio=0.199411  max_abs_err=0.0026015   max_rel_err=0.197492  max|ref|=588.858  PASS
+seed=42:    combined_ratio=0.230294  max_abs_err=0.00244675  max_rel_err=0.0309578 max|ref|=601.057  PASS
+seed=12345: combined_ratio=0.281849  max_abs_err=0.00233767  max_rel_err=0.283583  max|ref|=572.151  PASS
+```
+
+`combined_max_ratio` lands in `0.199`–`0.282` across the sweep — comfortably inside the `<=1` gate,
+though notably higher (worse margin, still a clean PASS) than both M3-5's synthetic stride-5 sweep
+(`0.092`–`0.115`) and M3-6's real stride-5 sweep (`0.029`–`0.079`). This tracks with the larger
+absolute output magnitude of this case (`max|ref|` ~570–700 vs stride-5's ~78–88) at the same
+synthetic `N(0, 0.05)` weight/bias scale and the same `1e-5·max|ref|` atol rule — a larger `max|ref|`
+inflates `atol` proportionally, but `max_abs_err` also grows (FP32 rounding-order noise compounds
+with a wider dynamic range and a larger kernel, `k=16` vs `k=10`), landing this case's ratio higher
+in absolute terms while still well under 1. No new bug: `shape_match=True` at every stage, zero
+NaN/Inf, zero exact zeros (got and ref) across all 6 seeds — the block builder's crop/output-length
+arithmetic and the `conv_transpose_expr` padding-crop workaround (M3-5's finding) both generalize
+cleanly to `k=16`, `output_padding=0` (stride-5 used `output_padding=1`), which this case is the
+first to exercise on the MAX graph.
+
+### Stride-genericity conclusion
+
+**M3-7 confirms the block builder is stride-generic, not tuned to the stride-5 case.** The same
+`build_decoder_block_graph`/`conv_transpose_expr`/`residual_unit_expr` code, parameterized only by
+`cfg` (shapes/padding/output_padding derived from `stride` via the same `ceil(stride/2)`/`stride%2`
+formulas `m3-plan.md` specifies), reproduces the M3-5/M3-6 combined-tolerance PASS pattern on a
+second case with a different channel count (`1024→512` vs `512→256`), different kernel size
+(`k=16` vs `k=10`), and — the one structurally new thing this case exercises — `output_padding=0`
+(stride-5's `output_padding=1` never tested the `output_padding=0` branch of
+`ops.conv2d_transpose`'s `output_paddings=` argument before this task).
+
+### Explicit non-goal: cross-block composability is NOT tested here
+
+**Stated plainly, per `m3-plan.md`'s own instruction for this task:** the stride-5 block (M3-5/
+M3-6) and this stride-8 block are tested **independently** — each fed its own synthetic (or, for
+stride-5, real) input, **not** chained output-of-stride-5-into-input-of-stride-8 as the real
+5-block `BosonDacDecoder` does. Cross-block composability — the device-transfer count across
+chained blocks, and whether the ±1-sample length-mismatch hazard §6/§7 of the map/plan warn about
+compounds across multiple chained blocks — **remains untested** and is explicitly deferred to a
+future M4 that assembles the full 5-block decoder. This is not silently assumed to be fine; M3-7
+does not claim it.
+
+### What this does not show
+
+- Only synthetic weights for stride=8 (no real stride-8 checkpoint weights were extracted or
+  tested — not required by this task's done-criteria).
+- M1 only; Tesla T4 re-validation of this case is M3-10.
+- FP32 only; BF16 storage is M3-9.
+- The `pad>0` crop branch in `residual_unit_expr` is still unexercised here — this case's dilated
+  paddings (`(7-1)*d//2` for `d=1,3,9` → `3,9,27`) preserve length exactly, same as stride-5
+  (M3-8 still covers `pad>0` reachability).
+- **Cross-block composability, as stated above, is out of scope for this task and for M3 as a
+  whole** — see the explicit non-goal section.

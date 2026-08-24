@@ -277,7 +277,21 @@ M3-2 detector (which they use), not M3-1.
   *Devices:* M1 GPU + CPU.
   *Tier:* **sonnet-deterministic-code**.
 
-- [ ] **M3-7. Add the stride=8 block case (`1024→512`, `output_padding=0`).**
+- [x] **M3-7. Add the stride=8 block case (`1024→512`, `output_padding=0`).**
+  **DONE — PASSED.** `m3_decoder_block_prototype.py` generalized (module constants replaced by a
+  `make_config(stride)` dict threaded through `make_synthetic_weights`/`fp64_reference_chain`/
+  `build_decoder_block_graph`; `--stride {5,8}` CLI flag added). Combined-tolerance gate satisfied
+  at every stage across 6 seeds, `combined_max_ratio` 0.199–0.282, 0/49152 over-tolerance
+  elements, 0 NaN/Inf, 0 unexplained exact zeros, exact output length match (96==96) every run —
+  synthetic weights only, per the plan. Stride-5 regression-checked after the refactor: both
+  M3-5's synthetic (`--seed 57305`) and M3-6's `--real-weights` (`--seed 99`) paths reproduce
+  their previously-published numbers byte-for-byte (`combined_ratio=0.103009` and `0.029173`
+  respectively). Confirms the block builder is stride-generic (new: `k=16`, `output_padding=0`,
+  never exercised before this task — stride-5 only ever tested `output_padding=1`), not tuned to
+  one case. Detail: [`m3-block-results.md`](m3-block-results.md) (M3-7 section). Per the plan's
+  explicit instruction, the write-up states plainly that stride-5 and stride-8 are tested
+  independently, each fed its own input, NOT chained as the real 5-block decoder does —
+  cross-block composability remains untested, deferred to a future M4.
   *Done when:* passes the same checks as M3-5/M3-6 (the §5 combined tolerance,
   `atol = 1e-05·max|ref|` + `rtol = 5e-03`, as the primary gate), confirming the block builder is
   stride-generic rather than tuned to one case.
@@ -294,7 +308,20 @@ M3-2 detector (which they use), not M3-1.
   *Tier:* **haiku-research** is NOT appropriate; **sonnet-deterministic-code** (small but it is a
   correctness result).
 
-- [ ] **M3-8. Exercise the `pad > 0` crop branch.**
+- [x] **M3-8. Exercise the `pad > 0` crop branch.**
+  **DONE — PASSED, defensive/edge-case-only.** Step 1 (reachability, checked first per the task):
+  `_BosonResidualUnit`'s real kernel=7 makes `(k-1)=6` even, so `(k-1)*dilation` is even for every
+  real dilation `{1,3,9}` and the padding formula's `//` never truncates — `diff=0` exactly for
+  all three, with no dependence on input length. **No real `_BosonDecoderBlock` config can ever
+  reach `pad>0`**, confirming and closing `m2-residual-unit-results.md`'s open question. Step 2a:
+  a synthetic even-diff case (kernel=7/dilation=3 with padding forced 2 below the real formula)
+  actually executes the `pad>0` guard branch on a MAX graph and matches the FP64 reference
+  (`combined_ratio=0.0065`, PASS). Step 2b: a synthetic odd-diff case (kernel=8/dilation=1,
+  `diff=3`) was checked against **live PyTorch** (not just the map's prose) — both the NumPy
+  mirror and real PyTorch raise the identical shape-mismatch error (`ValueError` /
+  `RuntimeError`), confirming `m1-responsibility-map.md` §7's asymmetric-crop hazard is a genuine
+  crash if ever reached, not a silent numeric divergence. Detail:
+  [`m3-block-results.md`](m3-block-results.md) (M3-8 section).
   `m2-residual-unit-results.md` explicitly records that only the `pad == 0` no-op branch has ever
   run, and — per that same doc — in the real config the dilated conv's `(k-1)*dilation//2`
   padding formula already preserves length exactly, which may make `pad > 0` unreachable for any
