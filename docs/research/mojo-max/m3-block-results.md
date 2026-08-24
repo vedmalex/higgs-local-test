@@ -530,3 +530,114 @@ transposed-conv crop) was found and fixed *before* any of these numbers, and is 
 Remaining caveats are unchanged and are still the ones listed under "What this does not show":
 synthetic weights only, stride-5 only, M1 only, FP32 only. The correction settles how the numbers
 are scored; it does not widen what was tested.
+
+## M3-6
+
+Re-run of M3-5's exact MAX graph (same `m3_decoder_block_prototype.py`, same
+`build_decoder_block_graph`/`residual_unit_expr`/`conv_transpose_expr`, same M3-2/M3-5-corrected
+combined-tolerance detector) against the **real stride-5 `_BosonDecoderBlock` (block 1)** weights
+M3-3 extracted from `bosonai/higgs-tts-3-4b`, compared against a real-weight FP64 NumPy reference
+built the same way M3-4's `run_real_weight_cross_check` builds one.
+
+**Verdict: PASS.** Combined-tolerance gate satisfied at every stage, across 6 input seeds; 0
+NaN/Inf; 0 unexplained exact zeros; exact output length match (100 == 100) every run.
+
+### What changed vs. M3-5, and why
+
+The real checkpoint's `acoustic_decoder.*` conv tensors are already plain, folded `weight`/`bias`
+(no `weight_g`/`weight_v` split survives — M3-3's finding), so no fold step runs here; the
+extracted tensors are used directly, exactly as M3-4's real-weight cross-check does. The one
+genuinely new engineering problem this task hit was **environment, not arithmetic**: reading the
+real checkpoint's BF16 tensors needs `torch` (`safetensors`' `framework="numpy"` cannot decode
+BF16 — confirmed empirically: `TypeError: data type 'bfloat16' not understood` against this exact
+checkpoint file), and `torch` lives only in `.venv-tts`, never in the pixi/MAX toolchain env this
+script's graph-building/execution runs in (confirmed: `pixi run python -c "import torch"` →
+`ModuleNotFoundError`). The fix, new file **`m3_real_weights_export.py`**: run once under
+`.venv-tts` (which has torch/safetensors/transformers), it calls `m3_block_weights.py`'s existing
+`load_raw()` helper, upcasts every BF16 tensor to FP32, generates a fixed-seed random input
+(`np.random.default_rng(seed).uniform(-2, 2, ...)`, matching `run_real_weight_cross_check`'s
+convention), and writes one plain-FP32 `.npz` cache
+(`docs/research/mojo-max/.m3_real_weights_block1.npz`, ~11.6MB, gitignored — a regeneratable
+derived artifact of the checkpoint, not source). `m3_decoder_block_prototype.py`'s new
+`make_real_weights()` loads that cache with NumPy alone and regenerates it automatically (via a
+`subprocess` call to `.venv-tts/bin/python`, invoked *unresolved* — an early version called
+`.resolve()` on the venv's `bin/python` symlink, which fully dereferenced the symlink chain to the
+bare system `python3.12` and silently lost the venv's site-packages, `ModuleNotFoundError: No
+module named 'numpy'`; fixed by keeping the venv `bin/python` path unresolved) whenever the cached
+`seed`/`seq_len` don't match the request — so `--real-weights [--seed N]` reproduces this section
+end-to-end with no separate manual step. `m3_decoder_block_prototype.py`'s graph-building code
+(`conv_transpose_expr`, `residual_unit_expr`, `build_decoder_block_graph`) and the M3-2 divergence
+detector are untouched; only the weight *source* and the FP64-reference *input* differ from M3-5.
+
+### Per-layer numbers (seed=99, the default — matches M3-4's real-weight cross-check convention)
+
+```text
+after_snake1:           max|err|=1.38176e-07  max_rel_err=6.73856e-08  combined_ratio=1.3424e-05   (atol=2.22271e-05)  PASS
+after_conv_t1:          max|err|=1.00833e-06  max_rel_err=0.00492523   combined_ratio=0.0330783    (atol=1.02818e-05)  PASS
+after_res_unit1:        max|err|=2.57465e-06  max_rel_err=0.00245628   combined_ratio=0.0395804    (atol=2.01793e-05)  PASS
+after_res_unit2:        max|err|=5.26692e-06  max_rel_err=0.0244994    combined_ratio=0.0371279    (atol=3.72341e-05)  PASS
+after_res_unit3_final:  max|err|=1.27958e-05  max_rel_err=0.231255     combined_ratio=0.029173     (atol=7.69129e-05)  PASS
+
+PRIMARY GATE (combined tolerance, atol=7.69129e-05=1e-05*max|ref|(7.69129), rtol=0.005):
+  worst-element ratio=0.029173  over-tolerance elements=0/25600 -> PASS
+SECONDARY (reported, not gating): max_abs_err=1.27958e-05 max_rel_err=0.231255
+  max_rel_err_masked(|ref|>=7.69129e-03)=0.00028172  (literal old 5e-03 max_rel_err gate: FAIL)
+zero NaN/Inf and no unexplained exact-zero tensor across all stages: True
+exact output length match: True (got=100, ref=100)
+RESULT: PASS
+```
+
+All 6 input seeds re-run under the combined metric (weights are fixed/real; only the random
+input `x` varies per seed, mirroring M3-5's sweep methodology):
+
+```text
+seed=99:    combined_ratio=0.029173   max_abs_err=1.27958e-05  max_rel_err=0.231255   max|ref|=7.69129  PASS
+seed=1:     combined_ratio=0.0468884  max|ref|=7.58627  PASS
+seed=2:     combined_ratio=0.0469353  max|ref|=6.99897  PASS
+seed=3:     combined_ratio=0.0787028  max|ref|=7.31323  PASS
+seed=42:    combined_ratio=0.0738197  max|ref|=7.6824   PASS
+seed=12345: combined_ratio=0.0429841  max|ref|=7.94414  PASS
+```
+
+`combined_max_ratio` across the sweep lands in `0.029`–`0.079` — every run comfortably inside the
+`<=1` gate, and, notably, tighter than M3-5's synthetic-weight sweep (`0.092`–`0.115`). All 6 real
+runs also passed the structural checks independently of the tolerance question: `shape_match=True`
+at every stage, `exact_zero_count=0` everywhere (got and ref), `nan=0`/`inf=0` everywhere.
+
+### The expected-magnitude check from M3-4, confirmed
+
+M3-4's real-weight FP64-vs-PyTorch-FP32 cross-check found `max|err|=1.27e-05` at the final stage,
+diagnosed as pure FP32 rounding-order noise at real-checkpoint depth/magnitude, not a reference
+bug (its own diagnostic: `torch-FP32-forward vs torch-FP64-forward` and `numpy-FP64-ref vs
+torch-FP64-forward` were the same order of magnitude, with the latter near machine epsilon). This
+task's seed=99 final-stage `max_abs_err=1.27958e-05` — the seed choice was inherited from that same
+convention, not cherry-picked — lands within **6e-8 of M3-4's number**, which is exactly the
+"expected to show error at least that large just from that same source" the task brief called out.
+The MAX graph's own FP32 execution adds essentially nothing detectable on top of that FP32-forward
+floor at this element count/depth.
+
+### Weights-vs-graph-structure discrimination (per the task brief)
+
+**M3-5 (synthetic) passed, and M3-6 (real weights) also passes — no divergence to localize.**
+Per the task brief, a divergence here (M3-5 pass, M3-6 fail) would have localized a problem to the
+weights/layout rather than the graph structure. That didn't happen: real-checkpoint weight/alpha
+magnitudes (per M3-3: alphas in roughly `[-0.09, 0.73]`, none in the dangerous near-zero reciprocal
+regime; `max|ref|` at the final stage ~`7–8`, an order of magnitude smaller than M3-5's synthetic
+`~77–88`) exercise a materially different value regime from M3-5's `N(0, 0.05)` synthetic weights,
+and the graph still tracks its own FP64 reference to the same combined-tolerance margin (in fact a
+tighter one). This is affirmative evidence that M3-5's PASS was not an artifact of synthetic
+weights happening to avoid some real-weight-only edge case (extreme values, near-zero alpha, a
+layout assumption real weights would violate) — the same graph, the same per-layer wiring, and the
+same layout convention (`ct_weight`/`w1`/`w2` in PyTorch's native `[C_in,C_out,K]`/`[C_out,C_in,K]`
+layout, transposed to RSCF for MAX exactly as M3-5 does) hold up unchanged under real values.
+
+### What this does not show
+
+Same caveats as M3-5, narrowed only where this task changed them: stride-5 only (M3-7 still
+covers stride=8), M1 only (T4 re-validation is M3-10), FP32 only (BF16 storage is M3-9), and the
+`pad>0` crop branch is still unexercised (M3-8) — this task's real dilated-conv paddings
+(`(k-1)*dilation//2` for dilation `1,3,9` → `3,9,27`) all preserve length exactly, so `pad==0`
+throughout, matching M2's finding that the real config may never reach `pad>0`. One input
+(seq_len=20) and one real block (block 1, the only stride-5 block in this checkpoint) were tested;
+cross-block composability of the full 5-block decoder remains out of scope per M3-7's explicit
+non-goal note.
