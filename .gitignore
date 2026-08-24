@@ -27,3 +27,6 @@ __pycache__/
 # коммитится, а .agents/.claude/skills — нет, по аналогии с node_modules.
 .agents/
 .claude/
+# Scratch clones of vllm-omni/modular used for M1 fact-extraction research —
+# large, reproducible from their pinned refs, never committed.
+.research-scratch/
