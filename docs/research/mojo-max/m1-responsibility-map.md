@@ -406,6 +406,14 @@ available) is still the open, undetermined data point, not resolved by this M1-s
 also fails, the whole ConvTranspose1d path is CPU-only for now, on both targets; if T4 works,
 this is a Metal-backend bug worth reporting to Modular.
 
+**Partial T4 result, 2026-08-24 (one case of five):** T4 does **not** reproduce the Metal
+crash — cuDNN loads and the kernel dispatches — but case 0 (`stride=8, output_padding=0`) fails
+inside cuDNN with `CUDNN_STATUS_ALLOC_FAILED`, a catchable `ValueError`, not a process abort.
+This is a different failure class than Metal's missing-symbol crash, and not yet enough
+evidence to conclude either "T4 works" or "T4 is broken" — see the T4 section of
+[`m2-convtranspose1d-results.md`](m2-convtranspose1d-results.md) for the full reasoning and
+what's still needed (the other four cases, a VRAM check).
+
 ---
 
 ## 7. `_BosonResidualUnit`, `_BosonDecoderBlock`, `BosonDacDecoder`
