@@ -443,8 +443,12 @@ def main() -> None:
         capability = facts["cuda_capability_tuple"]
         command = server_command(model_dir, args, capability)
         for extra in args.server_arg:
-            key, _, value = extra.partition("=")
-            command += [f"--{key.strip().lstrip('-').replace('_', '-')}", value.strip()]
+            key, sep, value = extra.partition("=")
+            flag = f"--{key.strip().lstrip('-').replace('_', '-')}"
+            # No "=" means a boolean flag (e.g. "enforce-eager"): appending an
+            # empty-string value after it would misparse as an extra
+            # positional argument to `vllm serve`.
+            command += [flag, value.strip()] if sep else [flag]
         report["server_command"] = command
         if "--deploy-config" in command:
             report["deploy_config"] = command[command.index("--deploy-config") + 1]

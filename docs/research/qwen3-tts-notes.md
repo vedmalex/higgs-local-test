@@ -480,12 +480,30 @@ Source: [vLLM issue #47549 — FlashInfer no longer available on SM75](https://g
 
 ## Workaround B — forked vllm-omni source (`QWEN_OMNI_SOURCE="fork"`) (2026-08-24)
 
-**Status: the patch is written and only STATICALLY checked (it compiles and
-imports; the changed lines were read against their call sites). It is NOT
-confirmed on a real GPU.** This machine is an Apple Silicon M1 with no CUDA, so
-the failure this patch targets cannot be reproduced here, and therefore cannot
-be shown fixed here either. Nothing below may be reported as a working fix
-until a real T4 run says so.
+**Status: CONFIRMED WORKING on a real Colab Tesla T4 (2026-08-24).** All three
+Qwen3-TTS jobs that previously crashed with `RuntimeError: index_copy_(): ...
+Half ... BFloat16` on every attempt now report `PASSED`, with real,
+independently re-verified waveform statistics (not the #48 constant-signal
+failure mode):
+
+| Job | Model | RTF | peak | rms | full_scale_fraction | distinct (first 4096) |
+| --- | --- | --: | --: | --: | --: | --: |
+| `qwen_tts_clone` | `0.6b-base` | 1.392 | 13406 | 1577.3 | 0.0 | 20 |
+| `qwen_tts_basic` | `0.6b-customvoice` | 1.234 | 19517 | 2803.6 | 0.0 | 38 |
+| `qwen_tts_style` | `0.6b-customvoice` | 1.118 | 24785 | 2964.9 | 0.0 | 7 |
+
+`attention_backend_observed` still correctly shows `["TRITON_ATTN"]` on both
+runs — the fix is entirely about the dtype hardcode, not the attention
+backend. `server_startup_seconds` (573.7s / 490.1s) is unaffected by this
+patch — that cost is `torch.compile`/CUDA-graph-capture overhead, tracked
+separately below (see "Startup cost and `--enforce-eager`").
+
+The one-line fix (`self._embedding_dtype = model_dtype` instead of a hardcoded
+`torch.bfloat16`) is now a validated bugfix, not a hypothesis. The upstream PR
+described below has been opened against `vllm-project/vllm-omni`.
+
+Historical note (below): this section originally described the patch as
+statically-checked only, before the GPU run above.
 
 This pass located the same root cause independently (the same
 `self._embedding_dtype = torch.bfloat16` hardcode described in the section
@@ -523,19 +541,11 @@ the whisper encoder (`tokenizer_25hz/vq/whisper_encoder.py:126` also branches on
 `float16`/`bfloat16`), the encoder is the next thing to look at, and this
 conclusion was wrong.
 
-**No PR has been opened against `vllm-project/vllm-omni`.** The branch is pushed
-to the fork and ready, but submitting an unvalidated patch to an upstream
-open-source project is a decision for the repository owner, not for an agent
-that cannot run the test. To open it manually:
-
-```bash
-gh pr create --repo vllm-project/vllm-omni \
-    --head vedmalex:fix/qwen3-tts-embedding-dtype --base main
-```
-
-Do that only after a real GPU run confirms the patch actually fixes the crash;
-upstream's #3253 was accompanied by a `g4dn.xlarge` (T4) test, and this one
-would need the same evidence.
+**Upstream PR opened, with GPU evidence attached:**
+<https://github.com/vllm-project/vllm-omni/pull/6545> (2026-08-24), after the
+real Colab T4 run above confirmed the fix — matching upstream's own #3253
+precedent of accompanying a fp16-only-GPU dtype fix with real hardware
+evidence (that one used a `g4dn.xlarge`).
 
 ### How to run it, and what to compare against
 
@@ -555,39 +565,65 @@ recorded in each `metrics/tts_qwen_<variant>.json` as `vllm_omni_source` /
 `vllm_omni_spec`, so a report can never be silently attributed to the wrong
 install.
 
-There are two independent candidate approaches to this crash, and the point of
-the next T4 run is to tell them apart:
+There were two independent candidate approaches to this crash. **Workaround B
+is now confirmed working on real hardware** (above); Workaround A has not yet
+been run on a GPU:
 
-| Approach | How to enable | Mechanism |
-| --- | --- | --- |
-| Workaround B — forked source (this section) | `QWEN_OMNI_SOURCE="fork"` in the notebook | the installed package's own source is corrected (git-install of the fork branch) |
-| Workaround A — runtime monkeypatch | `--enable-dtype-patch` on `src/tts_qwen_cuda.py` | `configs/qwen3_tts_dtype_fix.py`, loaded via a generated `sitecustomize.py` on the server's `PYTHONPATH`, re-registers a dtype-aligned talker subclass into vllm-omni's own `OmniModelRegistry` (NOT `vllm.ModelRegistry`, which is a no-op for the omni path — see Workaround A's section) |
+| Approach | How to enable | Mechanism | Status |
+| --- | --- | --- | --- |
+| Workaround B — forked source | `QWEN_OMNI_SOURCE="fork"` in the notebook | the installed package's own source is corrected (git-install of the fork branch) | **CONFIRMED on real T4 (2026-08-24)** |
+| Workaround A — runtime monkeypatch | `--enable-dtype-patch` on `src/tts_qwen_cuda.py` | `configs/qwen3_tts_dtype_fix.py`, loaded via a generated `sitecustomize.py` on the server's `PYTHONPATH`, re-registers a dtype-aligned talker subclass into vllm-omni's own `OmniModelRegistry` (NOT `vllm.ModelRegistry`, which is a no-op for the omni path — see Workaround A's section) | **not yet run on a GPU** |
 
-Both are merged into the same tree; enable at most one per run, or the result
-cannot be attributed to either mechanism.
+Both are merged into the same tree; enable at most one per run, or a result
+cannot be attributed to either mechanism. With B confirmed and an upstream PR
+open (vllm-project/vllm-omni#6545), running A too is now optional polish
+(confirming the registry-based monkeypatch also works) rather than the only
+path to a working Qwen3-TTS on T4.
 
-Next real Colab/Kaggle T4 run, in this order:
+Steps 1 (baseline, reproduced three times) and 2 (Workaround B, confirmed
+above) are done. Remaining, in order of priority:
 
-1. Baseline: `QWEN_OMNI_SOURCE="pypi"`, no runtime patch. The `index_copy_`
-   crash is expected — it is already reproduced twice, so this only confirms
-   the environment matches the earlier runs. Skip it only if GPU quota is tight.
-2. `QWEN_OMNI_SOURCE="fork"`, runtime patch off. Record whether the server
-   starts, whether the install from git succeeded at all (a git-install or
-   `setuptools-scm` failure is a `FAILED` for the *installation*, not evidence
-   about the patch), and whether each of `qwen_tts_basic`, `qwen_tts_clone`,
-   `qwen_tts_style` produces audio that passes the existing
-   `audio_statistics()` / `audio_defect()` checks in `src/tts_cuda_common.py`.
-3. Workaround A: `QWEN_OMNI_SOURCE="pypi"` plus `--enable-dtype-patch`, same
-   three jobs (check `dtype_patch_observed_in_server_log` first — see
-   Workaround A's checklist above).
-4. Compare. A crash-free run is not by itself a pass: Higgs's #48 is the
-   standing reminder that a T4 can return a formally valid WAV containing a
-   constant signal. The waveform checks decide, and the result must be recorded
-   in issue #52 per approach, naming which install produced it.
+3. Workaround A (optional now, not blocking): `QWEN_OMNI_SOURCE="pypi"` plus
+   `--enable-dtype-patch`, same three jobs (check
+   `dtype_patch_observed_in_server_log` first — see Workaround A's checklist
+   above). Both approaches change the same one line's effect, so they should
+   either both work or both fail; if they disagree, that disagreement is
+   itself a finding, not a reason to just keep the one that looks green.
+4. Startup-cost experiment: `--enforce-eager` (see "Startup cost and
+   `--enforce-eager`" below) — orthogonal to the dtype fix, aimed at the
+   ~500-590s `server_startup_seconds` observed in every run so far.
+5. Phase 2 (1.7B CustomVoice/VoiceDesign/Base) now that Phase 1 is confirmed
+   working via Workaround B.
 
-Both approaches change the same one line's effect, so they should either both
-work or both fail. If they disagree, one of them is not doing what it claims,
-and that discrepancy is the finding — do not just keep the one that looks green.
+## Startup cost and `--enforce-eager` (2026-08-24)
+
+`server_startup_seconds` was 592.3s / 526.2s (2026-08-23 baseline run) and
+573.7s / 490.1s (2026-08-24 fork run) — roughly nine-and-a-half to ten minutes
+per model variant, against a request that itself completes in 20-30 seconds
+once the server is up. Weight download is 20-60s of that; the rest is `vLLM`'s
+default `torch.compile` (Dynamo/Inductor) tracing and CUDA-graph capture across
+the `cudagraph_capture_sizes` list (17 batch sizes: 1, 2, 4, ..., 128), each of
+which needs its own warm-up forward pass and graph capture. On a T4
+(compute 7.5, Turing) this is slower than on newer architectures — the log
+line `Not enough SMs to use max_autotune_gemm mode` shows Inductor's
+autotuning itself running a degraded path — and none of that per-batch-size
+investment pays off for this project's actual usage: one request at a time,
+never a batch of 128 concurrent requests.
+
+`vllm serve ... --enforce-eager` disables both `torch.compile` and CUDA-graph
+capture, trading a small per-token eager-mode slowdown (irrelevant at this
+project's request volume) for skipping essentially all of that ~500s startup
+cost. This project's own Higgs Turing deploy profile
+(`configs/higgs_multimodal_qwen3_turing.yaml`) already sets
+`enforce_eager: true` per stage for exactly this reason; Qwen3-TTS has no
+deploy-config equivalent yet and the plain `vllm serve` command line used by
+`src/tts_qwen_cuda.py` does not pass it. This is untested for Qwen3-TTS on a
+T4 — the eager-mode code path is the same one that produced the dtype crash
+fixed above, so it should not change *whether* synthesis works, only *how
+fast the server becomes ready to try*. `--server-arg enforce-eager` already
+works as a pass-through flag on `src/tts_qwen_cuda.py` without any code
+change; the notebook's `QWEN_SERVER_ARGS = ["enforce-eager"]` is the way to
+try it on the next run.
 
 ## Open questions / not found in primary sources
 
