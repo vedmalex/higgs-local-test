@@ -16,3 +16,12 @@ samples/*.ogg
 __pycache__/
 .hf-helper-cache/
 .DS_Store
+
+# Issue #57 (Mojo/MAX research): изолированные окружения pixi с Mojo/MAX.
+# ~1.9 ГБ на окружение — скачанные бинарники в Git не хранятся.
+.mojo-probe/
+.mojo-probe-stable/
+# Официальные skills Modular, поставленные через `npx skills add modular/skills`.
+.agents/
+.claude/
+skills-lock.json

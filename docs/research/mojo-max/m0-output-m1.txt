@@ -1,0 +1,58 @@
+### issue #57 M0 probe: Mojo/MAX hardware + numerical smoke test ###
+=== GPU / accelerator section ===
+has_accelerator            = True
+has_apple_gpu_accelerator  = True
+has_nvidia_gpu_accelerator = False
+has_amd_gpu_accelerator    = False
+device name = Apple M1
+device api  = metal
+  [BLOCKED] GPU vector-add failed: At max/mojo/max/gpu/host/_device_context_extras.mojo:168:17: Failed to create Metal function: m0_smoke_test_gpu_vadd_TileTe6A6AoA6A6A_cbbeb29f3ee4a585
+To get more accurate error information, set MODULAR_DEBUG=device-sync-mode.
+  [BLOCKED] GPU matmul fp32 failed: At max/mojo/max/gpu/host/_device_context_extras.mojo:168:17: Failed to create Metal function: m0_smoke_test_gpu_matmul_DTyp6A6AcB6A6A_4d2b48ddf27c18d6
+To get more accurate error information, set MODULAR_DEBUG=device-sync-mode.
+  [BLOCKED] GPU matmul fp16 failed: At max/mojo/max/gpu/host/_device_context_extras.mojo:168:17: Failed to create Metal function: m0_smoke_test_gpu_matmul_DTyp6A6AcB6A6A_67e0971060677315
+To get more accurate error information, set MODULAR_DEBUG=device-sync-mode.
+  [SKIPPED/BLOCKED] GPU matmul bf16 unavailable: At max/mojo/max/gpu/host/_device_context_extras.mojo:168:17: Failed to create Metal function: m0_smoke_test_gpu_matmul_DTyp6A6AcB6A6A_e232b88ea102f628
+To get more accurate error information, set MODULAR_DEBUG=device-sync-mode.
+
+=== CPU / host numerical section (reference) ===
+matmul fp32 (acc fp32): min -8.778667 max 9.596451 nan/inf 0
+  [PASSED] matmul FP32 finite
+matmul fp16 (acc fp16): nan/inf 0 max|err| vs fp32 0.021327019 max rel(>0.1) 0.061863705
+matmul fp16 (acc fp32): nan/inf 0 max|err| vs fp32 0.0038223267 max rel(>0.1) 0.014604608
+  [PASSED] matmul FP16 finite
+  [PASSED] FP32 accumulation improves FP16 matmul
+matmul bf16 (acc fp32): nan/inf 0 max|err| vs fp32 0.033950806 max rel(>0.1) 0.1079008
+  [PASSED] matmul BF16 finite
+large-magnitude matmul: fp32 true max 77731.24 (FP16 finite range is 65504)
+  fp16 acc fp16: nan/inf 11 zeros 0
+  fp16 acc fp32: nan/inf 6 zeros 0
+  [PASSED] FP16 matmul overflow reproduced in the #48 regime
+  [PASSED] FP32 accumulation strictly reduces FP16 overflow count
+  [PASSED] FP32 accumulation alone does NOT fully repair overflow (expected)
+softmax fp32: sum 1.0000005 max 0.11529518 nan/inf 0
+softmax fp16 (acc fp16): nan/inf 0 max|err| 0.0003106445
+softmax fp16 (acc fp32): nan/inf 0 max|err| 0.00015059113
+  [PASSED] softmax FP32 sums to 1
+  [PASSED] softmax FP16 finite
+extreme-score softmax: fp32 nan/inf 0 fp16 nan/inf 0 fp16 max|err| 1.4364719e-05
+  [PASSED] max-subtracted softmax survives extreme scores in FP16
+rmsnorm fp32: min -1.7403387 max 1.7506354 nan/inf 0
+rmsnorm fp16 (acc fp16): nan/inf 0 max|err| 0.0029147863
+rmsnorm fp16 (acc fp32): nan/inf 0 max|err| 0.00080513954
+  [PASSED] rmsnorm FP32 finite
+  [PASSED] rmsnorm FP16 with FP32 accumulation finite
+rmsnorm large input (sum-of-squares ~5e6, beyond FP16 range):
+  acc fp16: nan/inf 0 zeros 256 max|err| vs fp32 1.7506355
+  acc fp32: nan/inf 0 zeros 0 max|err| vs fp32 0.0008292198
+  [PASSED] RMSNorm FP16 accumulation corrupts SILENTLY (finite but wrong)
+  [PASSED] RMSNorm collapses to all-zero under FP16 accumulation
+  [PASSED] FP32 accumulation fully repairs RMSNorm
+silu-gated fp32: min -30.964148 max 33.96759 nan/inf 0
+silu-gated fp16: nan/inf 0 max|err| 0.0374012 max rel(>0.1) 0.0017562123
+  [PASSED] silu-gated FP32 finite
+  [PASSED] silu-gated FP16 finite
+NaN/Inf propagation: injected 2 bad inputs -> softmax bad count 2
+  [PASSED] NaN/Inf detected rather than silently swallowed
+
+### end of M0 probe ###
