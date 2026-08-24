@@ -240,9 +240,10 @@ Two directly relevant, independent upstream data points found:
   fp16-only GPUs`" — wraps `CodePredictorBaseModel` in a `torch.amp.autocast`
   to `float32` specifically when running fp16-only on T4/SM75-class hardware,
   tested on a `g4dn.xlarge` (T4). This is Qwen3-TTS-specific and already
-  merged, so it likely **is** present in the pinned `vllm-omni==0.26.0` — but
-  it targets the *code predictor* submodule, not whatever produces the
-  Talker-stage `req_embeds` that actually crashed here. It confirms this
+  merged, and its presence in the pinned `vllm-omni==0.26.0` is now
+  **verified**, not just likely (see "Resolution of the PR #3253 discrepancy"
+  below) — but it targets the *code predictor* submodule, not whatever
+  produces the Talker-stage `req_embeds` that actually crashed here. It confirms this
   general class of fp16-only-GPU dtype bug in Qwen3-TTS's vllm-omni
   integration was already known and partially fixed upstream, in a different
   submodule than the one this run hit.
@@ -302,6 +303,170 @@ What is verifiable from the deploy config and the checkpoint metadata:
   `configs/higgs_multimodal_qwen3_turing.yaml` exists upstream or in this
   repository yet.
 
+## Root cause localized; two UNTESTED workarounds written (2026-08-24)
+
+The submodule the section above recorded as "not resolved" is now located, by
+reading vllm-omni's own source at the `v0.26.0` tag (the pinned version) and at
+`main`. **This closes the open question; it does not fix anything yet.**
+
+Two independent passes reached the same root cause and produced two different,
+mutually independent delivery mechanisms, both merged here as explicitly
+opt-in, off-by-default paths: **Workaround A** (runtime monkeypatch,
+`--enable-dtype-patch`, this section) and **Workaround B** (forked vllm-omni
+source, `QWEN_OMNI_SOURCE="fork"`, its own section below). Neither has ever
+run on a GPU.
+
+### The exact line
+
+`vllm_omni/model_executor/models/qwen3_tts/qwen3_tts_talker.py`,
+`Qwen3TTSTalkerForConditionalGeneration.__init__` — **line 446 at `v0.26.0`**,
+line 468 on `main` (checked 2026-08-24: **still unfixed upstream**):
+
+```python
+model_dtype = getattr(vllm_config.model_config, "dtype", torch.bfloat16)  # reads the engine dtype
+self.register_buffer(
+    "_tts_pad_embed",
+    torch.zeros(1, int(self.talker_config.hidden_size), dtype=model_dtype),  # honours it
+    persistent=False,
+)
+self._embedding_dtype = torch.bfloat16   # <-- HARDCODED, ignores model_dtype
+```
+
+`_embedding_dtype` is read at lines 690 (scalar `preprocess()` decode branch),
+840 (`preprocess_decode_batch`, the `preprocess_decode_batch` hook
+`OmniGPUModelRunner` calls) and 1099 (`talker_mtp`). So this single line is what
+makes the `req_embeds` handed back to `flush_decode_batch` bfloat16 while the
+engine's `inputs_embeds` is the forced float16 — precisely the measured
+`index_copy_(): ... (self) Half and (source) BFloat16` crash. Confirmed by two
+independent readings of the source, not inferred from the traceback alone.
+
+Sources:
+[`qwen3_tts_talker.py` @ `v0.26.0`](https://raw.githubusercontent.com/vllm-project/vllm-omni/v0.26.0/vllm_omni/model_executor/models/qwen3_tts/qwen3_tts_talker.py),
+[same file @ `main`](https://raw.githubusercontent.com/vllm-project/vllm-omni/main/vllm_omni/model_executor/models/qwen3_tts/qwen3_tts_talker.py).
+
+### Resolution of the PR #3253 discrepancy (verified on GitHub, 2026-08-24)
+
+Two consecutive passes disagreed about PR #3253: the first guessed its fix
+"likely **is** present in the pinned `vllm-omni==0.26.0`"; a later pass
+"corrected" that to "not found in the source at either ref" after grepping
+`qwen3_tts_talker.py` and `qwen3_tts_code_predictor_vllm.py` for
+`torch.amp.autocast`. Both were then checked against the actual PR on GitHub:
+
+- `gh pr view 3253 --repo vllm-project/vllm-omni` shows it MERGED
+  (2026-04-29, merge commit `b9789091`), touching exactly **one** file:
+  `vllm_omni/model_executor/models/common/qwen3_code_predictor.py` — a file in
+  `models/common/`, i.e. **neither of the two files the "correction" pass
+  grepped**. That is why the autocast was "not found": it was searched for in
+  the wrong files.
+- The GitHub compare API (`b9789091...v0.26.0`) reports the merge commit is an
+  ancestor of the `v0.26.0` tag (`behind_by: 0`), and
+  `qwen3_code_predictor.py` at `v0.26.0` does contain the change
+  ("Run the transformer body in float32 when the model is in fp16",
+  `torch.amp.autocast(..., dtype=torch.float32)`, plus `float32` softmax in
+  the sampling loop).
+
+**Verified conclusion: the first pass's guess was right — PR #3253 IS present
+in `vllm-omni==0.26.0`; the later "correction" was itself wrong about its
+absence.** The test file naming issue **#2385** is not contradictory — a PR
+and a test can reference different issues. What both passes agreed on remains
+true and is the part that matters here: #3253 fixes an fp16 overflow inside
+the *code predictor* (a NaN/`torch.multinomial` device-side assert), and does
+**not** touch `_embedding_dtype` — so the measured `index_copy_` Talker-stage
+crash happens with #3253's fix already installed, in an earlier, different
+code path. It is independent evidence that upstream accepts exactly this class
+of fp16-only-GPU fix, with a T4 test, for Qwen3-TTS.
+
+### Workaround A — runtime monkeypatch, `configs/qwen3_tts_dtype_fix.py` (`--enable-dtype-patch`)
+
+**Status: WRITTEN, statically compiled, NEVER EXECUTED ON A GPU.** Written on an
+Apple Silicon M1 with no CUDA device, so it was physically impossible to validate
+here. A successful `py_compile` says nothing about whether it works.
+
+Mechanism: subclass the upstream talker, call the real `__init__`, then set
+`self._embedding_dtype = model_dtype` (recomputed the same way the parent does),
+and re-register the subclass under the same architecture name. vllm-omni is not
+edited or forked.
+
+**There is a second hardcode, on the prefill path**, credited to the
+`fix/52-qwen-omni-fork` branch (Workaround B below) which found it first:
+`Qwen3TTSPromptEmbedsBuilder.__init__` (`prompt_embeds_builder.py:332` at
+`v0.26.0`) sets the same `self._embedding_dtype = torch.bfloat16`, and takes no
+dtype argument in this version. Fixing only the talker would leave the prefill
+embeddings bfloat16. The talker constructs that builder later inside its own
+`__init__` (line 480, after line 446), so the subclass's post-`super().__init__()`
+hook reaches `self._prompt_builder` and corrects it too — which is why this
+approach does not need the forked-package install that branch proposed. Both
+branches agree on the root cause and on leaving `self.encoder.to(dtype=bfloat16)`
+alone; they differ only in delivery (out-of-tree re-registration here vs. a forked
+`vllm-omni` there), and **neither has been run on a GPU**.
+
+Two details that had to be read from the source rather than assumed:
+
+- **The registry is vllm-omni's own, not `vllm.ModelRegistry`.**
+  `vllm_omni/model_executor/models/registry.py` builds a *separate*
+  `_ModelRegistry` instance, `OmniModelRegistry`, and
+  `vllm_omni/config/model.py`'s `OmniModelConfig.registry` property returns that
+  instance. Registering only into `vllm.ModelRegistry` — the mechanism originally
+  proposed for this patch — **would have been a no-op** for the omni serving path.
+  The module registers into `OmniModelRegistry` (authoritative) and into
+  `vllm.ModelRegistry` best-effort.
+- **The architecture name is `Qwen3TTSTalkerForConditionalGeneration`.**
+  `vllm_omni/model_executor/models/qwen3_tts/pipeline.py` pins
+  `model_arch="Qwen3TTSTalkerForConditionalGeneration"` for stage 0 (stage 1 is
+  `Qwen3TTSCode2Wav`, untouched). The checkpoint's `config.json` declares
+  `architectures: ["Qwen3TTSForConditionalGeneration"]`, which vllm-omni's registry
+  maps to the same talker class, so both names are re-registered.
+
+**`VLLM_PLUGINS` cannot load this file.** vLLM's `load_plugins_by_group` treats
+`VLLM_PLUGINS` purely as an allow-list *filter* over already-installed
+`vllm.general_plugins` entry points — it never accepts a module path or a file. The
+runner therefore uses CPython's `sitecustomize` hook: `--enable-dtype-patch`
+generates a one-line `sitecustomize.py` in a per-run directory and prepends that
+directory plus `configs/` to the server process's `PYTHONPATH`. `sitecustomize` is
+imported at interpreter startup in the `vllm serve` process and in every worker
+process it spawns, which is where the talker is actually constructed. To avoid
+pulling vllm into interpreter startup, importing the module installs a meta-path
+hook that registers the subclass immediately *after*
+`vllm_omni.model_executor.models.registry` finishes executing. The official
+alternative — packaging `register()` as a real `vllm.general_plugins` entry point —
+was not built, because it needs a pip-installable package.
+
+### What the next real T4/Colab run must do
+
+The patch is opt-in and **off by default**. On the next GPU run:
+
+1. **Baseline first, unpatched.** Run `src/tts_qwen_cuda.py` exactly as before,
+   with no new flag, and confirm the `index_copy_` crash still reproduces on that
+   machine. Without this the patched run proves nothing.
+2. **Then the patched run**, same variant, same jobs:
+
+   ```bash
+   python3 src/tts_qwen_cuda.py --model-variant 0.6b-customvoice \
+       --output-dir output --metrics output/qwen_tts_basic_dtypepatch.json \
+       --text-file samples/tts_ru.txt --enable-dtype-patch
+   ```
+
+3. **Check `dtype_patch_observed_in_server_log` in the JSON report before reading
+   anything else.** The patch prints
+   `[qwen3_tts_dtype_fix] UNTESTED dtype workaround registered ...` from inside the
+   server process; the runner greps the server log for it. If that field is
+   `false`, the `sitecustomize`/`PYTHONPATH` route did not work and the run is an
+   **unpatched** run whatever the flag said — a negative result about the loading
+   mechanism, not about the dtype hypothesis. In that case try the entry-point
+   route instead before concluding anything about the fix.
+4. **If it registered and requests still fail**, read *where*. A traceback still in
+   `index_copy_` falsifies the hypothesis. A traceback moved into the speech
+   tokenizer encoder instead points at the second, deliberately unpatched hardcode
+   (`self.encoder.to(dtype=torch.bfloat16)` in `__init__` and in `load_weights`) —
+   reachable only via the `Base`/ref_audio task type, and a separate fix.
+5. **If requests succeed**, that is an *experimental* pass, not a Higgs-style PASS:
+   the report carries `status_qualifier` saying so, and the audio still has to pass
+   `audio_statistics`/`audio_defect` — float16 could turn the crash into degraded
+   output rather than working speech. Verify by ear before claiming Russian quality.
+6. Either outcome is publishable evidence for the upstream report drafted in
+   `docs/research/upstream-issue-draft-qwen3-tts-dtype.md` (not submitted; that
+   decision is deliberately left open).
+
 ### FlashInfer SM75 regression, general (not Qwen3-TTS-specific)
 
 A general vLLM issue confirms FlashInfer dropped SM75 as a candidate backend in a
@@ -312,6 +477,117 @@ specific model — consistent with the same floor already measured for Higgs
 model-card claim, and is cited here only as corroborating context.
 
 Source: [vLLM issue #47549 — FlashInfer no longer available on SM75](https://github.com/vllm-project/vllm/issues/47549)
+
+## Workaround B — forked vllm-omni source (`QWEN_OMNI_SOURCE="fork"`) (2026-08-24)
+
+**Status: the patch is written and only STATICALLY checked (it compiles and
+imports; the changed lines were read against their call sites). It is NOT
+confirmed on a real GPU.** This machine is an Apple Silicon M1 with no CUDA, so
+the failure this patch targets cannot be reproduced here, and therefore cannot
+be shown fixed here either. Nothing below may be reported as a working fix
+until a real T4 run says so.
+
+This pass located the same root cause independently (the same
+`self._embedding_dtype = torch.bfloat16` hardcode described in the section
+above, read at lines 690 / 840 / 1099 of `qwen3_tts_talker.py` at `v0.26.0`),
+and was the first to find the second hardcode on the prefill path:
+`Qwen3TTSPromptEmbedsBuilder.__init__` (`prompt_embeds_builder.py:332`) sets
+the same `self._embedding_dtype = torch.bfloat16` and is constructed only from
+the talker, so it needs the same treatment.
+
+### What the patch changes, and what it deliberately does not
+
+Fork: <https://github.com/vedmalex/vllm-omni>, branch
+`fix/qwen3-tts-embedding-dtype`, cut from the `v0.26.0` tag (so the paired
+`vllm==0.26.0` stays unchanged). Two changes:
+
+1. `qwen3_tts_talker.py`: `self._embedding_dtype = model_dtype` instead of
+   `torch.bfloat16`.
+2. `prompt_embeds_builder.py`: a new `embedding_dtype` keyword argument
+   (defaulting to `torch.bfloat16`, so the tests that construct the builder
+   directly are unaffected), passed `model_dtype` from the talker.
+
+On bf16-capable hardware `model_dtype` already resolves to `bfloat16`, so this
+is a no-op there — the change only takes effect where bf16 is unavailable.
+
+**Deliberately NOT changed:** `self.encoder.to(dtype=torch.bfloat16)`
+(`qwen3_tts_talker.py:456` and `:1042`) and the matching
+`inputs.to(device).to(torch.bfloat16)` at `:965`. `self.encoder` is the speech
+tokenizer's encoder, used only to turn reference audio into discrete codes, and
+`_encode_ref_audio_batch` returns `.to(dtype=torch.long)` codes — its internal
+dtype never reaches `inputs_embeds`, so it is not a source of this crash.
+Changing it would be an unverified extra variable in an already unverified
+experiment. **This is reasoning from the source, not a measurement:** if the
+fork path still crashes on a T4 with a bf16-related error inside the encoder or
+the whisper encoder (`tokenizer_25hz/vq/whisper_encoder.py:126` also branches on
+`float16`/`bfloat16`), the encoder is the next thing to look at, and this
+conclusion was wrong.
+
+**No PR has been opened against `vllm-project/vllm-omni`.** The branch is pushed
+to the fork and ready, but submitting an unvalidated patch to an upstream
+open-source project is a decision for the repository owner, not for an agent
+that cannot run the test. To open it manually:
+
+```bash
+gh pr create --repo vllm-project/vllm-omni \
+    --head vedmalex:fix/qwen3-tts-embedding-dtype --base main
+```
+
+Do that only after a real GPU run confirms the patch actually fixes the crash;
+upstream's #3253 was accompanied by a `g4dn.xlarge` (T4) test, and this one
+would need the same evidence.
+
+### How to run it, and what to compare against
+
+`notebooks/higgs_colab_benchmark.ipynb` gained an opt-in switch in the settings
+cell; the default is unchanged:
+
+```python
+QWEN_OMNI_SOURCE = "pypi"   # default — vllm-omni==0.26.0 from PyPI, as before
+QWEN_OMNI_SOURCE = "fork"   # installs the fork branch instead
+```
+
+Only the second install step changes (`vllm==0.26.0` is identical either way).
+`VLLM_OMNI_VERSION_OVERRIDE=0.26.0` is set for the fork path because a git
+install gives the builder a repository without tags, and `setuptools-scm`
+derives the version from them. The chosen source is printed per variant and
+recorded in each `metrics/tts_qwen_<variant>.json` as `vllm_omni_source` /
+`vllm_omni_spec`, so a report can never be silently attributed to the wrong
+install.
+
+There are two independent candidate approaches to this crash, and the point of
+the next T4 run is to tell them apart:
+
+| Approach | How to enable | Mechanism |
+| --- | --- | --- |
+| Workaround B — forked source (this section) | `QWEN_OMNI_SOURCE="fork"` in the notebook | the installed package's own source is corrected (git-install of the fork branch) |
+| Workaround A — runtime monkeypatch | `--enable-dtype-patch` on `src/tts_qwen_cuda.py` | `configs/qwen3_tts_dtype_fix.py`, loaded via a generated `sitecustomize.py` on the server's `PYTHONPATH`, re-registers a dtype-aligned talker subclass into vllm-omni's own `OmniModelRegistry` (NOT `vllm.ModelRegistry`, which is a no-op for the omni path — see Workaround A's section) |
+
+Both are merged into the same tree; enable at most one per run, or the result
+cannot be attributed to either mechanism.
+
+Next real Colab/Kaggle T4 run, in this order:
+
+1. Baseline: `QWEN_OMNI_SOURCE="pypi"`, no runtime patch. The `index_copy_`
+   crash is expected — it is already reproduced twice, so this only confirms
+   the environment matches the earlier runs. Skip it only if GPU quota is tight.
+2. `QWEN_OMNI_SOURCE="fork"`, runtime patch off. Record whether the server
+   starts, whether the install from git succeeded at all (a git-install or
+   `setuptools-scm` failure is a `FAILED` for the *installation*, not evidence
+   about the patch), and whether each of `qwen_tts_basic`, `qwen_tts_clone`,
+   `qwen_tts_style` produces audio that passes the existing
+   `audio_statistics()` / `audio_defect()` checks in `src/tts_cuda_common.py`.
+3. Workaround A: `QWEN_OMNI_SOURCE="pypi"` plus `--enable-dtype-patch`, same
+   three jobs (check `dtype_patch_observed_in_server_log` first — see
+   Workaround A's checklist above).
+4. Compare. A crash-free run is not by itself a pass: Higgs's #48 is the
+   standing reminder that a T4 can return a formally valid WAV containing a
+   constant signal. The waveform checks decide, and the result must be recorded
+   in issue #52 per approach, naming which install produced it.
+
+Both approaches change the same one line's effect, so they should either both
+work or both fail. If they disagree, one of them is not doing what it claims,
+and that discrepancy is the finding — do not just keep the one that looks green.
 
 ## Open questions / not found in primary sources
 
