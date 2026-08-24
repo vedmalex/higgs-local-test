@@ -1,10 +1,13 @@
-# Upstream issue draft — vllm-project/vllm-omni (NOT SUBMITTED)
+# Upstream PR — vllm-project/vllm-omni (SUBMITTED 2026-08-24)
 
-Prepared 2026-08-24 for issue #52. **This is a draft only.** It has not been posted
-to GitHub, and posting it is a decision for the maintaining agent/user, not
-something this pass performed. Everything below is either quoted from source read
-at a named tag or from this project's own measured Colab T4 runs
-(`docs/research/qwen3-tts-notes.md`); no claim is inferred.
+Prepared 2026-08-24 for issue #52; the one-line fix below was confirmed on a real
+Colab Tesla T4 the same day (all three previously-crashing jobs now PASS with real,
+independently re-verified waveform statistics — see
+`docs/research/qwen3-tts-notes.md`, "Workaround B"). The PR was opened from
+`vedmalex/vllm-omni@fix/qwen3-tts-embedding-dtype` against
+`vllm-project/vllm-omni:main`. Everything below is either quoted from source read
+at a named tag or from this project's own measured Colab T4 runs; no claim is
+inferred.
 
 ---
 
