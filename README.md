@@ -124,15 +124,21 @@ Status: M0 **PASSED** on both Apple M1 and Colab T4 GPUs. M1 (vLLM-Omni → MAX 
 
 ## Status
 
-### Apple Silicon M1 (16 GB unified memory, macOS 14.6.1, native `arm64`, Python 3.11.7)
+### Apple Silicon M1 (16 GB unified memory, macOS 26.6.2, native `arm64`, Python 3.12.11)
+
+Re-recorded 2026-08-24 after the host's macOS was upgraded (14.6.1 → 26.6.2, for issue #57's
+Mojo/MAX work) and the model cache was fully cleared and re-downloaded — a genuinely fresh
+environment, not a re-run of stale state. The prior 60-second cloning reference was replaced by
+the current `samples/reference.wav` (7.4s) earlier in this project's history; this run measures
+against that 7.4s reference, which is why clone RTF looks nothing like the old 822.09 figure —
+different reference length, not a regression fixed.
 
 ```text
 TTS via MLX-Audio:     PASSED (bosonai/higgs-tts-3-4b)
 Russian speech:        PASSED (natural Cyrillic Russian generated)
-Voice cloning:         PASSED (60s reference cloned into 25.2s Russian speech, RTF 822.09)
-Voice cloning (7.4s):  NOT MEASURED (aborted after 30+ min; the host became unresponsive)
+Voice cloning (7.4s):  PASSED (7.4s reference cloned into 18.6s Russian speech, RTF 7.73)
 Control tags:          PASSED
-STT MPS FP16:          PASSED (complete inference on Metal GPU)
+STT MPS FP16:          PASSED (complete inference on Metal GPU, RTF 0.48)
 STT CPU fallback:      NOT NEEDED (MPS FP16 succeeded end-to-end)
 Russian transcription: PASSED (accurate Cyrillic and Vaishnava terminology)
 ```
@@ -185,14 +191,17 @@ RTF is never published for invalid audio, per this project's own rule — hence 
 
 ### Higgs Audio v3, Apple Silicon M1
 
-Measurements recorded from real sequential runs on native Apple Silicon M1 (16 GB unified memory):
+Measurements recorded from real sequential runs on native Apple Silicon M1 (16 GB unified
+memory, macOS 26.6.2, Python 3.12.11), 2026-08-24:
 
 | Test | Device | Load | Processing | Audio | RTF | Peak RAM (RSS) | Peak Footprint |
 | ---- | ------ | ---: | ---------: | ----: | --: | -------------: | -------------: |
-| TTS basic | MLX | 14.15s | 145.51s | 20.72s | 7.02 | 1.72 GB | 11.22 GB |
-| TTS controls | MLX | 16.58s | 201.34s | 15.96s | 12.61 | 3.68 GB | 11.02 GB |
-| TTS clone (60s ref) | MLX | 17.00s | 20716.63s | 25.20s | 822.09 | 1.33 GB | 11.67 GB |
-| STT | MPS (FP16) | 19.89s | 83.76s | 60.00s | 1.40 | 3.29 GB | 9.25 GB |
+| TTS basic | MLX | 24.34s | 123.91s | 18.88s | 6.56 | 1.16 GB | 11.37 GB |
+| TTS controls | MLX | 14.43s | 126.10s | 14.36s | 8.78 | 3.82 GB | 11.32 GB |
+| TTS clone (7.4s ref) | MLX | 10.13s | 143.83s | 18.60s | 7.73 | 3.87 GB | 11.37 GB |
+| STT | MPS (FP16) | 15.83s | 28.56s | 60.00s | 0.48 | 3.38 GB | 7.80 GB |
+
+WER for STT against the fixture transcript: 1.5.
 
 RTF is processing seconds divided by output audio duration (TTS) or input audio duration (STT). Values below 1.0 are faster than real time.
 
@@ -200,26 +209,28 @@ RTF is processing seconds divided by output audio duration (TTS) or input audio 
 
 A **separate** benchmark from the Higgs rows above — different model family, different weights, never merged into or reported as a Higgs result. Motivation: Higgs voice cloning on this machine runs at RTF 822, which is not usable for iterative testing. This path uses the native MLX implementations shipped in `mlx-audio` 0.5.0 (`mlx_audio.tts.models.qwen3_tts`, `mlx_audio.stt.models.qwen3_asr`) with published MLX weights, so no CUDA and no server process is involved.
 
-Same host as the Higgs rows: native `arm64` M1, 16 GB unified memory, Python 3.11.7, `mlx` 0.32.1, `mlx-audio` 0.5.0.
+Same host as the Higgs rows: native `arm64` M1, 16 GB unified memory, macOS 26.6.2,
+Python 3.12.11, `mlx` 0.32.1, `mlx-audio` 0.5.0. Re-recorded 2026-08-24 alongside the Higgs
+re-run above (fresh OS, fresh model cache).
 
 | Test | Model | Load | Processing | Audio | RTF | Peak RSS | Peak MLX | Status |
 | ---- | ----- | ---: | ---------: | ----: | --: | -------: | -------: | ------ |
-| TTS basic | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | 7.04s | 42.89s | 25.04s | 1.71 | 0.65 GB | 4.68 GB | PASSED |
-| TTS clone (60s ref) | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | 4.66s | 30.77s | 19.44s | 1.58 | 2.45 GB | 6.32 GB | PASSED |
-| TTS CustomVoice (`instruct`) | `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16` | 5.24s | 46.90s | 24.32s | 1.93 | 2.10 GB | 8.07 GB | PASSED |
-| ASR | `mlx-community/Qwen3-ASR-0.6B-8bit` | 3.14s | 5.59s | 60.00s | 0.093 | 1.41 GB | 2.18 GB | PASSED |
+| TTS basic | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | 6.24s | 37.72s | 24.08s | 1.57 | 1.05 GB | 4.64 GB | PASSED |
+| TTS clone (7.4s ref) | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | 4.24s | 25.22s | 18.00s | 1.40 | 2.74 GB | 6.26 GB | PASSED |
+| TTS CustomVoice (`instruct`) | `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16` | 4.88s | 41.87s | 24.40s | 1.72 | 4.36 GB | 8.07 GB | PASSED |
+| ASR | `mlx-community/Qwen3-ASR-0.6B-8bit` | 4.47s | 5.18s | 60.00s | 0.086 | 1.40 GB | 2.18 GB | PASSED |
 
 Peak RSS is the worker process's `ru_maxrss`; Peak MLX is `mx.get_peak_memory()`, which counts MLX's unified-memory allocations and is therefore the larger and more relevant ceiling on a 16 GB machine.
 
-**Voice cloning is ~520× faster than the Higgs clone path on the same host and the same reference pair** (`samples/reference.wav` + `samples/reference.txt`): RTF 1.58 against 822.09. This is the practical reason the Qwen path exists here.
+**Voice cloning is still far faster than the Higgs clone path on the same host and reference** (`samples/reference.wav` + `samples/reference.txt`, 7.4s): RTF 1.40 against Higgs's 7.73 for the same reference — roughly 5.5× faster, a smaller margin than the old 60s-reference comparison (which showed ~520×) because Higgs's clone cost itself scales with reference length while Qwen's stayed comparably cheap; this is the practical reason the Qwen path exists here regardless of which reference length is used.
 
 Generated audio was checked for the same false-positive failure mode the CUDA runners guard against — a well-formed WAV that is not speech. All three outputs are real waveforms with speech-like statistics, next to the repository's own human reference for scale:
 
 | File | Peak | RMS | % at full scale | Distinct values |
 | ---- | ---: | --: | --------------: | --------------: |
-| `output/qwen_tts_ru_basic.wav` | 21770 | 2000.4 | 0.00% | 20035 |
-| `output/qwen_tts_ru_clone.wav` | 13430 | 1697.6 | 0.00% | 14859 |
-| `output/qwen_tts_ru_custom.wav` | 16466 | 1676.6 | 0.00% | 15775 |
+| `output/qwen_tts_ru_basic.wav` | 23278 | 1573.6 | 0.00% | 16948 |
+| `output/qwen_tts_ru_clone.wav` | 13502 | 1683.7 | 0.00% | 15215 |
+| `output/qwen_tts_ru_custom.wav` | 14860 | 1920.0 | 0.00% | 16900 |
 | `samples/reference.wav` (human) | 16338 | 1989.4 | 0.00% | 14061 |
 
 The cloning and CustomVoice paths return the whole utterance as one segment rather than splitting on newlines like the basic path, so coverage was verified rather than assumed: each generated WAV was transcribed back with the same Qwen3-ASR model and all nine lines of `samples/tts_ru.txt` are present in all three. Russian words come back accurate; Sanskrit proper nouns are the weak spot in both directions (`Шри Чайтанья Махапрабху` round-trips as `Шричая таня маха правку` in the clone output).
