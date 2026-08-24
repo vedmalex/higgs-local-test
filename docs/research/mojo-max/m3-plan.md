@@ -421,6 +421,16 @@ M3-2 detector (which they use), not M3-1.
   `bosonai/higgs-tts-3-4b` download size/time on Colab's network was not measured beforehand.
   *Tier:* **sonnet-deterministic-code** (notebook is mechanical), **opus** for reconciling any
   M1↔Tesla-T4 disagreement.
+  **Update (2026-08-25):** the real run of the full block on T4 aborted fatally on all 6 tested
+  seeds with `LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16`
+  (SIGABRT). The leading hypothesis at the time (`ops.conv2d`'s kernel-selection heuristic
+  switches to a tensor-core/GEMM kernel above some channel-count threshold, with a Turing/sm_75
+  codegen gap in that path) is **REFUTED** — `m3_ldmatrix_channel_sweep.py` swept 32 through 1024
+  channels through the exact M2 `ops.conv2d` code path on the same T4 and got 6/6 PASSED, no
+  abort at any size. See the "M3-10 follow-up" section of `m3-block-results.md` for the full
+  result and the remaining candidate list. **M3-10 is still open**: this task's own done-criteria
+  (raw T4 output committed and every M1 result confirmed/contradicted per-case) are not met, and
+  the root cause of the `ldmatrix` abort is still unidentified.
 
 ### Stage F — upstream (does not gate anything above)
 
