@@ -90,3 +90,51 @@ case was then re-run as an isolated subprocess so one crash couldn't hide the ot
 - Report this finding upstream if T4 confirms it's Metal-specific: `modular/modular`'s
   `conv2d_transpose` implementation should not attempt to load `cudnnCreate` when the target
   device is not a CUDA device.
+
+## T4 partial result (2026-08-24) — different failure, not the same as Metal
+
+**Status: partial.** Only case 0 (`stride=8, output_padding=0`) has been run and relayed so far
+via `notebooks/mojo_max_m2_t4.ipynb`; the other four cases and the Snake1d/Conv1d prototypes'
+T4 numbers have not yet been retrieved (the notebook writes to a Google Drive folder that has
+not synced to a locally-accessible copy at time of writing). Recording this now rather than
+waiting — an honest partial result is valid, per this project's own standard.
+
+```text
+--- case 0 cpu (exit=0) ---
+case=0 device=cpu stride=8 output_padding=0 -> shape=(1, 16, 136) nan_inf=0
+
+--- case 0 gpu (exit=1) ---
+ValueError: An error occurred in kernel entry point named "region_2":
+An error occurred in kernel named "conv_transpose_mogg":
+cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+```
+
+**This is a materially different failure than the Metal crash**, and the distinction matters:
+
+- On Metal, the process aborted with `symbol not found: cudnnCreate` — cuDNN itself could not
+  be loaded at all. That is a hard platform-support gap: Metal has no cuDNN, full stop.
+- On T4, **cuDNN loads and the kernel dispatches** — it fails inside cuDNN with
+  `CUDNN_STATUS_ALLOC_FAILED`, a resource-allocation failure, not a missing-library failure.
+  Crucially, **the process did not abort this time** — it's a catchable Python `ValueError`,
+  consistent with real GPU dispatch actually happening, unlike Metal's fatal process-level abort.
+
+`CUDNN_STATUS_ALLOC_FAILED` in cuDNN generally means the runtime could not allocate workspace
+memory for the algorithm cuDNN selected for this conv-transpose configuration — it is not
+inherently a "T4 is incompatible" result. Candidate causes, none yet distinguished by this one
+data point:
+
+1. A genuine out-of-memory condition on the T4's 15 GB, possibly from something else in the
+   Colab session already holding VRAM (the notebook doesn't currently print VRAM usage before
+   this step).
+2. A workspace-size query bug in MAX's `conv_transpose_mogg` kernel for this specific tiny shape
+   (`C_in=C_out=16`, `kernel=16`, `stride=8`) — unusually small channel counts can sometimes
+   confuse an algorithm's heuristic workspace sizing.
+3. A T4-specific (`sm_75`) cuDNN algorithm-selection issue distinct from both the "just missing"
+   Metal case and a "works cleanly" case.
+
+**Do not conclude either "ConvTranspose1d works on T4" or "ConvTranspose1d is broken on T4"
+from this single data point.** It answers a narrower question than that: on T4, execution
+reaches real cuDNN dispatch (which Metal never does), and fails for a resource reason that needs
+the other four cases plus a VRAM check to interpret. Re-run with `nvidia-smi` logged immediately
+before this cell, and check whether smaller/larger channel counts change the outcome, before
+drawing a conclusion.
