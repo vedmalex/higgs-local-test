@@ -9,6 +9,20 @@ item, since the entire 960× upsample in Higgs's Code2Wav is built from `ConvTra
 upstream's own source carries a `# TODO(GEX-2043): Add support for GPU kernel for
 conv_transpose` comment.
 
+## Reported upstream (M3-11)
+
+Reported as comments on two **pre-existing** `modular/modular` issues rather than as a new issue
+(a duplicate-search found both already open, so a third report would have fragmented triage):
+
+- [modular/modular#6563 (comment)](https://github.com/modular/modular/issues/6563#issuecomment-5400477726)
+  — the `max.graph`-only forward reproducer that maintainer `mdanatg` explicitly asked for on that
+  thread; shows the `symbol not found: cudnnCreate` abort needs no autodiff/backward pass.
+- [modular/modular#6726 (comment)](https://github.com/modular/modular/issues/6726#issuecomment-5400479775)
+  — the Metal + Tesla T4 + MAX 26.5.0 data points (that thread was A10 / MAX 26.2.0), plus the
+  separate `bias=` NHWC double-permute layout bug from
+  [`m3-device-mixing-results.md`](m3-device-mixing-results.md), offered for splitting out if
+  upstream prefers.
+
 ## Setup
 
 Tested all five `(stride, output_padding)` pairs Higgs's five decoder blocks actually use
