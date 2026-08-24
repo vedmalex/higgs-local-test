@@ -93,6 +93,15 @@ The same CUDA benchmark (Higgs and Qwen3-TTS, plus STT) can be tried outside Col
 
 The notebook and `src/*.py` runners are the shared implementation for both platforms — nothing here is Colab-specific beyond the `google.colab.drive` mount (guarded by `USE_DRIVE`) and the Colab-badge link above. To run on Kaggle: upload or import [`notebooks/higgs_colab_benchmark.ipynb`](notebooks/higgs_colab_benchmark.ipynb) as a Kaggle Notebook, enable a GPU accelerator in the session settings, set `USE_DRIVE = False` (Kaggle has its own persistent `/kaggle/working` output, not a Drive mount) or adapt `WORKSPACE` to a Kaggle-writable path, and run all cells. If Kaggle's filesystem layout needs a small adapter beyond that, keep it minimal and documented here rather than maintaining a second notebook.
 
+## Mojo/MAX feasibility spike (#57)
+
+Separate research track, exploring whether [Mojo/MAX](https://www.modular.com/) can host a ported Higgs/Qwen speech pipeline as a portable, precision-controlled execution layer across Apple Silicon and NVIDIA T4 — not a replacement for the vLLM-Omni stack above until evidence says otherwise. Full plan, hardware/numerical M0 probe results, and the staged M0–M6 roadmap: [`docs/research/mojo-max/m0-results.md`](docs/research/mojo-max/m0-results.md) and issue [#57](https://github.com/vedmalex/higgs-local-test/issues/57).
+
+- Notebook (Colab T4 only, deliberately minimal — no TTS/STT/Qwen stack install): [`notebooks/mojo_max_m0_t4.ipynb`](notebooks/mojo_max_m0_t4.ipynb)
+- Open directly in Colab: <a href="https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/mojo_max_m0_t4.ipynb" target="_blank" rel="noopener noreferrer"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
+
+Status: M0's Apple M1 GPU probe **PASSED** (matmul FP32/FP16/BF16, all matching the CPU reference). The T4 side is queued next via the notebook above.
+
 ## Voice Cloning & Audiobook Production Guides
 
 - **Voice Cloning Guide & Reference Texts**: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) — rules for recording clean 7–12s audio samples, phonetically balanced text templates, and voice profile export.
