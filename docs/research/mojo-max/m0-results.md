@@ -1,24 +1,50 @@
-# M0 — Mojo/MAX hardware probe on this project's M1 (issue #57)
+# M0 — Mojo/MAX hardware probe on M1 and Colab T4 (issue #57)
 
 Date: 2026-08-24. Branch: `research/57-m0-hardware-probe`, follow-up on
-`research/57-m0-gpu-unblocked` after the host OS was upgraded.
+`research/57-m0-gpu-unblocked` (M1, after the host OS was upgraded), then
+`research/57-m0-t4-probe` (Colab T4, via `notebooks/mojo_max_m0_t4.ipynb`).
 
-## Verdict (updated after macOS upgrade to 26.6.2)
+## Verdict — M0 complete on both targets
 
-| Item | Status |
-| --- | --- |
-| Install stable Mojo 1.0.0 / MAX 26.5 on this M1 | **PASSED** |
-| Minimal accelerator program executed **on the GPU** | **PASSED** (was BLOCKED on macOS 14.6.1) |
-| Run an existing supported MAX model/pipeline on GPU | **PASSED** — MAX's own shipped kernels (matmul incl. BF16) execute on the Apple GPU |
-| Numerical suite (matmul/softmax/RMSNorm/SiLU/NaN-Inf/FP16-vs-FP32) | **PASSED on CPU and GPU** |
+| Item | M1 (Apple, Metal) | T4 (Colab, CUDA) |
+| --- | --- | --- |
+| Install stable Mojo 1.0.0 / MAX 26.5 | **PASSED** | **PASSED** |
+| Minimal accelerator program executed **on the GPU** | **PASSED** (was BLOCKED on macOS 14.6.1) | **PASSED** |
+| Run an existing supported MAX model/pipeline on GPU | **PASSED** — matmul incl. BF16 | **PASSED** — matmul incl. BF16 (see caveat below) |
+| Numerical suite (matmul/softmax/RMSNorm/SiLU/NaN-Inf/FP16-vs-FP32) | **PASSED on CPU and GPU** | **PASSED on CPU and GPU** |
 
-**M0 is now complete on this machine's Apple-GPU side.** The original blocker
-(macOS 14.6.1 < required Sequoia 15) was resolved by upgrading the host to
-macOS 26.6.2. A second, unrelated blocker then appeared and was also resolved
-— see "Second blocker" below — before the probe could actually execute on
-the GPU. M1 (the vLLM-Omni <-> MAX responsibility map) can now start using
-this M1's GPU results as real evidence. The T4/Colab side of M0 is still
-outstanding (untouched by either Apple-specific blocker).
+**M0 is now complete on both targets named in the issue.** The M1 side needed
+two blockers resolved (macOS version, then an Xcode/Metal-toolchain
+incompatibility — see below); the T4 side, run via
+`notebooks/mojo_max_m0_t4.ipynb` on a real Colab Tesla T4, passed cleanly on
+the first attempt with no blockers. M1 (the vLLM-Omni <-> MAX responsibility
+map for Code2Wav, per the issue's revised framing) can now start using GPU
+evidence from both targets.
+
+### Open question raised by the T4 result: does "BF16 supported" mean hardware BF16?
+
+The T4 run reports `[PASSED] GPU matmul BF16 supported`, which is surprising:
+T4 (`sm_75`, Turing) has no BF16 tensor-core hardware — that arrived with
+Ampere (`sm_80`). The probe's BF16 check only verifies that a `bfloat16`
+storage-dtype matmul with FP32 accumulation compiles, runs, and produces
+finite output matching the FP32 reference — it does **not** distinguish
+genuine hardware BF16 execution from MAX transparently upcasting `bfloat16`
+storage to FP32 (or another supported path) under the hood on unsupported
+hardware. Both would produce an identical PASSED result here.
+
+This must not be read as "T4 has BF16 hardware support" — it isn't and can't,
+per NVIDIA's own architecture docs. What it actually shows is that **MAX will
+let you declare a `bfloat16` tensor dtype on a T4 without erroring**, which
+is a correctness/compatibility fact worth having, but says nothing about
+whether that path is fast or how it's actually implemented under the hood.
+Answering that needs either MAX-side documentation of its BF16-on-pre-Ampere
+fallback behavior, or a profiling pass (M4's territory) comparing BF16 vs
+native FP16 throughput on the same T4 — not assumed from this probe. Until
+then, the dtype-policy conclusion from the M1-only run stands unchanged for
+planning purposes: design the Code2Wav precision policy around FP16 (with
+FP32 accumulation where the CPU/GPU numerical suite shows it's required) as
+the one dtype confirmed to run on genuine T4 hardware paths, and treat BF16
+on T4 as an unverified, possibly-emulated option pending that follow-up.
 
 ## Second blocker found and resolved: Xcode/Metal toolchain incompatibility
 
@@ -148,13 +174,13 @@ gpu matmul bf16 (acc fp32): nan/inf 0
   [PASSED] GPU matmul BF16 supported
 ```
 
-Notable: **BF16 matmul runs and is finite on the Apple M1 GPU.** This matters
-for the #48/#52 dtype-policy question specifically because T4 (`sm_75`,
-Turing) has **no BF16 hardware support at all** — so a MAX/Mojo precision
-policy for Higgs/Qwen cannot assume BF16 portability between Apple Silicon and
-T4 even if both run through MAX; the policy still needs to select FP16 (with
-FP32 accumulation where numerically required, per the CPU findings below) on
-T4 specifically.
+Notable: **BF16 matmul runs and is finite on the Apple M1 GPU.** T4 (`sm_75`,
+Turing) has no BF16 tensor-core hardware at all — but the T4 probe (below)
+*also* reports BF16 matmul as PASSED, which turns out to be a fact about
+what MAX will compile and run rather than proof of hardware BF16 support on
+T4; see "Open question" above for why this result doesn't settle the
+question either way, and why the precision policy should still default to
+FP16 (+ FP32 accumulation where required) on T4 until that's resolved.
 
 The FP16 GPU matmul error (`0.0038223267`) matches the CPU FP16-with-FP32-
 accumulation result from the first run exactly, confirming the GPU path uses
@@ -166,6 +192,50 @@ Conclusion: the toolchain, the install, the GPU hardware and the probe code
 are all fine, and now so is the Xcode/Metal layer. Both original-plan
 blockers (macOS version, then the Xcode/Metal-toolchain incompatibility
 surfaced by the OS jump) are resolved on this M1.
+
+## T4 (Colab): GPU probe PASSED on the first attempt
+
+Run via `notebooks/mojo_max_m0_t4.ipynb` on a real Colab Tesla T4. No Apple-
+specific blockers apply here; none were hit. Same Mojo 1.0.0 / MAX 26.5.0
+versions as the M1 run (bit-comparable inputs, fixed LCG seed).
+
+Device detection:
+
+```text
+has_accelerator            = True
+has_apple_gpu_accelerator  = False
+has_nvidia_gpu_accelerator = True
+has_amd_gpu_accelerator    = False
+device name = Tesla T4
+device api  = cuda
+```
+
+GPU numerical results — all four checks PASSED, matching the CPU reference
+computed in the same run:
+
+```text
+gpu vadd c[0] = 3.0 (expected 3.0)
+  [PASSED] GPU kernel actually executed on device
+gpu matmul fp32: nan/inf 0 max|err| vs CPU fp32 0.0
+  [PASSED] GPU matmul FP32 matches CPU reference
+gpu matmul fp16 (acc fp32): nan/inf 0 max|err| vs CPU fp32 0.0038223267
+  [PASSED] GPU matmul FP16 with FP32 accumulation finite
+gpu matmul bf16 (acc fp32): nan/inf 0
+  [PASSED] GPU matmul BF16 supported
+```
+
+The FP16-with-FP32-accumulation error (`0.0038223267`) is bit-for-bit
+identical to both the M1 GPU run and the CPU reference — strong evidence the
+probe's numerics are deterministic and platform-independent given the same
+input seed, which is exactly what's needed for T4-vs-M1 comparability going
+forward.
+
+The T4 CPU-side reference numbers are consistent with the M1 CPU run within
+expected floating-point nondeterminism (e.g. `matmul fp16 acc fp16` max|err|
+0.024487495 here vs 0.021327019 on M1; `large-magnitude matmul fp16 acc fp16`
+zeros 1 here vs zeros 0 on M1) — small per-run variation in FP16
+rounding/summation order, not a discrepancy in the underlying findings.
+Full raw output: [`m0-output-t4.txt`](m0-output-t4.txt).
 
 ## Numerical results (CPU reference, real numbers)
 
@@ -272,19 +342,19 @@ produces the full numerical report.
 
 ## What M0 still needs
 
-1. **Apple M1 side: done.** GPU probe passes end-to-end on macOS 26.6.2 /
-   Xcode 26.6 / Metal toolchain 32023.883 / Mojo 1.0.0 / MAX 26.5.0.
-2. **T4 / Colab (`sm_75`)**: still outstanding — run the same file there. That
-   side of M0 was never touched by either Apple-specific blocker and is where
-   the #48-relevant, no-BF16-hardware GPU numbers will come from. Watch for
-   the driver-580+ requirement and the `MODULAR_NVPTX_COMPILER_PATH` escape
-   hatch noted in the issue.
-3. M1 (the vLLM-Omni <-> MAX responsibility map, per the issue's revised
-   framing) may now start using the Apple-GPU results as real on-device
-   evidence, in parallel with getting the T4 run. Do not treat the T4 side as
-   started until it actually executes on that device.
-4. Disk: after this run, `.mojo-probe-stable` still costs ~1.9 GiB and remains
-   gitignored/regenerable. Free space is no longer the acute constraint it was
-   before the cache cleanup (issue-unrelated), but MAX model serving will need
-   "significantly more memory" per the requirements page once real
-   checkpoints are involved.
+**M0 itself is done on both named targets.** What remains is follow-up
+evidence, not more M0 hardware-probe work:
+
+1. **Apple M1: done.** GPU probe passes end-to-end on macOS 26.6.2 / Xcode
+   26.6 / Metal toolchain 32023.883 / Mojo 1.0.0 / MAX 26.5.0.
+2. **T4 / Colab: done.** GPU probe passes end-to-end via
+   `notebooks/mojo_max_m0_t4.ipynb`, same Mojo/MAX versions, no blockers hit.
+3. **Open follow-up, not blocking M1**: whether T4's BF16-matmul PASS reflects
+   real hardware execution or an under-the-hood upcast/fallback on
+   unsupported hardware (see "Open question" above). Resolve via MAX docs or
+   a profiling pass — natural fit for M4 (benchmarking), not a new M0 run.
+4. M1 (the vLLM-Omni <-> MAX responsibility map for Code2Wav, per the issue's
+   revised framing) can now start, using GPU evidence from both targets.
+5. Disk: `.mojo-probe-stable` still costs ~1.9 GiB and remains gitignored/
+   regenerable. MAX model serving will need "significantly more memory" per
+   the requirements page once real checkpoints are involved.
