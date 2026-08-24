@@ -208,7 +208,7 @@ memory, macOS 26.6.2, Python 3.12.11), 2026-08-24:
 | TTS clone (7.4s ref) | MLX | 10.13s | 143.83s | 18.60s | 7.73 | 3.87 GB | 11.37 GB |
 | STT | MPS (FP16) | 15.83s | 28.56s | 60.00s | 0.48 | 3.38 GB | 7.80 GB |
 
-WER for STT against the fixture transcript: 1.5.
+**WER retracted:** the previously published WER 1.5 for Higgs STT is invalid — the transcript above reads as correct Russian for the actual audio content, so the fixture's `REFERENCE` text (`src/stt_test.py:24-26`) simply does not match `samples/stt_ru.wav`; the number measured a mismatched reference, not model accuracy. No valid WER currently exists for any model tested here (Qwen3-ASR 0.6B/1.7B report `"wer": null` for the same reason — no matching reference was supplied, see `logs/qwen_stt.log:19-21` and `logs/qwen17_stt.log`). Verified reference transcripts are a separate, not-yet-started task (M4 plan, Track S, S1); see `docs/research/stt/m4-stt-comparison.md`.
 
 RTF is processing seconds divided by output audio duration (TTS) or input audio duration (STT). Values below 1.0 are faster than real time.
 

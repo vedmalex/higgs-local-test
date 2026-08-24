@@ -440,8 +440,11 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 
 ## 4. Track S
 
-- [ ] **S0 (30 min, no code).** Run Qwen3-ASR-1.7B-8bit through the existing `--model` flag
-  (`stt_qwen_local_test.py:70`) and retract the invalid WER 1.5 figure from `README.md:211`.
+- [x] **S0 (30 min, no code).** **DONE.** Ran Qwen3-ASR-1.7B-8bit through the existing `--model`
+  flag (`stt_qwen_local_test.py:70`) — RTF 0.291, `peak_mlx` 3.577 GiB, `weights_on_disk` 2.298
+  GiB (`logs/qwen17_stt.log`, `logs/qwen17_stt.json`) — and retracted the invalid WER 1.5 figure
+  from `README.md`. Draft comparison doc: `docs/research/stt/m4-stt-comparison.md`. No valid WER
+  exists for any STT model yet — that is S1's job, still open.
 - [ ] **S1 (after T6/T7).** Build verified reference transcripts once chapter-scale audio exists.
 - [ ] **S2.** Compare models, with the mandatory caveat that this is an 8-bit vs. FP16 comparison,
   not an architecture comparison.
