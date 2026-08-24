@@ -83,9 +83,9 @@ One server serves one variant at a time — a request's `task_type` only works a
 
 All three variants' model cards claim the same 10 languages, including **Russian**, as a first-party, documented claim (unlike Higgs STT, where Russian is empirical). Every published Qwen3-TTS model card checked so far uses the **Apache-2.0** license — no research/non-commercial restriction, unlike Higgs TTS 3 — which is the direct answer to this project's "licensing implications for generated audiobooks" question, pending the actual quality/RTF numbers from a real run.
 
-Unlike Higgs's deploy profile, vllm-omni's upstream Qwen3-TTS deploy config does not pin `FLASHINFER`, so the FlashInfer compute-capability-8.0 startup abort that forced `configs/higgs_multimodal_qwen3_turing.yaml` is **not known to reproduce** for Qwen3-TTS — this is recorded as unconfirmed and must be measured on a real T4 run, not assumed. If a real run does hit an analogous attention-backend or fp16-downcast failure, the fix is a `configs/qwen3_tts_turing.yaml` analogous to Higgs's, added once that evidence exists.
+The FlashInfer/attention-backend concern above did not materialize: `TRITON_ATTN` is selected correctly on a T4 with no override needed. A *different* failure did — a hardcoded `torch.bfloat16` in vllm-omni's Qwen3-TTS talker (`self._embedding_dtype`) ignored the engine's actual configured dtype, crashing every request with a `Half`/`BFloat16` mismatch. **This is now fixed and confirmed on real hardware** (2026-08-24): a one-line source fix, upstreamed as [vllm-project/vllm-omni#6545](https://github.com/vllm-project/vllm-omni/pull/6545), installable today via this notebook's `QWEN_OMNI_SOURCE="fork"` (from `github.com/vedmalex/vllm-omni@fix/qwen3-tts-embedding-dtype`) while the upstream PR is reviewed. Full root-cause and verification detail: `docs/research/qwen3-tts-notes.md`.
 
-**Status: not yet executed on real GPU hardware.** This backend was implemented and researched from primary sources (see `docs/research/qwen3-tts-notes.md`) in an environment with no CUDA device; running it on Colab/Kaggle T4 and recording real PASSED/FAILED/SKIPPED results and RTF/VRAM numbers is the remaining step before the comparison matrix below can be filled in.
+**Status: Phase 1 (0.6B Base + CustomVoice) PASSED on a real Colab Tesla T4** with the fork fix — see the comparison matrix and Benchmark section below for real numbers. Phase 2 (1.7B) has not been run yet.
 
 ## Kaggle Notebooks
 
@@ -150,11 +150,12 @@ Qwen3-TTS is an additional backend evaluated on its own merits, not a fallback t
 | Backend | Model | GPU | Russian | Basic TTS | Clone | Emotion/style | RTF | Peak VRAM | Audio valid | License |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |
 | Higgs | `higgs-tts-3-4b` | T4 | claimed (empirical failure below) | FAILED — constant `-32768` (#48) | blocked by the same common audio failure | blocked | not meaningful for invalid audio | 11.18 GB | **FAIL** | Boson research/non-commercial |
-| Qwen3-TTS | `12Hz-0.6B-Base` / `-CustomVoice` | T4 | documented claim (model card) | **not yet run** | **not yet run** | model-dependent, **not yet run** | — | — | **NOT RUN** | Apache-2.0 |
+| Qwen3-TTS (`QWEN_OMNI_SOURCE="pypi"`) | `12Hz-0.6B-Base` / `-CustomVoice` | T4 | documented claim (model card) | FAILED — `index_copy_` dtype crash, every request | same crash | same crash | not meaningful for a crash | 10.4 GB | **FAIL** (upstream bug, fixed below) | Apache-2.0 |
+| Qwen3-TTS (`QWEN_OMNI_SOURCE="fork"`, [PR #6545](https://github.com/vllm-project/vllm-omni/pull/6545)) | `12Hz-0.6B-Base` / `-CustomVoice` | T4 | **PASSED** — real Cyrillic speech | **PASSED**, RTF 1.234 | **PASSED**, RTF 1.392 | **PASSED** (`instructions`), RTF 1.118 | 1.12–1.39 | 10.2–10.4 GB | **PASS** | Apache-2.0 |
 
-This table is about the T4. Qwen3-TTS **has** now produced real, validated Russian speech — including voice cloning and `instruct`-driven style — but on Apple Silicon M1 through MLX, not on a T4 through vLLM; those are different code paths and the M1 result is reported in its own Benchmark block rather than pasted into this row.
+Recorded 2026-08-24 on a real Colab Tesla T4. The PyPI row is the reproducible upstream bug (`vllm-omni==0.26.0`'s Qwen3-TTS talker hardcodes `torch.bfloat16` for per-request embeddings regardless of the engine's configured dtype); the fork row is the one-line fix (`self._embedding_dtype = model_dtype`), verified via this project's own `audio_statistics()`/`audio_defect()` checks against a human-reference waveform — not just an absence of a crash. Full detail: `docs/research/qwen3-tts-notes.md`.
 
-RTF is never published for invalid audio, per this project's own rule (see the T4 note above). The Qwen row stays `NOT RUN` until `src/tts_qwen_cuda.py` is actually executed on a Colab/Kaggle T4 and its `metrics/tts_qwen_<variant>.json` results are recorded here — filling this row from the research alone, without a real run, would be exactly the kind of fabricated benchmark this project's rules forbid.
+RTF is never published for invalid audio, per this project's own rule — hence the PyPI row's `—` there. Phase 2 (1.7B CustomVoice/VoiceDesign/Base) has not been run yet.
 
 ## Benchmark
 
@@ -246,6 +247,28 @@ Request timings for the record — **diagnostics, not synthesis measurements**: 
 Four STT runs of the same input give RTF 0.178, 0.195, 0.199 and 0.207, so read it as approximately 0.18–0.21 — roughly 7–8× faster than the M1 MPS run (1.40) rather than a single exact ratio. WER is not stated: the recording used was not the repository fixture and no matching reference transcript was supplied, so no WER was measured — a comparison against the fixture text would have produced a number describing nothing.
 
 The `sglang` backend fails earlier and differently — a **documented reproducible failure on T4**: it installs and loads the model, then dies during CUDA graph capture with `KeyError: 'sm_75'` in flashinfer's CUTLASS-DSL RMSNorm, which has no Turing entry. `FLASHINFER_USE_CUDA_NORM=1` is applied below compute 8.0 as flashinfer's documented CUDA-JIT fallback for that path, but whether it carries a T4 through the rest of startup is untested — the vLLM backend made it unnecessary to find out.
+
+### Qwen3-TTS on Google Colab, Tesla T4 (recorded 2026-08-24)
+
+| Test | Model | vLLM-Omni source | Load | Processing | Audio | RTF | Peak VRAM | Status |
+| ---- | ----- | ----------------- | ---: | ---------: | ----: | --: | --------: | ------ |
+| `qwen_tts_clone` | `0.6B-Base` | pypi (`vllm-omni==0.26.0`) | 32.6s | — | — | — | 10.4 GB | **FAILED** — `index_copy_` dtype crash |
+| `qwen_tts_basic`/`qwen_tts_style` | `0.6B-CustomVoice` | pypi | 58.7s | — | — | — | 10.2 GB | **FAILED** — same crash |
+| `qwen_tts_clone` | `0.6B-Base` | fork ([PR #6545](https://github.com/vllm-project/vllm-omni/pull/6545)) | 21.0s | 26.51s | 19.04s | 1.392 | 10.4 GB | **PASSED** |
+| `qwen_tts_basic` | `0.6B-CustomVoice` | fork | 58.7s | 29.22s | 23.68s | 1.234 | 10.2 GB | **PASSED** |
+| `qwen_tts_style` (`instructions`) | `0.6B-CustomVoice` | fork | 58.7s | 29.86s | 26.72s | 1.118 | 10.2 GB | **PASSED** |
+
+`server_startup_seconds` (not shown as a per-job "Load" figure above, since it's paid once per server, not per job) was 573.7s (`0.6B-Base`) and 490.1s (`0.6B-CustomVoice`) — roughly 9-10 minutes, dominated by `torch.compile`/CUDA-graph-capture warmup across 17 batch sizes vLLM prepares for (1 through 128) that this project's one-request-at-a-time usage never needs. `--enforce-eager` (skips both) is queued as the next experiment — see `docs/research/qwen3-tts-notes.md`.
+
+Waveform validity independently re-checked against a human reference (`samples/reference.wav`: peak 16338, RMS 1989.4, 0.00% full scale):
+
+| Output | Peak | RMS | Full-scale fraction | Distinct values (first 4096) |
+| --- | --: | --: | --: | --: |
+| `qwen_tts_ru_clone.wav` | 13406 | 1577.3 | 0.0% | 20 |
+| `qwen_tts_ru_basic.wav` | 19517 | 2803.6 | 0.0% | 38 |
+| `qwen_tts_ru_style.wav` | 24785 | 2964.9 | 0.0% | 7 |
+
+None show the `-32768`-constant signature that made the Higgs T4 result above a FAIL — these are real, varying waveforms.
 
 ## Expected honest outcomes
 
