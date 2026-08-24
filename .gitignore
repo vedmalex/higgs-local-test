@@ -30,3 +30,7 @@ __pycache__/
 # Scratch clones of vllm-omni/modular used for M1 fact-extraction research —
 # large, reproducible from their pinned refs, never committed.
 .research-scratch/
+# M3-6 (issue #57): real-checkpoint weight cache (.venv-tts-only extraction, plain FP32 .npz,
+# ~11MB) regenerated on demand by m3_real_weights_export.py / m3_decoder_block_prototype.py
+# --real-weights -- derived from the checkpoint, not source, never committed.
+docs/research/mojo-max/.m3_real_weights_block1.npz

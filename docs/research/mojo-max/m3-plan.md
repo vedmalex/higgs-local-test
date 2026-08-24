@@ -248,7 +248,21 @@ M3-2 detector (which they use), not M3-1.
   *Devices:* M1 Metal GPU + CPU, one session.
   *Tier:* **sonnet-deterministic-code**.
 
-- [ ] **M3-6. Re-run M3-5 with the real stride-5 checkpoint weights (from M3-3).**
+- [x] **M3-6. Re-run M3-5 with the real stride-5 checkpoint weights (from M3-3).**
+  **DONE — PASSED.** Combined-tolerance gate satisfied at every stage, across 6 input seeds
+  (`combined_max_ratio` 0.029–0.079, tighter than M3-5's synthetic-weight sweep of 0.092–0.115);
+  0 NaN/Inf, 0 unexplained exact zeros, exact output length match every run. Final-stage
+  `max_abs_err=1.27958e-05` at seed=99 lands within 6e-8 of M3-4's real-weight
+  FP64-vs-torch-FP32 diagnostic number (1.27e-05), confirming the expected FP32-rounding-noise
+  floor and nothing more. No divergence from M3-5 to localize: same graph, same layout
+  convention, real-checkpoint value regime (alphas in ~[-0.09, 0.73], none near-zero;
+  `max|ref|` ~7–8 vs M3-5's synthetic ~77–88) — the weights/layout discrimination §6 asks for
+  came back clean. New file `m3_real_weights_export.py` (run once under `.venv-tts`, the only
+  env with torch/safetensors/transformers wired to this checkpoint; BF16 has no native NumPy
+  dtype, confirmed empirically) produces a gitignored FP32 `.npz` cache that
+  `m3_decoder_block_prototype.py --real-weights`'s new `make_real_weights()` loads (and
+  auto-regenerates on seed/seq_len mismatch) with NumPy alone. Detail:
+  [`m3-block-results.md`](m3-block-results.md) (M3-6 section).
   *Done when:* same tolerances as M3-5 (combined tolerance `|got − ref| ≤ 1e-05·max|ref| +
   5e-03·|ref|` at every element as the primary gate; max abs err, plain max rel err and masked max
   rel err secondary/reported-only) against the M3-4 real-weight reference, on real weights.

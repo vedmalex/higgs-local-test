@@ -33,10 +33,21 @@ Usage:
     pixi run python m3_decoder_block_prototype.py [--synthetic | --real-weights]
     pixi run python m3_decoder_block_prototype.py --run-graph --synthetic   (internal)
 
-`--real-weights` is a structural placeholder for M3-6 (not implemented yet -- this file is
-explicitly designed to be extended, per the task's deliverable note, without needing a
-rewrite of the graph-building code): the mode switch and per-layer instrumentation hooks
-below are shared, only the weight *source* differs.
+`--real-weights` (M3-6): re-runs the exact same graph and per-layer instrumentation above
+against the real stride-5 `_BosonDecoderBlock` (block 1) weights extracted by
+`m3_block_weights.py` (M3-3) from `bosonai/higgs-tts-3-4b`, compared against the same FP64
+reference chain fed those same real weights (mirrors `m3_block_reference.py`'s
+`run_real_weight_cross_check`, M3-4). Only the weight *source* differs -- the graph-building
+code, the per-layer stage instrumentation, and the M3-2 divergence detector are reused
+unchanged, per this file's original design note.
+
+Real weights live only in the real checkpoint's BF16 safetensors, which this pixi/MAX
+toolchain env cannot read directly (no `torch`, and `safetensors`' `framework="numpy"` cannot
+decode BF16 -- confirmed empirically). So `make_real_weights()` below shells out to
+`.venv-tts/bin/python m3_real_weights_export.py` (the only env with torch/safetensors/
+transformers wired to this checkpoint) to produce a plain FP32 `.npz` cache once, then loads
+that cache with NumPy alone, here and in every subsequent run. See
+`m3_real_weights_export.py`'s docstring for the full rationale.
 """
 
 from __future__ import annotations
@@ -90,6 +101,96 @@ def make_synthetic_weights(seed: int) -> dict:
         b2 = rng.normal(0, 0.05, size=(OUTPUT_DIM,)).astype(np.float32)
         res_units.append((alpha1, w1, b1, alpha2, w2, b2))
 
+    return {
+        "x": x,
+        "alpha0": alpha0,
+        "ct_weight": ct_weight,
+        "ct_bias": ct_bias,
+        "res_units": res_units,
+    }
+
+
+# ------------------------------------------------------------------------------------------
+# Real weights (M3-6) -- same dict shape as make_synthetic_weights(), sourced from the real
+# checkpoint via m3_real_weights_export.py's .venv-tts-only extraction (see module docstring).
+# ------------------------------------------------------------------------------------------
+REAL_WEIGHTS_CACHE = HERE / ".m3_real_weights_block1.npz"
+REAL_WEIGHTS_SEED_DEFAULT = 99  # matches m3_block_reference.run_real_weight_cross_check's seed
+RES_UNIT_NAMES = ("res_unit1", "res_unit2", "res_unit3")
+
+
+def _ensure_real_weights_cache(seed: int, seq_len: int, cache_path: Path) -> None:
+    """(Re)generate `cache_path` via `.venv-tts` if missing or stale for this seed/seq_len.
+    The cache stores its own `seed`/`seq_len` so a stale cache from a different invocation is
+    detected rather than silently reused."""
+    if cache_path.exists():
+        with np.load(cache_path) as npz:
+            cached_seed = int(npz["seed"])
+            cached_seq_len = int(npz["seq_len"])
+        if cached_seed == seed and cached_seq_len == seq_len:
+            return
+        print(
+            f"real-weights cache {cache_path} was built for seed={cached_seed} "
+            f"seq_len={cached_seq_len}, requested seed={seed} seq_len={seq_len} -- regenerating.",
+            flush=True,
+        )
+
+    # NOTE: deliberately NOT .resolve()-d -- .venv-tts/bin/python is a symlink chain
+    # (bin/python -> python3.12 -> /opt/homebrew/.../python3.12) whose venv activation
+    # (site-packages with torch/safetensors/transformers) depends on being invoked via the
+    # venv's own bin/ path, not the fully-dereferenced system interpreter it points to
+    # (confirmed empirically: .resolve() here reintroduced `ModuleNotFoundError: No module
+    # named 'numpy'` because it silently ran the bare system python3.12 instead of the venv).
+    venv_tts_python = HERE.parent.parent.parent / ".venv-tts" / "bin" / "python"
+    if not venv_tts_python.exists():
+        raise FileNotFoundError(
+            f"{venv_tts_python} not found -- real-weights extraction needs the .venv-tts env "
+            "(torch/safetensors/transformers), which this pixi/MAX env does not have."
+        )
+    export_script = HERE / "m3_real_weights_export.py"
+    print(f"real-weights cache missing/stale -- generating via {venv_tts_python} {export_script.name}", flush=True)
+    proc = subprocess.run(
+        [
+            str(venv_tts_python),
+            str(export_script),
+            "--seed", str(seed),
+            "--seq-len", str(seq_len),
+            "--out", str(cache_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    print(proc.stdout, flush=True)
+    if proc.returncode != 0:
+        print(proc.stderr, flush=True)
+        raise RuntimeError(f"m3_real_weights_export.py failed with exit code {proc.returncode}")
+
+
+def make_real_weights(seed: int = REAL_WEIGHTS_SEED_DEFAULT, seq_len: int = SEQ_LEN) -> dict:
+    _ensure_real_weights_cache(seed, seq_len, REAL_WEIGHTS_CACHE)
+    with np.load(REAL_WEIGHTS_CACHE) as npz:
+        x = npz["x"].astype(np.float32)
+        alpha0 = npz["snake1.alpha"].astype(np.float32)
+        ct_weight = npz["conv_t1.weight"].astype(np.float32)
+        ct_bias = npz["conv_t1.bias"].astype(np.float32)
+
+        res_units = []
+        for ru in RES_UNIT_NAMES:
+            alpha1 = npz[f"{ru}.snake1.alpha"].astype(np.float32)
+            w1 = npz[f"{ru}.conv1.weight"].astype(np.float32)
+            b1 = npz[f"{ru}.conv1.bias"].astype(np.float32)
+            alpha2 = npz[f"{ru}.snake2.alpha"].astype(np.float32)
+            w2 = npz[f"{ru}.conv2.weight"].astype(np.float32)
+            b2 = npz[f"{ru}.conv2.bias"].astype(np.float32)
+            res_units.append((alpha1, w1, b1, alpha2, w2, b2))
+
+        block_index = int(npz["block_index"])
+
+    print(
+        f"real weights loaded from {REAL_WEIGHTS_CACHE.name}: block_index={block_index} "
+        f"input_dim={x.shape[1]} seq_len={x.shape[2]} seed={seed}",
+        flush=True,
+    )
     return {
         "x": x,
         "alpha0": alpha0,
@@ -297,8 +398,8 @@ def build_decoder_block_graph(gpu_device, cpu_device):
 # Graph execution (run ONLY inside the isolated subprocess -- see main()).
 # ------------------------------------------------------------------------------------------
 def run_graph(mode: str, seed: int = 57305) -> int:
-    if mode != "synthetic":
-        print(f"mode={mode!r} not implemented yet (M3-6 territory) -- exiting.", flush=True)
+    if mode not in ("synthetic", "real-weights"):
+        print(f"mode={mode!r} not implemented -- exiting.", flush=True)
         return 0
 
     from max.driver import CPU, Accelerator, Buffer, accelerator_count
@@ -312,8 +413,11 @@ def run_graph(mode: str, seed: int = 57305) -> int:
         print("No accelerator on this host -- cannot test the mixed CPU/GPU block. Exiting.", flush=True)
         return 0
 
-    weights = make_synthetic_weights(seed=seed)
-    print(f"synthetic weight seed={seed}", flush=True)
+    if mode == "real-weights":
+        weights = make_real_weights(seed=seed)
+    else:
+        weights = make_synthetic_weights(seed=seed)
+        print(f"synthetic weight seed={seed}", flush=True)
     ref_stages = fp64_reference_chain(weights)
     for name, ref in zip(STAGE_NAMES, ref_stages):
         print(f"FP64 reference {name}: shape={ref.shape}", flush=True)
@@ -412,12 +516,19 @@ def run_graph(mode: str, seed: int = 57305) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-graph", action="store_true", help="(internal) actually build+run the graph")
-    parser.add_argument("--seed", type=int, default=57305, help="synthetic weight seed (M3-5 default 57305)")
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="weight seed for --synthetic (default 57305) or input-generation seed for "
+             "--real-weights (default 99, matching m3_block_reference.py's real-weight "
+             "cross-check convention)",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--synthetic", action="store_true", default=True)
     mode_group.add_argument("--real-weights", action="store_true")
     args = parser.parse_args()
     mode = "real-weights" if args.real_weights else "synthetic"
+    if args.seed is None:
+        args.seed = REAL_WEIGHTS_SEED_DEFAULT if mode == "real-weights" else 57305
 
     if args.run_graph:
         raise SystemExit(run_graph(mode, args.seed))
