@@ -48,6 +48,33 @@ decode BF16 -- confirmed empirically). So `make_real_weights()` below shells out
 transformers wired to this checkpoint) to produce a plain FP32 `.npz` cache once, then loads
 that cache with NumPy alone, here and in every subsequent run. See
 `m3_real_weights_export.py`'s docstring for the full rationale.
+
+`--precision {fp32,bf16-cast,bf16-nocast}` (M3-9): three precision variants over the SAME
+block/weights/inputs, per `m3-plan.md`'s S4 policy and M3-9 task:
+  - `fp32` (default): unchanged M3-5/M3-6/M3-7 behavior -- storage and compute both FP32.
+  - `bf16-cast`: every weight/activation TensorType is declared `DType.bfloat16` (storage), but
+    `forward()` immediately `ops.cast(..., DType.float32)`s every input before any compute, runs
+    the identical FP32 body M3-5 validated, and casts only the FINAL block output back to
+    `DType.bfloat16` (the inter-block hand-off boundary per S4 policy point 2) -- intermediate
+    per-layer stage outputs stay FP32 (they are not a block boundary).
+  - `bf16-nocast`: same `DType.bfloat16` storage, but NO explicit cast anywhere -- every op
+    (`ops.sin`/`ops.mul`/`ops.div`/`ops.add`/`ops.conv2d`/`ops.conv2d_transpose`) runs directly on
+    BF16 tensors, relying on whatever MAX's dtype-promotion rules and op dispatch actually do.
+    Snake's own constants (`eps`, `1.0`, `2.0`) are built at `DType.bfloat16` too (not hardcoded
+    FP32 as `m2_residual_unit_prototype.snake_expr` does) -- using the FP32-hardcoded `snake_expr`
+    here would silently force an FP32 promotion at the constant-add step even in the "no cast"
+    variant, which would not actually test bf16-without-cast at all. `snake_expr_for_dtype` below
+    is the dtype-parameterized version used for this purpose (mathematically identical to
+    `snake_expr` when `dtype=DType.float32` -- both use `ops.pow(ops.sin(...), constant(2.0))`).
+
+Because MAX's `Buffer.to_numpy()` does not support `DType.bfloat16` directly (confirmed
+empirically: raises `unsupported DType to convert to NumPy`), and this env has no `ml_dtypes`
+(it exists only in a different, unrelated pyenv on this machine, not in this pixi env) to build
+a BF16 numpy array either, both directions are done here via manual bit manipulation +
+`Buffer.view()` (a byte-reinterpretation MAX itself exposes, confirmed empirically to round-trip
+`uint16 -> DType.bfloat16 -> DType.uint16` exactly): `fp32_to_bf16_bits`/`bf16_bits_to_fp32`
+truncate-and-round an FP32 array's bit pattern to BF16's upper 16 bits and back, matching BF16's
+actual definition (upper half of an FP32 word) rather than approximating it.
 """
 
 from __future__ import annotations
@@ -82,6 +109,66 @@ STRIDE_CASES = {
     5: dict(input_dim=512, output_dim=256, seq_len=20, default_synth_seed=57305),
     8: dict(input_dim=1024, output_dim=512, seq_len=12, default_synth_seed=24601),
 }
+
+
+PRECISION_MODES = ("fp32", "bf16-cast", "bf16-nocast")
+EPS = 1e-9  # matches m2_residual_unit_prototype.EPS -- Snake1d's 1/(alpha+eps) constant.
+
+
+# ------------------------------------------------------------------------------------------
+# BF16 bit-manipulation helpers (M3-9). No ml_dtypes in this pixi env, and Buffer.to_numpy()
+# refuses DType.bfloat16 directly -- so storage/readback go through raw bit truncation +
+# Buffer.view(), which MAX itself exposes and which round-trips exactly (confirmed empirically).
+# BF16 is literally an FP32 word's upper 16 bits (sign+exponent+7 mantissa bits), so this is
+# not an approximation of BF16 -- it IS the BF16 encoding, round-to-nearest-even on the way down.
+# ------------------------------------------------------------------------------------------
+def fp32_to_bf16_bits(x: np.ndarray) -> np.ndarray:
+    x32 = np.ascontiguousarray(x.astype(np.float32))
+    bits = x32.view(np.uint32)
+    # round-to-nearest-even: add 0x7FFF plus the low bit of the surviving 16 bits (ties-to-even).
+    rounding_bias = ((bits >> 16) & 1).astype(np.uint64) + np.uint64(0x7FFF)
+    bits_rounded = (bits.astype(np.uint64) + rounding_bias) & np.uint64(0xFFFFFFFF)
+    return (bits_rounded >> np.uint64(16)).astype(np.uint16)
+
+
+def bf16_bits_to_fp32(bits: np.ndarray) -> np.ndarray:
+    bits32 = bits.astype(np.uint32) << np.uint32(16)
+    return bits32.view(np.float32)
+
+
+def to_bf16_buffer(arr: np.ndarray, device_obj):
+    """FP32/FP64 numpy array -> a BF16 `Buffer` placed on `device_obj` (M3-9 storage step)."""
+    from max.driver import Buffer
+    from max.dtype import DType
+
+    bits_u16 = fp32_to_bf16_bits(np.asarray(arr, dtype=np.float64))
+    return Buffer.from_numpy(bits_u16).to(device_obj).view(DType.bfloat16)
+
+
+def bf16_buffer_to_fp64(buf, cpu_device_obj) -> np.ndarray:
+    """A BF16 `Buffer` (any device) -> an FP64 numpy array, for comparison against the FP64 ref."""
+    from max.dtype import DType
+
+    host = buf.to(cpu_device_obj)
+    bits_u16 = host.view(DType.uint16).to_numpy()
+    return bf16_bits_to_fp32(bits_u16).astype(np.float64)
+
+
+def snake_expr_for_dtype(x, alpha, device, dtype):
+    """Dtype-parameterized `snake_expr` (M3-9's `bf16-nocast` variant needs Snake's OWN
+    constants -- eps, 1.0, 2.0 -- built at the storage dtype, not hardcoded FP32; using
+    `m2_residual_unit_prototype.snake_expr` as-is here would silently force an FP32 promotion at
+    the very first constant-add, which is not what "no explicit cast" is supposed to test).
+    Mathematically identical to `snake_expr` when `dtype=DType.float32` (same
+    `ops.pow(ops.sin(...), constant(2.0))` formulation) -- used for ALL three precision variants'
+    internal snake calls so there is exactly one code path, not a fp32-only vs bf16-only fork."""
+    from max.graph import ops
+
+    eps = ops.constant(EPS, dtype, device=device)
+    one = ops.constant(1.0, dtype, device=device)
+    two = ops.constant(2.0, dtype, device=device)
+    recip = ops.div(one, ops.add(alpha, eps))
+    return ops.add(x, ops.mul(recip, ops.pow(ops.sin(ops.mul(alpha, x)), two)))
 
 
 def make_config(stride: int) -> dict:
@@ -336,16 +423,21 @@ def conv_transpose_expr(x_cpu, filter_rscf, bias, stride: int, output_padding: i
     return z
 
 
-def residual_unit_expr(x, alpha1, filter1, bias1, alpha2, filter2, bias2, dilation: int, padding: int, device):
+def residual_unit_expr(x, alpha1, filter1, bias1, alpha2, filter2, bias2, dilation: int, padding: int, device, dtype=None):
     """Mirrors m2_residual_unit_prototype.py's build_graph forward exactly, factored into a
-    function so it can be called 3x (dilation=1,3,9) here."""
+    function so it can be called 3x (dilation=1,3,9) here. `dtype` (M3-9) selects the dtype
+    Snake's own constants are built at -- defaults to DType.float32 (M3-5/M3-6/M3-7 behavior,
+    also correct for the M3-9 bf16-cast variant since everything is FP32 by the time this runs)."""
+    from max.dtype import DType
     from max.graph import ops
 
-    from m2_residual_unit_prototype import conv1d_expr, snake_expr
+    from m2_residual_unit_prototype import conv1d_expr
 
-    y = snake_expr(x, alpha1, device)
+    if dtype is None:
+        dtype = DType.float32
+    y = snake_expr_for_dtype(x, alpha1, device, dtype)
     y = conv1d_expr(y, filter1, bias1, dilation, padding)
-    y = snake_expr(y, alpha2, device)
+    y = snake_expr_for_dtype(y, alpha2, device, dtype)
     y = conv1d_expr(y, filter2, bias2, 1, 0)  # pointwise
     x_len = int(x.shape[-1])
     y_len = int(y.shape[-1])
@@ -354,10 +446,24 @@ def residual_unit_expr(x, alpha1, filter1, bias1, alpha2, filter2, bias2, dilati
     return ops.add(xc, y)
 
 
-def build_decoder_block_graph(gpu_device, cpu_device, cfg: dict):
+def build_decoder_block_graph(gpu_device, cpu_device, cfg: dict, precision: str = "fp32"):
+    """`precision` (M3-9): "fp32" (M3-5/M3-6/M3-7 unchanged behavior), "bf16-cast" (BF16
+    storage, explicit ops.cast to FP32 for all compute, cast back to BF16 only at the final
+    block-output boundary), or "bf16-nocast" (BF16 storage, BF16 compute throughout, no cast
+    anywhere -- MAX's own dtype-promotion/op-dispatch behavior applies as-is)."""
     from max.dtype import DType
     from max.graph import Graph, TensorType
-    from m2_residual_unit_prototype import snake_expr
+
+    if precision not in PRECISION_MODES:
+        raise ValueError(f"precision={precision!r} not in {PRECISION_MODES}")
+    storage_dtype = DType.bfloat16 if precision in ("bf16-cast", "bf16-nocast") else DType.float32
+    # compute_dtype: what Snake's own constants + the graph body run at.
+    #   fp32        -> float32 (unchanged)
+    #   bf16-cast   -> float32 (everything is cast up before any compute -- S4 policy point 2)
+    #   bf16-nocast -> bfloat16 (no cast anywhere -- the whole point of this variant)
+    compute_dtype = DType.bfloat16 if precision == "bf16-nocast" else DType.float32
+    cast_up = precision == "bf16-cast"
+    cast_down_final = precision == "bf16-cast"  # only variant that re-crosses a "block boundary"
 
     stride = cfg["stride"]
     input_dim, output_dim, seq_len = cfg["input_dim"], cfg["output_dim"], cfg["seq_len"]
@@ -388,13 +494,29 @@ def build_decoder_block_graph(gpu_device, cpu_device, cfg: dict):
         filter2_3,
         bias2_3,
     ):
+        from max.graph import ops as _ops
+
+        if cast_up:
+            # S4 policy point 2: every op's inputs explicitly ops.cast(..., DType.float32) at
+            # the block boundary -- done here, ONCE, for every BF16-stored input, before any
+            # compute. Everything downstream of this point is identical to the fp32 path.
+            (
+                x, alpha0, ct_filter, ct_bias,
+                alpha1_1, filter1_1, bias1_1, alpha2_1, filter2_1, bias2_1,
+                alpha1_2, filter1_2, bias1_2, alpha2_2, filter2_2, bias2_2,
+                alpha1_3, filter1_3, bias1_3, alpha2_3, filter2_3, bias2_3,
+            ) = (_ops.cast(t, DType.float32) for t in (
+                x, alpha0, ct_filter, ct_bias,
+                alpha1_1, filter1_1, bias1_1, alpha2_1, filter2_1, bias2_1,
+                alpha1_2, filter1_2, bias1_2, alpha2_2, filter2_2, bias2_2,
+                alpha1_3, filter1_3, bias1_3, alpha2_3, filter2_3, bias2_3,
+            ))
+
         # -- GPU: Snake1d(input_dim) --
-        y0 = snake_expr(x, alpha0, gpu_device)
+        y0 = snake_expr_for_dtype(x, alpha0, gpu_device, compute_dtype)
 
         # -- cross to CPU: wn_conv_transpose1d(input_dim, output_dim, k=2*stride, stride, --
         # -- padding=ceil(stride/2), output_padding=stride%2) --
-        from max.graph import ops as _ops
-
         y0_cpu = _ops.transfer_to(y0, cpu_device)
         y1_cpu = conv_transpose_expr(
             y0_cpu, ct_filter, ct_bias, stride, ct_output_padding, output_dim, padding=ct_padding
@@ -404,37 +526,51 @@ def build_decoder_block_graph(gpu_device, cpu_device, cfg: dict):
         y1 = _ops.transfer_to(y1_cpu, gpu_device)
 
         # -- GPU: ResidualUnit(output_dim, dilation=1) --
-        y2 = residual_unit_expr(y1, alpha1_1, filter1_1, bias1_1, alpha2_1, filter2_1, bias2_1, 1, ru_paddings[0], gpu_device)
+        y2 = residual_unit_expr(
+            y1, alpha1_1, filter1_1, bias1_1, alpha2_1, filter2_1, bias2_1, 1, ru_paddings[0], gpu_device, compute_dtype
+        )
         # -- GPU: ResidualUnit(output_dim, dilation=3) --
-        y3 = residual_unit_expr(y2, alpha1_2, filter1_2, bias1_2, alpha2_2, filter2_2, bias2_2, 3, ru_paddings[1], gpu_device)
+        y3 = residual_unit_expr(
+            y2, alpha1_2, filter1_2, bias1_2, alpha2_2, filter2_2, bias2_2, 3, ru_paddings[1], gpu_device, compute_dtype
+        )
         # -- GPU: ResidualUnit(output_dim, dilation=9) --
-        y4 = residual_unit_expr(y3, alpha1_3, filter1_3, bias1_3, alpha2_3, filter2_3, bias2_3, 9, ru_paddings[2], gpu_device)
+        y4 = residual_unit_expr(
+            y3, alpha1_3, filter1_3, bias1_3, alpha2_3, filter2_3, bias2_3, 9, ru_paddings[2], gpu_device, compute_dtype
+        )
+
+        if cast_down_final:
+            # S4 policy point 2: "one cast back to BF16 only at the block output" -- the FINAL
+            # output only. y0..y3 are internal per-layer instrumentation, not the block boundary,
+            # and stay FP32 so their divergence numbers reflect the compute path, not an extra
+            # unrelated downcast.
+            y4 = _ops.cast(y4, DType.bfloat16)
 
         return y0, y1, y2, y3, y4
 
     input_types = [
-        TensorType(DType.float32, shape=(BATCH, input_dim, seq_len), device=gpu_device),
-        TensorType(DType.float32, shape=(1, input_dim, 1), device=gpu_device),
-        TensorType(DType.float32, shape=(1, ct_kernel, output_dim, input_dim), device=cpu_device),
-        TensorType(DType.float32, shape=(output_dim,), device=cpu_device),
+        TensorType(storage_dtype, shape=(BATCH, input_dim, seq_len), device=gpu_device),
+        TensorType(storage_dtype, shape=(1, input_dim, 1), device=gpu_device),
+        TensorType(storage_dtype, shape=(1, ct_kernel, output_dim, input_dim), device=cpu_device),
+        TensorType(storage_dtype, shape=(output_dim,), device=cpu_device),
     ]
     for _ in range(3):
         input_types += [
-            TensorType(DType.float32, shape=(1, output_dim, 1), device=gpu_device),
-            TensorType(DType.float32, shape=(1, ru_kernel, output_dim, output_dim), device=gpu_device),
-            TensorType(DType.float32, shape=(output_dim,), device=gpu_device),
-            TensorType(DType.float32, shape=(1, output_dim, 1), device=gpu_device),
-            TensorType(DType.float32, shape=(1, 1, output_dim, output_dim), device=gpu_device),
-            TensorType(DType.float32, shape=(output_dim,), device=gpu_device),
+            TensorType(storage_dtype, shape=(1, output_dim, 1), device=gpu_device),
+            TensorType(storage_dtype, shape=(1, ru_kernel, output_dim, output_dim), device=gpu_device),
+            TensorType(storage_dtype, shape=(output_dim,), device=gpu_device),
+            TensorType(storage_dtype, shape=(1, output_dim, 1), device=gpu_device),
+            TensorType(storage_dtype, shape=(1, 1, output_dim, output_dim), device=gpu_device),
+            TensorType(storage_dtype, shape=(output_dim,), device=gpu_device),
         ]
 
-    return Graph(f"m3_decoder_block_stride{stride}", forward=forward, input_types=input_types)
+    name = f"m3_decoder_block_stride{stride}_{precision}"
+    return Graph(name, forward=forward, input_types=input_types)
 
 
 # ------------------------------------------------------------------------------------------
 # Graph execution (run ONLY inside the isolated subprocess -- see main()).
 # ------------------------------------------------------------------------------------------
-def run_graph(mode: str, seed: int = 57305, stride: int = 5) -> int:
+def run_graph(mode: str, seed: int = 57305, stride: int = 5, precision: str = "fp32") -> int:
     if mode not in ("synthetic", "real-weights"):
         print(f"mode={mode!r} not implemented -- exiting.", flush=True)
         return 0
@@ -442,6 +578,9 @@ def run_graph(mode: str, seed: int = 57305, stride: int = 5) -> int:
         # Per m3-plan.md M3-7: stride=8 uses SYNTHETIC weights only -- real checkpoint
         # weight extraction (M3-3/M3-6) exists only for the real stride-5 block.
         print(f"real-weights mode is only defined for stride=5 (M3-6); stride={stride} requested -- exiting.", flush=True)
+        return 2
+    if precision not in PRECISION_MODES:
+        print(f"precision={precision!r} not in {PRECISION_MODES} -- exiting.", flush=True)
         return 2
 
     from max.driver import CPU, Accelerator, Buffer, accelerator_count
@@ -475,33 +614,58 @@ def run_graph(mode: str, seed: int = 57305, stride: int = 5) -> int:
         flush=True,
     )
 
-    graph = build_decoder_block_graph(gpu_device, cpu_device, cfg)
+    print(f"precision={precision}", flush=True)
+    graph = build_decoder_block_graph(gpu_device, cpu_device, cfg, precision)
     session = InferenceSession(devices=[accel])
     model = session.load(graph)
 
     # RSCF layout for the transposed conv, matching M2/M3-1's convention.
     ct_filter_rscf = np.transpose(weights["ct_weight"], (2, 1, 0))[np.newaxis, ...].copy()
 
+    is_bf16_storage = precision in ("bf16-cast", "bf16-nocast")
+
+    def _to_device(arr: np.ndarray, device_obj):
+        # M3-9: BF16-storage variants quantize every weight/activation to BF16 (a real
+        # bit-truncation, matching the checkpoint's actual storage dtype per S9 of the map --
+        # not a numpy approximation) before it ever reaches the graph; fp32 keeps M3-5/M3-6's
+        # exact behavior.
+        if is_bf16_storage:
+            return to_bf16_buffer(arr, device_obj)
+        return Buffer.from_numpy(arr).to(device_obj)
+
     bufs = [
-        Buffer.from_numpy(weights["x"]).to(accel),
-        Buffer.from_numpy(weights["alpha0"]).to(accel),
-        Buffer.from_numpy(ct_filter_rscf).to(cpu),
-        Buffer.from_numpy(weights["ct_bias"]).to(cpu),
+        _to_device(weights["x"], accel),
+        _to_device(weights["alpha0"], accel),
+        _to_device(ct_filter_rscf, cpu),
+        _to_device(weights["ct_bias"], cpu),
     ]
     for alpha1, w1, b1, alpha2, w2, b2 in weights["res_units"]:
         filter1_rscf = np.transpose(w1, (2, 1, 0))[np.newaxis, ...].copy()
         filter2_rscf = np.transpose(w2, (2, 1, 0))[np.newaxis, ...].copy()
         bufs += [
-            Buffer.from_numpy(alpha1).to(accel),
-            Buffer.from_numpy(filter1_rscf).to(accel),
-            Buffer.from_numpy(b1).to(accel),
-            Buffer.from_numpy(alpha2).to(accel),
-            Buffer.from_numpy(filter2_rscf).to(accel),
-            Buffer.from_numpy(b2).to(accel),
+            _to_device(alpha1, accel),
+            _to_device(filter1_rscf, accel),
+            _to_device(b1, accel),
+            _to_device(alpha2, accel),
+            _to_device(filter2_rscf, accel),
+            _to_device(b2, accel),
         ]
 
     results = model.execute(*bufs)
-    got_stages = [r.to(cpu).to_numpy().astype(np.float64) for r in results]
+    # Readback dtype per stage, per S4 policy: "bf16-nocast" never casts, so EVERY stage
+    # (including intermediates) is genuinely BF16 end-to-end; "bf16-cast" casts up immediately,
+    # so stages 0..3 are FP32 (internal, not a block boundary) and only the FINAL stage was cast
+    # back down to BF16 at the block-output boundary; "fp32" is FP32 throughout, unchanged.
+    if precision == "bf16-nocast":
+        stage_is_bf16 = [True] * len(results)
+    elif precision == "bf16-cast":
+        stage_is_bf16 = [False] * (len(results) - 1) + [True]
+    else:
+        stage_is_bf16 = [False] * len(results)
+    got_stages = [
+        bf16_buffer_to_fp64(r, cpu) if is_bf16 else r.to(cpu).to_numpy().astype(np.float64)
+        for r, is_bf16 in zip(results, stage_is_bf16)
+    ]
 
     print("\n=== per-layer divergence (M3-2 detector, m3_divergence.compare) ===", flush=True)
     all_healthy = True
@@ -553,6 +717,23 @@ def run_graph(mode: str, seed: int = 57305, stride: int = 5) -> int:
     print(f"zero NaN/Inf and no unexplained exact-zero tensor across all stages: {all_healthy}", flush=True)
     print(f"exact output length match: {length_exact}", flush=True)
     print(f"\nRESULT: {'PASS' if overall_pass else 'FAIL'}", flush=True)
+
+    # M3-9 three-way bucket, per m3-plan.md's pre-declared thresholds (restated against the
+    # §5-corrected combined metric): fine <=1, degrades (1,10], breaks otherwise (or any
+    # NaN/Inf/unexplained-exact-zero/shape-mismatch, checked first).
+    unhealthy_structural = (not all_healthy) or (not length_exact)
+    ratio = final_report.combined_max_ratio if final_report is not None else float("inf")
+    if unhealthy_structural or not np.isfinite(ratio) or ratio > 10:
+        bucket = "breaks"
+    elif ratio > 1:
+        bucket = "degrades"
+    else:
+        bucket = "fine"
+    print(
+        f"\nM3-9 BUCKET (precision={precision}): {bucket} "
+        f"(final-stage combined_max_ratio={ratio:.6g}, structural_healthy={not unhealthy_structural})",
+        flush=True,
+    )
     return 0 if overall_pass else 3
 
 
@@ -570,6 +751,12 @@ def main() -> None:
              "input-generation seed for --real-weights (default 99, matching "
              "m3_block_reference.py's real-weight cross-check convention; stride=5 only)",
     )
+    parser.add_argument(
+        "--precision", choices=PRECISION_MODES, default="fp32",
+        help="M3-9: fp32 (M3-5/M3-6/M3-7 unchanged), bf16-cast (BF16 storage, explicit FP32 "
+             "compute, cast back to BF16 only at the final block-output boundary), or "
+             "bf16-nocast (BF16 storage, BF16 compute throughout, no explicit cast anywhere).",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--synthetic", action="store_true", default=True)
     mode_group.add_argument("--real-weights", action="store_true")
@@ -581,7 +768,7 @@ def main() -> None:
         args.seed = REAL_WEIGHTS_SEED_DEFAULT if mode == "real-weights" else STRIDE_CASES[args.stride]["default_synth_seed"]
 
     if args.run_graph:
-        raise SystemExit(run_graph(mode, args.seed, args.stride))
+        raise SystemExit(run_graph(mode, args.seed, args.stride, args.precision))
 
     # Driver: isolate the actual graph build+execute in its own subprocess, exactly as
     # m3_device_mixing_spike.py / m2_convtranspose1d_prototype.py do -- a Metal
@@ -590,7 +777,7 @@ def main() -> None:
     mode_flag = "--real-weights" if mode == "real-weights" else "--synthetic"
     proc = subprocess.run(
         [sys.executable, "-u", __file__, "--run-graph", mode_flag,
-         "--stride", str(args.stride), "--seed", str(args.seed)],
+         "--stride", str(args.stride), "--seed", str(args.seed), "--precision", args.precision],
         capture_output=True,
         text=True,
     )

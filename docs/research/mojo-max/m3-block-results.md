@@ -865,3 +865,184 @@ does not claim it.
   (M3-8 still covers `pad>0` reachability).
 - **Cross-block composability, as stated above, is out of scope for this task and for M3 as a
   whole** — see the explicit non-goal section.
+
+---
+
+## M3-9 — BF16-storage / FP32-compute pass over the whole block
+
+Date: 2026-08-24. Run: `docs/research/mojo-max/m3_decoder_block_prototype.py --real-weights
+--stride 5 --precision {fp32,bf16-cast,bf16-nocast}`, via `arch -arm64 pixi run python` inside
+`.mojo-probe-stable` (same pixi env, same M1 host, as M3-1/M3-5/M3-6). Same real stride-5 block
+1 weights (M3-3), same synthetic input activation (seed=99, per M3-6's convention), same FP64
+reference chain (M3-4), same `m3_divergence.compare()` detector (M3-2) — only the storage/compute
+`--precision` differs across the three runs.
+
+### The three variants and how they were actually built
+
+`build_decoder_block_graph()` now takes a `precision` argument (`"fp32"` / `"bf16-cast"` /
+`"bf16-nocast"`) that controls two independent things: the `TensorType` dtype every graph input
+is declared at (`storage_dtype`), and whether `forward()` inserts an explicit `ops.cast` at the
+top (`bf16-cast` only) and/or at the very end (`bf16-cast` only, on the FINAL stage alone):
+
+```text
+fp32        storage=float32, compute=float32               -- M3-5/M3-6/M3-7 unchanged
+bf16-cast   storage=bfloat16, ops.cast(...,float32) on ALL 22 graph inputs BEFORE any compute,
+            identical FP32 body throughout, ops.cast(y4, bfloat16) on ONLY the final output
+            (S4 policy point 2: "one cast back to BF16 only at the block output")
+bf16-nocast storage=bfloat16, NO ops.cast anywhere -- every op (ops.sin/mul/div/add/pow via a new
+            snake_expr_for_dtype(), ops.conv2d, CPU-placed ops.conv2d_transpose) runs directly on
+            BF16 tensors and BF16-typed constants
+```
+
+`snake_expr_for_dtype(x, alpha, device, dtype)` (new) replaces `m2_residual_unit_prototype.
+snake_expr` for this script's own Snake calls, because that function hardcodes its `eps`/`1.0`/
+`2.0` constants at `DType.float32` — reusing it unmodified for `bf16-nocast` would have silently
+forced an FP32 promotion at the very first `ops.add(alpha, eps)`, which would not have tested
+"no explicit cast" at all. `snake_expr_for_dtype(..., dtype=DType.float32)` is mathematically
+identical to `snake_expr` (same `ops.pow(ops.sin(...), constant(2.0))` formulation), so `fp32` and
+`bf16-cast`'s internal compute is byte-for-byte the same code path M3-5/M3-6 already validated.
+
+**A real MAX-interop gap found and worked around, honestly, not hidden:** this pixi/MAX env has
+no `ml_dtypes`, and `Buffer.to_numpy()` refuses `DType.bfloat16` outright
+(`unsupported DType to convert to NumPy`) — confirmed empirically before writing the rest of the
+script. Storage/readback for the BF16 variants therefore goes through explicit bit manipulation:
+`fp32_to_bf16_bits`/`bf16_bits_to_fp32` (round-to-nearest-even truncation of an FP32 word's upper
+16 bits — BF16's literal encoding, not an approximation) plus `Buffer.view()` (a byte-reinterpret
+MAX itself exposes and which was confirmed, in isolation, to round-trip `uint16 -> bfloat16 ->
+uint16` exactly). **This is a numpy-interop gap in this Python convenience layer, not a gap in
+MAX's own graph/op support** — every op actually used here (`ops.constant`, `ops.sin`, `ops.mul`,
+`ops.div`, `ops.add`, `ops.pow`, `ops.conv2d` on GPU, `ops.conv2d_transpose` on CPU) was confirmed
+in standalone smoke tests to compile AND execute cleanly against `DType.bfloat16` tensors, on both
+the Metal accelerator and the CPU device, with no dtype refusal, no silent promotion, and no
+crash. No unexpected MAX dtype behavior was found; the friction was entirely in numpy conversion.
+
+### Regression check (fp32 variant)
+
+`--precision fp32` reproduces M3-6's real-weight numbers **byte-for-byte**: final-stage
+`combined_ratio=0.029173`, `atol=7.69129e-05`, `max|ref|=7.69129`, zero NaN/Inf, zero exact
+zeros, exact length match (100==100), `RESULT: PASS`. The `precision` plumbing did not perturb
+the already-validated FP32 path.
+
+### Per-layer numbers, all three variants (stride=5, real weights, seed=99)
+
+```text
+                          fp32 (M3-6, cited)   bf16-cast              bf16-nocast
+after_snake1    ratio     1.34e-05             0.787757               1.40834   (fail_n=204/10240)
+after_conv_t1   ratio     0.0330783            70.2005  (fail=3995)   1163.37   (fail=22568/25600)
+after_res_unit1 ratio     0.0395804            45.9537  (fail=2560)    986.976  (fail=21443/25600)
+after_res_unit2 ratio     0.0371279            42.6762  (fail=2431)   1572.63   (fail=21312/25600)
+after_res_unit3 ratio     0.029173             35.1318  (fail=1961)    745.542  (fail=20412/25600)
+  (final)
+max_abs_err(final)        1.27958e-05          0.0182479              0.123727
+max_rel_err(final)        0.231255             283.359                7872.18
+NaN/Inf (any stage)       0                    0                      0
+exact-zero got (any       0                    0                      18-23 per conv-touched
+  stage, elementwise)                                                 stage (never the WHOLE
+                                                                       tensor -- structurally
+                                                                       healthy per is_healthy_
+                                                                       combined())
+length match               100==100 every stage, every variant
+RESULT (overall_pass)     PASS                 FAIL                   FAIL
+M3-9 bucket                fine                 breaks                breaks
+```
+
+Full commands: `cd .mojo-probe-stable && arch -arm64 pixi run python
+../docs/research/mojo-max/m3_decoder_block_prototype.py --real-weights --precision fp32` (and
+`bf16-cast`, `bf16-nocast` in place of `fp32`).
+
+### The real `alpha` distribution against the dangerous regime (restated in the BF16 context)
+
+M3-3 already measured this block's real `alpha` distribution: 2048 values across 7 Snake layers,
+smallest real `|alpha|` ≈ **0.0033**, and **zero** values at or below the **1e-7** dangerous
+regime `m2-snake1d-results.md` identified (the regime that triggers FP16's `1/alpha` overflow
+past 65504). That finding is unchanged by this task — M3-9 did not re-measure `alpha`, it reused
+M3-3's number — but it is now checked against an actual BF16 run rather than just cited: **zero
+NaN/Inf occurred in any of the 15 per-layer reports above (3 variants × 5 stages), including
+`bf16-nocast`,** which is the variant with no FP32 safety net anywhere. This is consistent with,
+not merely assumed from, the map's §9 prediction that BF16's FP32-width exponent range removes
+FP16's specific overflow ceiling: `1/(0.0033+1e-9) ≈ 303`, a value BF16 represents exactly as
+easily as FP32 (both have the same 8-bit exponent field; BF16's overflow ceiling is ~3.4e38, the
+same as FP32's, not FP16's 65504). **So variant 3's degradation is demonstrably NOT a repeat of
+the FP16 reciprocal-overflow story** — there is no overflow anywhere to repeat.
+
+### Interpretation — placing each variant, without rounding a borderline number into the wrong bucket
+
+**`fp32` — fine.** Unchanged from M3-6; cited, not re-derived.
+
+**`bf16-cast` — breaks by the pre-declared numeric threshold (ratio 35.1 > 10), but the qualitative
+character of that break is worth stating precisely rather than leaving "breaks" to imply the same
+thing as variant 3.** Every per-stage ratio in this variant comes from exactly ONE source: the
+one-time BF16 quantization of `x`/`alpha0`/every conv filter and bias at the graph's input
+boundary (S4 policy: storage BF16, no host upcast). The evidence for this is direct: the very
+FIRST stage (`after_snake1`, before any convolution has even run) already shows `ratio=0.79` —
+purely from Snake computing, in genuine FP32, on already-BF16-quantized `x` and `alpha`. Every
+later stage's growth (0.79 -> 70.2 -> 46.0 -> 42.7 -> 35.1) is ordinary FP32-computed propagation
+and partial cancellation of that one initial quantization error through the conv-transpose and
+three residual units, not fresh precision loss at each op (contrast this with `bf16-nocast`
+below, where the ratio keeps re-growing by another ~13-27x at nearly every stage). Zero NaN/Inf,
+zero exact-zero tensors. It fails the letter of the pre-declared threshold — `combined_max_ratio
+36.1x` over the `<=10` "breaks" line's own multiple is not a rounding-error-sized miss — so this
+result is honestly reported as **breaks**, not softened to "degrades." But it is also reported
+as **breaks driven entirely by storage quantization, not by compute precision**, since the S4
+policy's actual compute claim (FP32 throughout) held exactly as designed and is not what is being
+falsified here — a distinction the plan's fine/degrades/breaks vocabulary alone does not capture
+and which a purely mechanical read of the ratio number would flatten.
+
+**`bf16-nocast` — breaks, decisively, and by a different mechanism than `bf16-cast`.** Final-stage
+ratio 745.5 — **21x worse** than `bf16-cast`'s 35.1 on the identical weights/input, with the SAME
+zero-NaN/Inf, zero-whole-tensor-zero structural health. 80% of the final stage's 25600 elements
+(20412) are over tolerance, versus `bf16-cast`'s 7.7% (1961) — this is not a few near-zero-ref
+elements tripping the metric (the same near-zero-denominator artifact `m3-plan.md` §5's "metric
+history" already documented and corrected for with the combined tolerance); it is a genuinely
+widespread divergence. The mechanism is exactly what §4 of the plan predicted and what the
+`bf16-cast` comparison now quantifies directly: with no explicit cast, EVERY op's output is
+re-quantized to BF16's 8-bit mantissa (~0.4% relative error per value, `2^-8`) before the NEXT op
+consumes it — Snake, then ConvTranspose, then three ResidualUnits each with two more Snake+Conv
+pairs — so quantization noise is introduced and compounded repeatedly across the block's depth,
+not introduced once and then computed on precisely. A handful of individual elements (18-23 out
+of 25600, at each conv-touched stage) hit exact zero where the reference is not zero — BF16
+underflow of a small intermediate value, not the #48 all-zero-TENSOR failure shape (`is_healthy_
+combined()` correctly reports these stages as structurally healthy; only a fully-zeroed tensor
+against a non-zero reference trips that check, and none of the 15 reports here do). **This is
+mantissa-precision loss compounding across the block's depth, not a reciprocal-overflow repeat of
+the FP16 `1/alpha` story** — restated from the previous section: zero NaN/Inf occurred anywhere,
+and BF16's exponent range structurally forbids the specific FP16 failure mode `m2-snake1d-
+results.md` documented. The `bf16-cast` vs `bf16-nocast` gap (21x) is itself the clearest evidence
+in this whole task: it is a direct, measured quantification of what the S4 policy's "compute in
+FP32, cast only at the boundary" design choice actually buys, on real weights, on this hardware.
+
+### Scope of any "BF16 is safe" conclusion — explicitly Metal/M1 only
+
+Per §10 of the map, this result says nothing about Tesla T4/Turing (`sm_75`, no BF16 tensor
+cores) — M0 already established that a T4 BF16 PASS cannot be distinguished from MAX
+transparently falling back to another path underneath, and M3-9 does not touch that question at
+all (it never leaves Metal). What this run DOES establish, Metal-only: BF16 storage combined with
+FP32 compute produces a bounded, one-shot degradation (`bf16-cast`, ratio 35.1, no NaN/Inf); BF16
+storage with BF16 compute and no cast produces a substantially worse, still finite (no NaN/Inf)
+degradation (`bf16-nocast`, ratio 745.5) driven by compounding mantissa loss, not the FP16
+overflow mechanism. **Neither number is a claim about T4** — M3-10 is where that gets checked,
+and per §10's standing caution, a T4 "PASS" on either BF16 variant would still need the same
+scrutiny M0 already flagged (compatibility vs genuine hardware BF16 execution) before being
+read as confirming this M1 result generalizes.
+
+### What this does not show
+
+- Only the real stride-5 block (block 1), real weights, one synthetic (seed=99) input activation
+  — the same "synthetic activation, real weights" scope M3-4/M3-6 already flagged, unchanged
+  here. No multi-seed sweep was run for the BF16 variants (unlike M3-5/M3-6/M3-7's 6-seed
+  sweeps) — this task's done-criteria did not require one, and a single real-weight run already
+  gave an unambiguous three-way discrimination between the variants.
+- M1/Metal only. Tesla T4 re-validation of all three precision variants is M3-10's explicit job,
+  not this task's — see the scope note above.
+- Stride=8 was not re-run under any BF16 variant — M3-9's own scope (per `m3-plan.md`) is the
+  real stride-5 block only, matching M3-3/M3-6's real-weight coverage.
+- Whether `bf16-nocast`'s degradation would compound further, or interact differently, across
+  MULTIPLE chained real decoder blocks (rather than this one isolated block) is untested — same
+  cross-block-composability non-goal M3-7/M3-8 already stated, unchanged here. M4's territory.
+- The BF16 bit-manipulation helpers (`fp32_to_bf16_bits`/`bf16_bits_to_fp32`) were smoke-tested in
+  isolation (exact round-trip on 5 hand-picked values including the smallest real `alpha`
+  magnitude) before being wired into the full block script, but no exhaustive/property-based test
+  of the rounding-to-nearest-even edge cases (e.g. exact tie-breaking at the 17th bit) was run —
+  not required for this task's numeric conclusions, since any residual rounding-mode disagreement
+  there would be many orders of magnitude smaller than the ~1e-3-to-1e-2-scale effects measured
+  above.

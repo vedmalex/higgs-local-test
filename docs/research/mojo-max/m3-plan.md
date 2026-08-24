@@ -341,9 +341,37 @@ M3-2 detector (which they use), not M3-1.
 
 ### Stage D — precision
 
-- [ ] **M3-9. BF16-storage / FP32-compute pass over the whole block.**
-  Per §5 below. Three variants, same block, same inputs: all-FP32 (baseline, from M3-6);
-  BF16 storage + explicit FP32 compute; BF16 storage + BF16 compute (no cast).
+- [x] **M3-9. BF16-storage / FP32-compute pass over the whole block.**
+  **DONE.** All three variants run on the real stride-5 block (M3-3 weights, M3-6's seed=99
+  input), on M1/Metal, via `m3_decoder_block_prototype.py --real-weights --precision
+  {fp32,bf16-cast,bf16-nocast}`. `fp32` reproduces M3-6 byte-for-byte (`combined_ratio=0.029173`,
+  **fine**). `bf16-cast` (storage BF16, explicit `ops.cast` to FP32 for all compute, cast back to
+  BF16 only at the final output) lands at final-stage `combined_ratio=35.1318` — **breaks** by the
+  letter of the pre-declared `>10` threshold, but the evidence shows this is a ONE-SHOT
+  weight/activation quantization effect (already visible at stage 1, before any conv has run),
+  not a compute-precision failure: zero NaN/Inf, zero exact-zero tensors, and the FP32-compute
+  claim held exactly as designed. `bf16-nocast` (no cast anywhere, BF16 compute throughout) lands
+  at `combined_ratio=745.542` — **breaks decisively**, 21x worse than `bf16-cast` on the identical
+  weights/input, 80% of final-stage elements over tolerance, still zero NaN/Inf. The `bf16-cast`
+  vs `bf16-nocast` gap is itself a direct, measured quantification of what "compute in FP32, cast
+  only at the boundary" (§4's policy) actually buys. Real `alpha` distribution restated from
+  M3-3 (min `|alpha|`≈0.0033, none ≤1e-7): zero NaN/Inf occurred in ANY of the 15 per-layer
+  reports across all 3 variants, confirming variant 3's degradation is mantissa-precision loss
+  compounding across the block's depth, NOT a repeat of the FP16 `1/alpha` reciprocal-overflow
+  story (BF16's FP32-width exponent range structurally forbids that specific failure mode). A
+  real MAX-interop gap found and reported honestly: this env's `Buffer.to_numpy()` refuses
+  `DType.bfloat16` and has no `ml_dtypes`, so BF16 storage/readback here goes through explicit
+  bit-truncation + `Buffer.view()` — a Python-numpy-interop gap, not a MAX op/graph gap (every op
+  used — `ops.sin/mul/div/add/pow`, `ops.conv2d`, CPU `ops.conv2d_transpose` — compiled and ran
+  cleanly on BF16 tensors with no silent promotion or refusal, confirmed in isolation first).
+  Per §10/M3-9's own instruction: this result is scoped to Metal/M1 only; T4 confirmation is
+  M3-10's job. **Metric note:** buckets were assigned using `combined_max_ratio` (fine ≤1,
+  breaks >10, mirroring the same 10x-order-of-magnitude spacing the plain-rel-err thresholds
+  below specify) rather than literal plain max relative error — reusing plain max_rel_err
+  verbatim would have misclassified even the `fp32` baseline as "breaks" (its own
+  `max_rel_err(final)=0.231`), the identical near-zero-denominator artifact M3-5's metric fix
+  already resolved. Recorded here for consistency with that earlier correction, not as a new
+  silent metric change. Detail: [`m3-block-results.md`](m3-block-results.md) (M3-9 section).
   *Done when:* all three run on M1 and the detector's numbers for each are recorded against
   **pre-declared numeric thresholds** that separate the three outcomes, rather than a qualitative
   call:
