@@ -37,6 +37,19 @@ make download-gdrive FOLDER_ID=<id> # download results from Google Drive
 make clean-output
 ```
 
+`make download-models` (`scripts/download_models.sh`) retries each model through a flaky
+network on its own (disables the Xet accelerated-download backend, which has been observed
+to stall indefinitely on some VPNs; retries transient timeouts with backoff). If the local
+network is unusable for a multi-gigabyte download even with that, prefetch on Colab instead —
+its network doesn't share the same problem — and pull the result down as an archive:
+[`notebooks/model_prefetch_to_drive.ipynb`](notebooks/model_prefetch_to_drive.ipynb)
+(<a href="https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/model_prefetch_to_drive.ipynb" target="_blank" rel="noopener noreferrer"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>)
+downloads every model this project needs, packs each into a `.tar` preserving the Hugging
+Face cache's internal blob/snapshot symlink layout, and uploads it to
+`MyDrive/higgs-benchmark/model-cache/`. Locally: `tar -xf <name>.tar -C
+~/.cache/huggingface/hub/` for each downloaded archive, and `huggingface_hub` recognizes it as
+already cached.
+
 The 60-second reference behind the recorded cloning result was a copy of `samples/stt_ru.wav`; `samples/reference.wav` now holds a 7.4-second clip instead, so reproducing that figure means copying `samples/stt_ru.wav` back over it. The 60-second pair is also preserved on Drive as `reference_60s.wav` / `reference_60s.txt`.
 
 Add `samples/stt_ru.wav` before STT. It is normalized with system `ffmpeg` to mono 16 kHz. Optional voice cloning needs both `samples/reference.wav` and its exact transcript in `samples/reference.txt` (can be copied directly from `samples/stt_ru.wav` and `output/stt_ru.txt`); otherwise it reports `SKIPPED`. Note on cloning latency: reference audio is tokenized at 25 frames/sec into the prompt KV cache (e.g. 5–15s clips are ~125–375 tokens for faster RTF, while a 60s clip introduces ~1500 prompt audio tokens).
