@@ -42,8 +42,10 @@ kills the engine on every request. Measured twice on a real Colab T4; see
 THE ONE-LINE FIX, APPLIED WITHOUT FORKING THE PACKAGE
 -----------------------------------------------------
 Subclass the talker, call the real `__init__`, then set `_embedding_dtype` to the
-`model_dtype` the parent already computed, and re-register the subclass under the
-same architecture name. Nothing in vllm-omni is edited.
+`model_dtype` the parent already computed -- on the talker AND on the
+`Qwen3TTSPromptEmbedsBuilder` it constructs, which carries the same hardcode at
+`prompt_embeds_builder.py:332` for the prefill path -- and re-register the subclass
+under the same architecture name. Nothing in vllm-omni is edited.
 
 The registry that matters is vllm-omni's OWN registry, not `vllm.ModelRegistry`:
 `vllm_omni/model_executor/models/registry.py` builds a separate `_ModelRegistry`
@@ -153,9 +155,18 @@ def _build_subclass():
                 # Some vLLM versions carry a string here. Leave upstream behaviour
                 # untouched rather than guessing a dtype.
                 return
-            if getattr(self, "_embedding_dtype", None) == model_dtype:
-                return
             self._embedding_dtype = model_dtype
+
+            # The prefill path has the SAME hardcode in a second place:
+            # `Qwen3TTSPromptEmbedsBuilder.__init__` (prompt_embeds_builder.py:332
+            # at v0.26.0) also sets `self._embedding_dtype = torch.bfloat16`, and it
+            # accepts no dtype argument in this version. The talker constructs the
+            # builder later in its own __init__ (line 480), so by the time we get
+            # here it exists and can be corrected the same way. Missing this would
+            # leave the prefill embeddings bfloat16 even with the talker fixed.
+            builder = getattr(self, "_prompt_builder", None)
+            if builder is not None and hasattr(builder, "_embedding_dtype"):
+                builder._embedding_dtype = model_dtype
 
     return Qwen3TTSTalkerDtypeAlignedForConditionalGeneration
 

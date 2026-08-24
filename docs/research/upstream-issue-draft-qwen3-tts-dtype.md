@@ -97,6 +97,14 @@ One line — use the `model_dtype` the same `__init__` already computes:
 +        self._embedding_dtype = model_dtype
 ```
 
+The prefill path needs the same treatment: `Qwen3TTSPromptEmbedsBuilder.__init__`
+(`prompt_embeds_builder.py:332`) hardcodes `self._embedding_dtype =
+torch.bfloat16` as well, and takes no dtype argument. Since the talker is its only
+constructor (`qwen3_tts_talker.py:480`), threading `model_dtype` through as a
+keyword argument that defaults to `torch.bfloat16` would fix it without touching
+any existing caller. On bf16-capable hardware `model_dtype` already resolves to
+`bfloat16`, so both changes are no-ops there.
+
 Two related hardcodes in the same class are deliberately left out of this
 suggestion because they are not what crashed here and may be intentional:
 `self.encoder.to(dtype=torch.bfloat16)` in `__init__` and again in `load_weights`.

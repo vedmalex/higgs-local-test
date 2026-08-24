@@ -359,6 +359,19 @@ Mechanism: subclass the upstream talker, call the real `__init__`, then set
 and re-register the subclass under the same architecture name. vllm-omni is not
 edited or forked.
 
+**There is a second hardcode, on the prefill path**, credited to the earlier
+`fix/52-qwen-omni-fork` branch (unmerged) which found it first:
+`Qwen3TTSPromptEmbedsBuilder.__init__` (`prompt_embeds_builder.py:332` at
+`v0.26.0`) sets the same `self._embedding_dtype = torch.bfloat16`, and takes no
+dtype argument in this version. Fixing only the talker would leave the prefill
+embeddings bfloat16. The talker constructs that builder later inside its own
+`__init__` (line 480, after line 446), so the subclass's post-`super().__init__()`
+hook reaches `self._prompt_builder` and corrects it too — which is why this
+approach does not need the forked-package install that branch proposed. Both
+branches agree on the root cause and on leaving `self.encoder.to(dtype=bfloat16)`
+alone; they differ only in delivery (out-of-tree re-registration here vs. a forked
+`vllm-omni` there), and **neither has been run on a GPU**.
+
 Two details that had to be read from the source rather than assumed:
 
 - **The registry is vllm-omni's own, not `vllm.ModelRegistry`.**
