@@ -95,12 +95,19 @@ passes through unmodified. Recorded here explicitly because the error message lo
 of context and would otherwise cost someone time re-discovering this.
 
 **0.6 Quantization — two separate facts about the codec that must not be merged into one.**
-Infrastructure is complete: `python -m mlx_audio.convert` (argparse `:716-784`, `main :795`),
-`higgs_multimodal_qwen3` → `higgs_audio_v3` detection covered by `tts/tests/test_convert.py:18-24`,
-`sanitize` runs before quantization (`convert.py:660-661`), quantized-checkpoint loading already
-wired (`apply_quantization`, `utils.py:209-254`, called at `:402-403`), and
-`mlx_audio.tts.load()` accepts a local path (`tts/utils.py:132-155`). Start at 8-bit; `QUANT_RECIPES`
-(`convert.py:22`) for mixed recipes is an option, not the default.
+The conversion tool this plan uses is specifically `mlx_audio/convert.py:583 def convert`
+(argparse `configure_parser:710`, `main:795`) — **not** `tts/utils.py:211 def convert`, a
+different function of the same name that has neither the `higgs_multimodal_qwen3` detection nor
+the `sanitize`-before-quantization sequencing (both confirmed present only in
+`mlx_audio/convert.py`). Infrastructure in the correct tool is complete: `higgs_multimodal_qwen3` →
+`higgs_audio_v3` detection covered by `tts/tests/test_convert.py:18-24`, `sanitize` runs before
+quantization (`convert.py:660-661`), quantized-checkpoint loading already wired
+(`apply_quantization`, `utils.py:209-254`, called at `:402-403`), `mlx_audio.tts.load()` accepts a
+local path (`tts/utils.py:132-155`), and `get_model_path` (`convert.py:234-262`) already tries a
+local `Path(...)` first and only calls `snapshot_download` if it doesn't exist — none of this needs
+new code. Start with 8-bit and, within 8-bit, predicate variant B first (§ M4-T3); mixed recipes
+(`QUANT_RECIPES`, `convert.py:22`, CLI `--quant-predicate` `:753-757`, built by
+`build_quant_predicate:496-516`) come only after variant B, not before.
 
 - **(a) The codec is never quantized — and this needs no protective work, it already can't be
   reached.** `_codec` is constructed inside `post_load_hook` (`model.py:88-110`, verified against
@@ -131,23 +138,41 @@ wired (`apply_quantization`, `utils.py:209-254`, called at `:402-403`), and
 - Do not write "CODEC PROTECTED structurally via `copy_model_files`" — that claim is false; the
   correct statement is the two bullets above, kept separate.
 
-**Memory — three different numbers, one arithmetic conclusion, one open question.**
-`logs/tts_basic.log` reports three numbers that are not interchangeable: `peak_memory_bytes:
-1248624640` (≈1.16 GiB) is MLX's own allocator peak — activations/KV-cache only, **weights not
-included**; `12205576640` (≈11.37 GiB, matches `README.md:206`) is the whole process. Arithmetic:
-≈8.7 GB of BF16 weights on disk (≈8.1 GiB) + ≈1.16 GiB MLX allocator + runtime overhead ≈ 11.37
-GiB. **Weights dominate the footprint**, and 4-bit quantization cuts them from ≈8.1 GiB to roughly
-≈2.3 GiB — it does not shrink the MLX-allocator slice (which is what actually grows with sequence
-length and batch size: 1.16 GiB on the `basic` case, 3.82 GiB on the `controls` case per the same
-log). **Remove any earlier framing of "quantization might give speed without memory benefit" — it
-is backwards: quantization's real payoff here is freeing headroom under the batch, not shrinking a
-number that was already small.** The metric that matters for M4-T8 is not "did total GB go down"
-but **how many batch slots now fit** — this directly links the batching and quantization levers.
-Open question, not yet resolved: PR #95's `mx.get_peak_memory()` read up to 11.93 GB for the same
-kind of run where the older log's MLX-allocator field read only 1.16 GiB. Something differs
-between those two measurement conditions (see M4-T1's honest caveats below); do not lean on either
-number until this is understood. §6 and any future README update must report three explicitly
-named, never-merged quantities: `peak_mlx (GiB)`, `peak_rss (GiB)`, `weights_on_disk`.
+**Memory — four numbers, and the apparent 1.16-GiB-vs-11.93-GB "contradiction" is not one; it is
+four different metrics, one of which was simply never recorded before now.**
+
+```text
+peak_rss_maxrss   1 248 624 640 B = 1.16 GiB. This is resource.getrusage(RUSAGE_SELF).ru_maxrss,
+                  which src/tts_test.py:66 records under the AMBIGUOUS key "peak_memory_bytes" —
+                  identical to /usr/bin/time -l's "maximum resident set size" line. UNDERCOUNTS:
+                  does not account for MLX's unified-memory allocations. Never cite this as "the"
+                  memory figure.
+peak_footprint    12 205 576 640 B = 11.37 GiB (README.md:206's "11.37 GB", GiB mislabeled GB) =
+                  /usr/bin/time -l's "peak memory footprint" line, the real whole-process number.
+peak_mlx          mx.get_peak_memory() — the MLX allocator's own peak (activations + KV-cache).
+                  logs/tts_basic.log NEVER recorded this at all — src/tts_test.py never calls it
+                  (only the Qwen runner does). PR #95's profiler added the call and read up to
+                  11.93 GB. There was never a conflicting pair of MLX-allocator readings; the
+                  older log simply has no entry for this metric.
+weights_on_disk   8.7 GB = 8.1 GiB (model.safetensors).
+```
+
+**So there is no unresolved 1.16-vs-11.93 discrepancy to chase** — the confusion arose entirely
+from `peak_memory_bytes` being an ambiguous field name for `ru_maxrss`, which is exactly the class
+of naming mistake this plan otherwise commits to avoiding (§6). The arithmetic is consistent:
+≈8.1 GiB weights + the MLX allocator's own peak + runtime overhead ≈ 11.37 GiB peak footprint.
+**Weights dominate, and quantization cuts them specifically**: 8-bit ≈8.1 → ≈4.3 GiB, 4-bit ≈8.1 →
+≈2.3 GiB. Quantization does **not** shrink the MLX-allocator slice, which grows with utterance
+length and batch size instead. **The success metric for memory is therefore not "did total GB go
+down" but "how many batch slots now fit"** — quantization frees headroom specifically *for* the
+batch (§0.5/M4-T2); the two levers multiply rather than compete. 4-bit quantization frees roughly
+≈5.8 GiB of the weight footprint — that is what makes M4-T2's batch size of 2-4 achievable in the
+first place.
+§6 and any future README update must report exactly three quantities under these names —
+`peak_mlx (GiB)`, `peak_footprint (GiB)`, `weights_on_disk (GiB)` — and must never cite
+`peak_rss_maxrss`. **Add a task to rename the ambiguous `peak_memory_bytes` key in
+`src/tts_test.py` (and its README references) to `peak_rss_maxrss`**, so this exact confusion
+cannot recur.
 
 **0.7 Segmentation does not exist for this model.** `higgs_audio_v3` has no chunking path. A
 neighbor implementation does: `qwen3_tts.py:1271`'s `split_pattern` and `_decode_chunk:1037`
@@ -249,7 +274,9 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   Memory (kept as separate, named claims per `AGENTS.md`): `mx.get_peak_memory()` up to **11.93
   GB**; whole-process peak footprint via `/usr/bin/time -l` **12.30 GB**; that same tool's
   "maximum resident set size" line reads only **1.32 GB** — confirmed to undercount on macOS and
-  must **not** be quoted as a memory figure.
+  must **not** be quoted as a memory figure. (§0.6 resolves what initially looked like a
+  contradiction between this 11.93 GB figure and an older log's 1.16 GiB figure — it is not one;
+  they are different metrics, and the older log simply never recorded the MLX-allocator number.)
   **Honest caveats, recorded verbatim, not smoothed over:** the machine was not fully idle during
   this run — `uptime` reported load average 5.94, with Docker Desktop and an IDE language server
   active in the background. The measured long-case RTF of **4.26 does not match** the previously
@@ -338,23 +365,27 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   quantization variants (A/B) are produced, and the third-party-weight rejection check has been
   run (even though this is the project's own first-party checkpoint, applying the check here
   establishes the procedure before it's needed for any future substitute model).
-  *Files:* extends `python -m mlx_audio.convert` usage; new verification script under
-  `docs/research/audiobook/`.
+  *Files:* extends `mlx_audio/convert.py`'s `convert()` usage (not `tts/utils.py:211`); new
+  verification script under `docs/research/audiobook/`.
   *Devices:* M1.
   *Tier:* **sonnet-deterministic-code**, **opus** review on the predicate-variant framing (this is
   an interpretive claim about a failure mechanism, not a mechanical check).
 
-- [ ] **M4-T4 (GATE). Sentiment integrity gate, conditional on T3.** Objective pre-filter first
-  (KL divergence + top-k logit overlap across AR steps via `m3_divergence.py:149`'s `compare()`)
-  to screen out grossly broken variants before spending listening time. **Low KL does not prove
-  emotion survived, and high KL does not prove it was lost** — this tool is a pre-filter, never
-  the gate itself (P10). The actual gate is >= 8 blind pairs of real-chapter material (§2), owner
-  verdict, opus only aggregates. Additional objective proxy, replacing an earlier plan to use a
-  third-party SER classifier (rejected — do not add a dependency on an unvalidated external
-  emotion-recognition model to judge this project's own model): **ASR round-trip + prosodic
-  metrics** (F0 range, pause duration, speaking rate) measured on pairs of
-  `<|emotion:sadness|>` / `<|emotion:elation|>` output. Emotion smoothing, if present, must show up
-  as a narrowed F0 range under this proxy.
+- [ ] **M4-T4 (GATE). Sentiment integrity gate, conditional on T3.** Objective pre-filter first:
+  `m3_divergence.py:149`'s `compare()` (KL divergence + top-k logit overlap across AR steps)
+  cheaply screens out grossly broken configurations before any listening — **including the case
+  where the codec never made it into the converted checkpoint at all** (§0.6b); a lost codec is
+  exactly the kind of gross break this pre-filter is cheap insurance against. **Low KL does not
+  prove emotion survived, and high KL does not prove it was lost** — this tool is a pre-filter,
+  never the gate itself (P10). The actual, only gate is >= 8 blind pairs of real-chapter material
+  (§2), owner verdict, opus only aggregates. Additional objective proxy, reported *alongside* the
+  listening verdict, never as a substitute for it — replacing an earlier plan to use a third-party
+  SER classifier (rejected: wav2vec2-style SER models are trained on English acted-emotion
+  corpora; their calibration on Russian synthetic speech is unknown and would add an unvalidated
+  external dependency to judge this project's own model): **ASR round-trip + prosodic metrics**
+  (F0 range, pause duration, speaking rate) measured on pairs of `<|emotion:sadness|>` /
+  `<|emotion:elation|>` output, computed without any third-party model. Emotion smoothing, if
+  present, must show up as a narrowed F0 range under this proxy.
   **Escalation option if no configuration clears tier <= 3 (§2's suitability tiers): a hybrid, not
   abandoning Higgs.** Route emotionally loaded scenes through Higgs (full tag fidelity) and
   neutral narration through Qwen3-TTS (RTF 1.57 on this same machine, `README.md:225`). This
@@ -400,6 +431,13 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 
 - [ ] **M4-T9. Resume support + a practical hours-per-book number + `make audiobook`.**
 
+- [ ] **M4-T10. Rename the ambiguous `peak_memory_bytes` key.** `src/tts_test.py:66` stores
+  `resource.getrusage(RUSAGE_SELF).ru_maxrss` under the misleading name `peak_memory_bytes` — this
+  is what caused §0.6's apparent 1.16-GiB-vs-11.93-GB "contradiction" to look like a real
+  discrepancy when it was actually two different metrics with confusingly similar names. Rename
+  the key to `peak_rss_maxrss` in the JSON output and in every README reference to it.
+  *Tier:* **sonnet**, size **S**.
+
 ## 4. Track S
 
 - [ ] **S0 (30 min, no code).** Run Qwen3-ASR-1.7B-8bit through the existing `--model` flag
@@ -433,10 +471,12 @@ RTF              measured with mx.eval() at every stage boundary (mandatory unde
                  evaluation, exactly as M4-T1 did it) — never a wall-clock number taken across
                  unforced lazy ops.
 memory           reported as THREE separate, explicitly named quantities, never merged:
-                 peak_mlx (GiB) = mx.get_peak_memory(); peak_rss (GiB) = process-level via
-                 /usr/bin/time -l's footprint accounting (NOT its "maximum resident set size"
-                 line, confirmed to undercount on macOS); weights_on_disk = checkpoint size on
-                 disk. README updates and results docs must use these three names.
+                 peak_mlx (GiB) = mx.get_peak_memory(); peak_footprint (GiB) = /usr/bin/time -l's
+                 "peak memory footprint" line (the real whole-process number); weights_on_disk
+                 (GiB) = checkpoint size on disk. NEVER cite peak_rss_maxrss (ru_maxrss / "maximum
+                 resident set size") as a memory figure — confirmed to undercount on macOS by
+                 excluding MLX's unified-memory allocations. README updates and results docs must
+                 use these three names (§0.6, M4-T10).
 SIGKILL          partial-WAV-readable AND resume-point-recoverable is the pass condition (T8);
                  neither alone is sufficient.
 tool reuse       m3_divergence.py's compare() (per-tensor max abs/rel err, NaN/Inf, exact-zero,
@@ -461,7 +501,19 @@ honesty          a partial or failing stage is written up as partial or failing.
 - **NOT** training or fine-tuning anything.
 - **NOT** building on third-party quantized weights without first passing the §0.6(b)/M4-T3
   tokenizer-tag rejection check.
-- **NOT** starting quantization at 4-bit — 8-bit first, escalate only with evidence.
+- **NOT** starting quantization at 4-bit, and **NOT** starting with mixed `QUANT_RECIPES` — 8-bit
+  first, and within 8-bit, predicate variant B first (§ M4-T3); mixed recipes only after B, with
+  evidence.
+- **NOT** using `tts/utils.py:211 convert` — the conversion tool this plan uses is
+  `mlx_audio/convert.py:583 convert` specifically; the other function of the same name lacks the
+  `higgs_multimodal_qwen3` detection and the pre-quantization `sanitize` sequencing.
+- **NOT** writing new code to load quantized weights or resolve a local checkpoint path — both
+  already work (`mlx_audio.tts.load()` accepts a local path, `tts/utils.py:132-155`;
+  `get_model_path`, `convert.py:234-262`, tries `Path(...)` first and only calls
+  `snapshot_download` if that path doesn't exist).
+- **NOT** relying on any claim that "the codec is protected structurally by `copy_model_files`" —
+  it is not protected; per §0.6(b) it is actively discarded for this checkpoint's layout, and the
+  M4-T3 blocking check exists specifically because of that.
 - **NOT** an architecture-level STT comparison — S2's comparison is explicitly scoped to an
   8-bit-vs-FP16 caveat, not a clean model-vs-model claim.
 - **NOT** streaming generation.
