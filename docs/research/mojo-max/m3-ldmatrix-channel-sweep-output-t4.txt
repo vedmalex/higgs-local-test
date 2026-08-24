@@ -1,0 +1,46 @@
+Sweeping channel counts [32, 64, 128, 256, 512, 1024] to find the ldmatrix/T4 abort threshold.
+Each case runs as its own subprocess -- a fatal abort in one must not hide the rest.
+
+=== case channels=32 ===
+--- stdout ---
+channels=32 device=Device(type=gpu,id=0) accelerator_count=1
+channels=32 RESULT: max|err|=2.37133e-06 max_rel_err=0.000645421 nan/inf=0 -- PASSED
+--- verdict: PASSED ---
+
+=== case channels=64 ===
+--- stdout ---
+channels=64 device=Device(type=gpu,id=0) accelerator_count=1
+channels=64 RESULT: max|err|=4.11076e-06 max_rel_err=0.000512429 nan/inf=0 -- PASSED
+--- verdict: PASSED ---
+
+=== case channels=128 ===
+--- stdout ---
+channels=128 device=Device(type=gpu,id=0) accelerator_count=1
+channels=128 RESULT: max|err|=7.00944e-06 max_rel_err=0.00270411 nan/inf=0 -- PASSED
+--- verdict: PASSED ---
+
+=== case channels=256 ===
+--- stdout ---
+channels=256 device=Device(type=gpu,id=0) accelerator_count=1
+channels=256 RESULT: max|err|=1.71176e-05 max_rel_err=0.0219489 nan/inf=0 -- PASSED
+--- verdict: PASSED ---
+
+=== case channels=512 ===
+--- stdout ---
+channels=512 device=Device(type=gpu,id=0) accelerator_count=1
+channels=512 RESULT: max|err|=1.48477e-05 max_rel_err=0.0162985 nan/inf=0 -- PASSED
+--- verdict: PASSED ---
+
+=== case channels=1024 ===
+--- stdout ---
+channels=1024 device=Device(type=gpu,id=0) accelerator_count=1
+channels=1024 RESULT: max|err|=3.11796e-05 max_rel_err=0.0220075 nan/inf=0 -- PASSED
+--- verdict: PASSED ---
+
+=== Summary ===
+channels=32: PASSED
+channels=64: PASSED
+channels=128: PASSED
+channels=256: PASSED
+channels=512: PASSED
+channels=1024: PASSED

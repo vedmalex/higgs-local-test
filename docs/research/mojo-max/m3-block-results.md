@@ -1046,3 +1046,119 @@ read as confirming this M1 result generalizes.
   not required for this task's numeric conclusions, since any residual rounding-mode disagreement
   there would be many orders of magnitude smaller than the ~1e-3-to-1e-2-scale effects measured
   above.
+
+---
+
+## M3-10 follow-up — `ldmatrix`/T4 channel-count hypothesis, tested and REFUTED
+
+Date: 2026-08-25. Run: `docs/research/mojo-max/m3_ldmatrix_channel_sweep.py`, Colab Tesla T4,
+same runtime family as the rest of M3-10's T4 work. Raw stdout preserved verbatim in
+[`m3-ldmatrix-channel-sweep-output-t4.txt`](m3-ldmatrix-channel-sweep-output-t4.txt).
+
+### Background — the finding this follow-up checks
+
+The main M3-10 run of the full `_BosonDecoderBlock` graph (`m3_decoder_block_prototype.py`)
+aborted fatally on Colab Tesla T4 on all 6 tested seeds:
+
+```text
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.ldmatrix.sync.aligned.m8n8.x4.b16
+```
+
+(SIGABRT, process exit code -6). The leading hypothesis recorded at the time (see the
+`m3_ldmatrix_channel_sweep.py` module docstring and the issue #57 comment it cites, plus
+https://forum.modular.com/t/having-issues-with-max-matmul-on-default-google-colab-gpu-t4/1658):
+MAX's `ops.conv2d` kernel-selection heuristic switches to a tensor-core/GEMM-based kernel above
+some channel-count threshold, and that kernel path has a Turing (sm_75) codegen gap — `ldmatrix`
+is an Ampere+-era warp-level matrix-load instruction with no legal Turing lowering, which is
+exactly the class of instruction the forum thread's MAX-matmul report also hits on T4.
+
+### What was run
+
+`m3_ldmatrix_channel_sweep.py` reuses `m2_conv1d_prototype.py`'s `ops.conv2d`-based Conv1d graph
+construction **completely unchanged**, varying only `c_in=c_out=channels` across
+`[32, 64, 128, 256, 512, 1024]`. Fixed across every case: `batch=1`, `seq_len=64`, `kernel=7`,
+`dilation=3` (`padding=(kernel-1)*dilation//2=9`), FP32 throughout. Each channel count ran in its
+own subprocess (per this project's established fatal-abort isolation pattern), so one case
+aborting could not hide the rest.
+
+### Result — every case PASSED, no abort at any channel count up to 1024
+
+```text
+channels=32:   max|err|=2.37133e-06  max_rel_err=0.000645421  nan/inf=0  -- PASSED
+channels=64:   max|err|=4.11076e-06  max_rel_err=0.000512429  nan/inf=0  -- PASSED
+channels=128:  max|err|=7.00944e-06  max_rel_err=0.00270411   nan/inf=0  -- PASSED
+channels=256:  max|err|=1.71176e-05  max_rel_err=0.0219489    nan/inf=0  -- PASSED
+channels=512:  max|err|=1.48477e-05  max_rel_err=0.0162985    nan/inf=0  -- PASSED
+channels=1024: max|err|=3.11796e-05  max_rel_err=0.0220075    nan/inf=0  -- PASSED
+```
+
+All 6 channel counts, including 1024 (32x the M2 prototype's original 32-channel case and well
+above the real block's largest conv1d width of 256), executed cleanly on this T4 with no
+`ldmatrix` abort and no NaN/Inf. Error grows gradually and smoothly with channel count (a normal
+floating-point accumulation effect, not a correctness cliff).
+
+### Verdict: the channel-count hypothesis is REFUTED
+
+**`ops.conv2d` through the exact M2-prototype code path does not trigger `ldmatrix` on T4 at any
+tested channel count, including 1024.** The real block's residual-unit convolutions only ever run
+at 256 channels (`output_dim` for the stride-5 block) — a case this sweep passed cleanly at
+`max|err|=1.71e-05`. Channel count alone is therefore **not** the trigger for the full block's
+`ldmatrix` abort. The kernel-selection threshold this hypothesis proposed either does not exist
+for this op/shape family on this MAX version, or exists somewhere the real block never reaches
+through this code path.
+
+### What this sweep did NOT reproduce, and the differences that matter
+
+The sweep intentionally reused the M2 prototype's fixed shape parameters unchanged, which differ
+from the real block's actual configuration in several ways any of which remains a live suspect
+for the abort:
+
+- **`kernel`/`dilation`/`seq_len` differ from the real block.** The sweep fixed `kernel=7,
+  dilation=3, seq_len=64, batch=1` for every case. The real stride-5 `_BosonDecoderBlock`
+  (`m3_decoder_block_prototype.py`'s `make_config(5)`) uses `seq_len=20` (not 64) and its three
+  residual units run at **dilation=1, 3, and 9** (`RU_DILATIONS = (1, 3, 9)`) — only the
+  dilation=3 case was swept; dilation=1 and, especially, dilation=9 (the largest padding/receptive
+  field of the three) were never exercised by this sweep at any channel count.
+- **`ops.conv2d_transpose` (the block's `conv_t1`) is a different op entirely, untested by this
+  sweep.** The sweep only exercises `ops.conv2d` (plain Conv1d-via-conv2d). The real block's
+  `conv_t1` uses `ops.conv2d_transpose(kernel=10, stride=5, padding=3, output_padding=1,
+  in=512, out=256)` — already known from `m2-convtranspose1d-results.md` to fail on T4's GPU path
+  for an entirely different reason (`CUDNN_STATUS_ALLOC_FAILED` on all 5 tested `(stride,
+  output_padding)` pairs there, not `ldmatrix`), which is exactly why the plan places it on CPU
+  via `ops.transfer_to`. Whether that CPU placement, or the CPU<->GPU transfer boundary around it,
+  interacts with `ldmatrix` codegen for the surrounding GPU ops is untested by any prototype so
+  far.
+- **Multi-op graph composition/fusion was not exercised.** The sweep's graph is a single isolated
+  `ops.conv2d` call per subprocess. The real block chains Snake1d -> ConvTranspose1d (CPU) ->
+  three ResidualUnits (each Snake1d -> Conv1d -> Snake1d -> Conv1d) -> Snake1d, all inside one MAX
+  graph. MAX's compiler may choose different kernels, including tensor-core paths, once ops are
+  fused or scheduled together in a larger graph than it would for any single op in isolation —
+  this composition effect is not something an isolated single-op sweep can rule out either way.
+- **Snake1d's elementwise chain (`sin`, `pow`, `div`, `add`) is absent from this sweep.** The
+  sweep contains no Snake1d call at all; the real block interleaves Snake1d between every
+  convolution.
+
+### Remaining candidates for the `ldmatrix` trigger, in the order the next bisection should check them
+
+1. **`ops.conv2d_transpose` on the real block's exact shape** (`in=512, out=256, kernel=10,
+   stride=5, padding=3, output_padding=1, seq_len=20`), run in isolation on T4, both CPU-placed
+   (as the plan mixes it) and, if feasible, GPU-placed for comparison. This op was never run at
+   the real block's exact shape on T4 before now — `m2-convtranspose1d-results.md`'s T4 sweep
+   used 16 channels and different seq_len/kernel values, and its failure mode there was
+   `CUDNN_STATUS_ALLOC_FAILED`, not `ldmatrix` — so it is untested whether the real shape produces
+   the `ldmatrix` signature specifically.
+2. **`ops.conv2d` at dilation=9 (the untested dilation) and at `seq_len=20`** (not this sweep's
+   `seq_len=64`), still at 256 channels — the closest single-op reproduction of the real block's
+   third residual unit's exact shape.
+3. **The multi-op composed graph itself** — build a reduced graph chaining at least two real ops
+   (e.g. Snake1d -> Conv1d, or ConvTranspose1d -> ResidualUnit) at the real block's exact shapes,
+   to test whether kernel selection changes under fusion/scheduling versus running each op alone.
+4. **The full CPU<->GPU device-transfer boundary** at the real block's exact shapes, since M3-1's
+   mixed-device proof used synthetic shapes on M1/Metal, not the real block's shapes on T4/CUDA.
+
+### Next step
+
+An op-level bisection on T4 following the ordering above — starting with candidate 1
+(`ops.conv2d_transpose` at the real shape), since it is both the most novel untested op and the
+one already flagged as GPU-broken for an unrelated reason. M3-10 remains open until the full
+block's `ldmatrix` abort has an identified root cause, not merely a refuted hypothesis.
