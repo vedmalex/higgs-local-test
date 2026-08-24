@@ -7,6 +7,16 @@
 # ESTABLISHED TCP connection -- plain HTTP downloads recover via normal read-timeout retries,
 # Xet does not. Wraps each snapshot_download in a bounded retry loop with backoff so a single
 # transient timeout does not abort the whole run.
+#
+# Model list must stay in sync with notebooks/model_prefetch_to_drive.ipynb's MODELS list
+# (the Colab fallback that prefetches the same models onto Google Drive when the local
+# network can't sustain a multi-gigabyte download even with the retry loop below) -- add
+# or remove a model in both places together. One intentional divergence: this script uses
+# WhisperProcessor.from_pretrained() for openai/whisper-large-v3 (a few MB of tokenizer/
+# config files -- the STT encoder's real weights live inside bosonai/higgs-audio-v3-stt's
+# own checkpoint), while the notebook achieves the same narrow fetch via
+# snapshot_download(..., allow_patterns=["*.json", "*.txt"]) since it needs the result as
+# a directory to tar, not just importable via transformers.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -53,6 +63,9 @@ retry_python "Qwen3-TTS CustomVoice 1.7B" .venv-tts/bin/python \
 
 retry_python "Qwen3-ASR 0.6B" .venv-tts/bin/python \
   'from huggingface_hub import snapshot_download; snapshot_download("mlx-community/Qwen3-ASR-0.6B-8bit")'
+
+retry_python "Qwen3-ASR 1.7B" .venv-tts/bin/python \
+  'from huggingface_hub import snapshot_download; snapshot_download("mlx-community/Qwen3-ASR-1.7B-8bit")'
 
 echo "=== All models preloaded successfully ==="
 echo "Cache location: ~/.cache/huggingface/hub -- subsequent make tts / make stt / Qwen runs will not re-download."
