@@ -1,20 +1,68 @@
 # M0 — Mojo/MAX hardware probe on this project's M1 (issue #57)
 
-Date: 2026-08-24. Branch: `research/57-m0-hardware-probe`.
+Date: 2026-08-24. Branch: `research/57-m0-hardware-probe`, follow-up on
+`research/57-m0-gpu-unblocked` after the host OS was upgraded.
 
-## Verdict
+## Verdict (updated after macOS upgrade to 26.6.2)
 
 | Item | Status |
 | --- | --- |
 | Install stable Mojo 1.0.0 / MAX 26.5 on this M1 | **PASSED** |
-| Minimal accelerator program executed **on the GPU** | **BLOCKED** — macOS 14.6.1 < required macOS 15 |
-| Run an existing supported MAX model/pipeline on GPU | **BLOCKED** — same cause |
-| Numerical suite (matmul/softmax/RMSNorm/SiLU/NaN-Inf/FP16-vs-FP32) | **PASSED on CPU**, **BLOCKED on GPU** |
+| Minimal accelerator program executed **on the GPU** | **PASSED** (was BLOCKED on macOS 14.6.1) |
+| Run an existing supported MAX model/pipeline on GPU | **PASSED** — MAX's own shipped kernels (matmul incl. BF16) execute on the Apple GPU |
+| Numerical suite (matmul/softmax/RMSNorm/SiLU/NaN-Inf/FP16-vs-FP32) | **PASSED on CPU and GPU** |
 
-**M0 is not complete on this machine, and M1–M6 must not start from it.** The
-single blocker is the host OS version, not the hardware, the toolchain or the
-code. The GPU is a supported M1; the probe program compiles cleanly and its
-numerics are validated. Only on-device execution is unavailable.
+**M0 is now complete on this machine's Apple-GPU side.** The original blocker
+(macOS 14.6.1 < required Sequoia 15) was resolved by upgrading the host to
+macOS 26.6.2. A second, unrelated blocker then appeared and was also resolved
+— see "Second blocker" below — before the probe could actually execute on
+the GPU. M1 (the vLLM-Omni <-> MAX responsibility map) can now start using
+this M1's GPU results as real evidence. The T4/Colab side of M0 is still
+outstanding (untouched by either Apple-specific blocker).
+
+## Second blocker found and resolved: Xcode/Metal toolchain incompatibility
+
+Upgrading the OS past Sequoia 15 did not immediately unblock the GPU: the
+still-installed Xcode 16.2 was incompatible with macOS 26.6.2 in a way that
+broke the entire Metal toolchain (`xcodebuild`/`xcrun`/`metal` all crashed
+with a `CoreDevice` symbol-lookup error, `_XPCTypeBool` not found). Mojo's
+`mojo run` failed at metallib compilation with `Metal Compiler failed to
+compile metallib`.
+
+Diagnosis and fix, in order:
+
+1. `xcode-select -s /Library/Developer/CommandLineTools` (switching to the
+   already-present standalone Command Line Tools 26.6 package) did **not**
+   help — the standalone CLT package does not ship the `metal` compiler
+   binary at all, only headers/specs. `metal` only exists inside a full
+   Xcode.app install.
+2. Xcode.app itself had to be updated from 16.2 to 26.6 (manual step: App
+   Store, requires interactive sign-in — not automatable from the agent).
+   After updating, `xcodebuild -version` worked, but launching `Xcode.app`
+   itself crashed instantly with `SIGABRT` in `main.cold.1`, before loading
+   any of its own frameworks — consistent with an unaccepted license /
+   un-run first-launch setup blocking a background launch.
+3. Fix: `sudo xcodebuild -license accept` then `sudo xcodebuild
+   -runFirstLaunch` (both require an interactive terminal for the sudo
+   password — not automatable from the agent's sandboxed shell either).
+4. Even after that, `metal` failed with `cannot execute tool 'metal' due to
+   missing Metal Toolchain; use: xcodebuild -downloadComponent
+   MetalToolchain` — modern Xcode (17+ line, shipped as "26.6" here) splits
+   the Metal compiler out into a separately downloaded component. Running
+   `xcodebuild -downloadComponent MetalToolchain` fixed it: `xcrun -sdk
+   macosx metal --version` then reported `Apple metal version 32023.883`.
+
+None of steps 2–4 could be performed by the agent alone: steps requiring
+`sudo` need an interactive TTY for the password, and the Xcode.app update
+itself needs an authenticated App Store / Apple Developer download. The user
+performed these manually; the agent only diagnosed each failure and directed
+the next command.
+
+**Toolchain now in place:** macOS 26.6.2 (25G83), Xcode 26.6 (24959, build
+17F113), Metal compiler 32023.883 (target `air64-apple-darwin25.6.0`),
+Mojo 1.0.0 (ed45d567), MAX 26.5.0 — identical Mojo/MAX versions to the first
+(CPU-only) run, so the two runs are directly comparable; only the OS/Xcode/
+Metal layer changed.
 
 ## Hardware and toolchain actually measured
 
@@ -72,9 +120,9 @@ is not evidence of support. A nightly channel
 was deleted afterwards to reclaim disk. Each environment costs ~1.9 GB, which
 matters on a host that started at 99% full.
 
-## GPU: detected, enumerated, and unable to execute
+## GPU: detected, enumerated, and now executing correctly
 
-Device detection and enumeration work fully:
+Device detection and enumeration, unchanged from the first run:
 
 ```text
 has_accelerator            = True
@@ -85,51 +133,39 @@ device name = Apple M1
 device api  = metal
 ```
 
-The MAX Python driver agrees: `driver.accelerator_count() == 1`,
-`driver.Accelerator()` → `Device(type=gpu,id=0)`, `driver.accelerator_api()` →
-`metal`.
-
-Every attempt to *run* anything on that device fails at the same point — Metal
-function creation:
+With the toolchain fixed (see above), every GPU step that previously failed at
+Metal-function creation now runs and produces correct numbers, matching the
+CPU reference:
 
 ```text
-[BLOCKED] GPU vector-add failed: At max/mojo/max/gpu/host/_device_context_extras.mojo:168:17:
-  Failed to create Metal function: m0_smoke_test_gpu_vadd_TileTe6A6AoA6A6A_cbbeb29f3ee4a585
-[BLOCKED] GPU matmul fp32 failed: ... Failed to create Metal function: m0_smoke_test_gpu_matmul_...
-[BLOCKED] GPU matmul fp16 failed: ... Failed to create Metal function: m0_smoke_test_gpu_matmul_...
-[SKIPPED/BLOCKED] GPU matmul bf16 unavailable: ... Failed to create Metal function: ...
+gpu vadd c[0] = 3.0 (expected 3.0)
+  [PASSED] GPU kernel actually executed on device
+gpu matmul fp32: nan/inf 0 max|err| vs CPU fp32 0.0
+  [PASSED] GPU matmul FP32 matches CPU reference
+gpu matmul fp16 (acc fp32): nan/inf 0 max|err| vs CPU fp32 0.0038223267
+  [PASSED] GPU matmul FP16 with FP32 accumulation finite
+gpu matmul bf16 (acc fp32): nan/inf 0
+  [PASSED] GPU matmul BF16 supported
 ```
 
-This is **not** specific to hand-written kernels. MAX's own shipped kernels fail
-the same way when a graph is placed on the accelerator:
+Notable: **BF16 matmul runs and is finite on the Apple M1 GPU.** This matters
+for the #48/#52 dtype-policy question specifically because T4 (`sm_75`,
+Turing) has **no BF16 hardware support at all** — so a MAX/Mojo precision
+policy for Higgs/Qwen cannot assume BF16 portability between Apple Silicon and
+T4 even if both run through MAX; the policy still needs to select FP16 (with
+FP32 accumulation where numerically required, per the CPU findings below) on
+T4 specifically.
 
-```text
-matmul  -> kernel "matmul_mogg":            Failed to create Metal function: gemm_kernel_apple_8
-softmax -> kernel "reduce_softmax_mogg":    Failed to create Metal function: softmax_tem
-silu*b  -> kernel "Elementwise_silu_mul_mogg": Failed to create Metal function: Eleme...
-```
+The FP16 GPU matmul error (`0.0038223267`) matches the CPU FP16-with-FP32-
+accumulation result from the first run exactly, confirming the GPU path uses
+the same numerics as the validated CPU path — the earlier CPU-only findings
+about FP32-accumulation-insufficiency and FP16 RMSNorm silent-zero failure
+(below) can now be treated as GPU-relevant, not just theoretical.
 
-Note the kernel name `gemm_kernel_apple_8` — MAX does ship an Apple-specific
-GEMM path; it simply cannot be loaded by this OS's Metal runtime.
-
-### The install is sound — controls prove the failure is Metal-specific
-
-- Graph *construction and compilation* for a GPU `DeviceRef` succeeds; only
-  execution fails. So this is a runtime library-load failure, not a compiler or
-  codegen failure.
-- The Metal toolchain itself is healthy: `xcrun metal --version` works and
-  `metallib` is present. AIR compilation is not the problem.
-- The same MAX graph on the **CPU** device executes correctly:
-  `CPU MAX graph matmul fp32: OK max|err| vs fp32 = 0 nan/inf=0`.
-- The Mojo CPU numerical suite runs to completion with 16/16 checks passing.
-
-Conclusion: the toolchain, the install, the GPU hardware and the probe code are
-all fine. macOS 14.6.1's Metal runtime cannot load the Metal library that Mojo
-1.0 / MAX 26.5 produce for Apple GPUs. This matches the documented macOS 15+
-requirement exactly, and reproduces on both stable 26.5 and nightly 26.6.
-
-**To unblock: upgrade this host to macOS 15 (Sequoia) or later.** Nothing else is
-missing. No workaround was attempted, and none should be.
+Conclusion: the toolchain, the install, the GPU hardware and the probe code
+are all fine, and now so is the Xcode/Metal layer. Both original-plan
+blockers (macOS version, then the Xcode/Metal-toolchain incompatibility
+surfaced by the OS jump) are resolved on this M1.
 
 ## Numerical results (CPU reference, real numbers)
 
@@ -236,15 +272,19 @@ produces the full numerical report.
 
 ## What M0 still needs
 
-1. **This M1: upgrade to macOS 15+**, then re-run the probe unchanged. Until
-   then Apple-GPU numbers for #57 cannot be produced here, and MLX-Audio remains
-   the only working local path (consistent with `AGENTS.md`).
-2. **T4 / Colab (`sm_75`)**: run the same file. That side of M0 is untouched by
-   this blocker and is where the #48-relevant GPU numbers will come from. Watch
-   for the driver-580+ requirement and the `MODULAR_NVPTX_COMPILER_PATH` escape
+1. **Apple M1 side: done.** GPU probe passes end-to-end on macOS 26.6.2 /
+   Xcode 26.6 / Metal toolchain 32023.883 / Mojo 1.0.0 / MAX 26.5.0.
+2. **T4 / Colab (`sm_75`)**: still outstanding — run the same file there. That
+   side of M0 was never touched by either Apple-specific blocker and is where
+   the #48-relevant, no-BF16-hardware GPU numbers will come from. Watch for
+   the driver-580+ requirement and the `MODULAR_NVPTX_COMPILER_PATH` escape
    hatch noted in the issue.
-3. Only when at least one target executes on-device should M1 begin. Do not
-   treat this CPU-only run as M1 evidence.
-4. Disk on this host is the next practical constraint: 13 GiB free after one
-   environment. MAX model serving needs "significantly more memory" per the
-   requirements page, and a GenAI checkpoint would not fit alongside.
+3. M1 (the vLLM-Omni <-> MAX responsibility map, per the issue's revised
+   framing) may now start using the Apple-GPU results as real on-device
+   evidence, in parallel with getting the T4 run. Do not treat the T4 side as
+   started until it actually executes on that device.
+4. Disk: after this run, `.mojo-probe-stable` still costs ~1.9 GiB and remains
+   gitignored/regenerable. Free space is no longer the acute constraint it was
+   before the cache cleanup (issue-unrelated), but MAX model serving will need
+   "significantly more memory" per the requirements page once real
+   checkpoints are involved.
