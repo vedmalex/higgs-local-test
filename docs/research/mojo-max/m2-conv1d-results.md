@@ -1,4 +1,4 @@
-# M2 prototype #2 — weight-normed dilated Conv1d via `ops.conv2d`: PASSED on M1 GPU
+# M2 prototype #2 — weight-normed dilated Conv1d via `ops.conv2d`: PASSED on M1 and T4 GPU
 
 Date: 2026-08-24. Run: `docs/research/mojo-max/m2_conv1d_prototype.py`, same M1/Metal GPU and
 pixi env as the Snake1d prototype. Second M2 prototype per
@@ -64,8 +64,34 @@ task — the opposite finding would have forced writing a hand-rolled Mojo conv1
   are cheap to add but were not run here.
 - **Correctness only, not performance.** This says nothing about whether `conv2d` with `H=1` is
   efficient on GPU — a real perf comparison against a native conv1d path is M4's job, not M2's.
-- Ran on Apple M1 (Metal), not T4 (CUDA) — needs the same T4 re-run discipline as the Snake1d
-  prototype before treating this as portable evidence.
+- **Done below (T4 result)**: ran on Apple M1 (Metal) first; now also re-run unchanged on Colab
+  T4 (CUDA), with matching results — the T4 re-run discipline flagged here is complete for this
+  prototype.
+
+## T4 result (2026-08-24, via Colab T4 run)
+
+Full raw output: [`m2-conv1d-output-t4.txt`](m2-conv1d-output-t4.txt).
+
+```text
+padding=9, input T=64, reference output shape=(1, 32, 64)
+device: Device(type=gpu,id=0), accelerator_count=1
+MAX output shape=(1, 32, 64)
+max|err|=2.37133e-06 max_rel_err=0.000645421 nan/inf=0
+```
+
+**This matches the M1 result to within normal FP rounding, essentially exactly:**
+
+| | M1 | T4 |
+| --- | --- | --- |
+| shape | (1, 32, 64) | (1, 32, 64) |
+| max abs err | 2.37e-06 | 2.37133e-06 |
+| max rel err | 6.45e-04 | 6.45421e-04 |
+| nan/inf | 0 | 0 |
+
+The absolute and relative errors agree to 3+ significant figures (2.37e-06 vs 2.37133e-06 abs;
+6.45e-04 vs 6.45421e-04 rel), and shapes and nan/inf counts are identical. **Route A
+(`ops.conv2d` with a degenerate height axis for Higgs's weight-normed dilated Conv1d) is now
+confirmed numerically correct on both Apple M1 GPU (Metal) and Tesla T4 (CUDA)**, not just on M1.
 
 ## Next
 
@@ -73,4 +99,3 @@ task — the opposite finding would have forced writing a hand-rolled Mojo conv1
   remaining unknown — it's the op the entire 960× upsample depends on, and it's exactly the one
   flagged upstream as GPU-unimplemented. That should be the next prototype, not further Conv1d
   variations.
-- Re-run both Snake1d and Conv1d prototypes unchanged on Colab T4.

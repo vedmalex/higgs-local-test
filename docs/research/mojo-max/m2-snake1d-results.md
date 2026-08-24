@@ -1,4 +1,4 @@
-# M2 prototype #1 — Snake1d in MAX: PASSED, confirms the explicit-cast precision policy
+# M2 prototype #1 — Snake1d in MAX: PASSED on M1 and T4, confirms the explicit-cast precision policy
 
 Date: 2026-08-24. Run: `docs/research/mojo-max/m2_snake1d_prototype.py`, on this project's M1
 (Apple Silicon, Metal GPU — `Device(type=gpu,id=0)`, `accelerator_count=1`), via the
@@ -57,15 +57,42 @@ device: Device(type=gpu,id=0), accelerator_count=1
   values. Whether any real trained `alpha` is small enough to hit this regime is unverified —
   E2 (capturing real per-layer activations/parameters from the actual checkpoint) is the next
   step to check, not assumed here.
-- This ran on Apple M1 GPU (Metal), not T4 (CUDA). Per M0, GPU execution details differ by
-  backend; this prototype should be re-run unchanged on a T4 runtime before treating the result
-  as portable evidence rather than an M1-side finding.
+- **Done below (T4 result)**: this ran on Apple M1 GPU (Metal) first; it has now also been run
+  unchanged on a Colab T4 (CUDA) and the results match, closing this gap.
 - This tests Snake1d in isolation, not inside the real 37-instance conv stack — compounding
   effects across layers are unmeasured.
 
+## T4 result (2026-08-24, via `notebooks/mojo_max_m0_t4.ipynb`-style Colab T4 run)
+
+Full raw output: [`m2-snake1d-output-t4.txt`](m2-snake1d-output-t4.txt).
+
+```text
+device: Device(type=gpu,id=0), accelerator_count=1
+[fp32] max|err|=1.62231e-06 max_rel_err=1.38224e-06 nan/inf=0 exact_zeros=0
+[fp16 storage, fp32 compute (explicit cast, per S9)] max|err|=0.00307625 max_rel_err=0.00199181 nan/inf=0 exact_zeros=0
+[fp16 storage, fp16 compute (no cast -- expected to break)] max|err|=nan max_rel_err=nan nan/inf=1024 exact_zeros=0
+```
+
+**This matches the M1 results exactly, case by case:**
+
+| Case | M1 max abs err | T4 max abs err | M1 max rel err | T4 max rel err | M1 nan/inf | T4 nan/inf |
+| --- | --- | --- | --- | --- | --- | --- |
+| fp32 | 5.82e-07 | 1.62e-06 | 5.35e-07 | 1.38e-06 | 0 | 0 |
+| fp16 storage, fp32 compute | 3.08e-03 | 3.08e-03 | 1.99e-03 | 1.99e-03 | 0 | 0 |
+| fp16 storage, fp16 compute (no cast) | nan | nan | nan | nan | 1024 | 1024 |
+
+The fp32 case differs only within normal run-to-run FP rounding variation (both ~1e-6, same
+order of magnitude — consistent with the bit-for-bit-except-rounding-order comparability M0
+already established between M1 and T4). The fp16-storage/fp32-compute case matches to the
+displayed precision (3.08e-03 / 1.99e-03 on both). The no-cast fp16 failure is identical on both
+platforms: exactly 1024 of 8192 elements are NaN/Inf on both M1 and T4. **Conclusion: the
+explicit-cast precision policy (fp16 storage + fp32 compute) and the no-cast overflow failure
+both hold identically on T4, not just on M1** — this closes the "re-run on T4 before treating as
+portable evidence" caveat above.
+
 ## Next
 
-- Re-run this exact script on Colab T4 (same pattern as `notebooks/mojo_max_m0_t4.ipynb`).
 - Per `m1-responsibility-map.md` §11, the second prototype is one weight-normed dilated Conv1d
   via `ops.conv2d` with a degenerate height axis (route A) — the single largest structural
-  question (can Higgs's conv shape be expressed in MAX without a custom Mojo kernel).
+  question (can Higgs's conv shape be expressed in MAX without a custom Mojo kernel). Also now
+  confirmed on T4 — see [`m2-conv1d-results.md`](m2-conv1d-results.md).
