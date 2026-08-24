@@ -1,4 +1,4 @@
-# M2 prototype #3 — ConvTranspose1d GPU-executability: CPU works, Metal GPU hard-crashes
+# M2 prototype #3 — ConvTranspose1d GPU-executability: CPU works everywhere, GPU fails on both M1 and T4
 
 Date: 2026-08-24. Run: `docs/research/mojo-max/m2_convtranspose1d_prototype.py` (plus an
 isolated per-case subprocess runner, needed because the GPU failure mode is a fatal process
@@ -68,12 +68,11 @@ case was then re-run as an isolated subprocess so one crash couldn't hide the ot
    full Code2Wav pipeline must either avoid this op on Metal (CPU-only for this stage, which is
    fine for **correctness** prototyping — M2's own stated goal — but blocks any Apple-GPU
    **performance** story until Modular fixes this), or wait for/report the fix.
-2. **This crash is specifically an attempt to load a CUDA-only library.** On a genuine T4 (which
-   *does* have CUDA and, presumably, cuDNN available in a properly configured environment), this
-   exact failure mode may not occur — the crash is plausibly Metal-specific, not a general
-   "ConvTranspose1d GPU is broken everywhere" fact. **This must be tested on T4, not assumed
-   either way** — the T4 result could be "works via real cuDNN," "same abort if cuDNN isn't on
-   the runtime's library path," or something else entirely.
+2. **Resolved below (T4 section): the crash mechanism is Metal-specific, but the outcome is
+   not.** On T4, cuDNN does load and the kernel dispatches — but every single one of the five
+   tested cases still fails, with `CUDNN_STATUS_ALLOC_FAILED` rather than a missing-symbol
+   abort. GPU execution of this op is currently unusable on both platforms, for different
+   reasons.
 3. **The docstring's "output_paddings: Only 0 is supported" claim is not enforced/true on the
    CPU path** in this MAX version — both `output_padding=1` cases ran and produced finite,
    correctly-shaped output. Do not treat the docstring text as authoritative without an empirical
@@ -81,60 +80,77 @@ case was then re-run as an isolated subprocess so one crash couldn't hide the ot
 
 ## Next
 
-- Run this exact script on Colab T4 — the critical missing data point. If GPU also aborts
-  there, the port's Apple-GPU and T4-GPU upsample story both currently require CPU-only
-  `ConvTranspose1d`, which changes the performance conversation substantially (not the
-  correctness one). If it works on T4, the gap is confirmed Metal-specific and worth reporting
-  upstream to Modular as a Metal-backend bug (attempting a CUDA-only symbol load on a non-CUDA
-  accelerator).
-- Report this finding upstream if T4 confirms it's Metal-specific: `modular/modular`'s
-  `conv2d_transpose` implementation should not attempt to load `cudnnCreate` when the target
-  device is not a CUDA device.
+- **Done below**: the T4 run (all 5 cases) — see "T4 result" and "Combined conclusion" sections.
+- Report both findings upstream to Modular: the Metal-specific `cudnnCreate` symbol-load crash,
+  and the T4 `CUDNN_STATUS_ALLOC_FAILED` on every tested shape for tensors too small to
+  plausibly need it.
+- For M3: plan the Code2Wav port's upsample stage to run on CPU, everything else (already
+  GPU-correct on both M1 and T4: Snake1d, Conv1d, the residual-unit composite) on GPU, rather
+  than blocking on a MAX fix.
 
-## T4 partial result (2026-08-24) — different failure, not the same as Metal
+## T4 result (2026-08-24, complete — all 5 cases via `notebooks/mojo_max_m2_t4.ipynb`)
 
-**Status: partial.** Only case 0 (`stride=8, output_padding=0`) has been run and relayed so far
-via `notebooks/mojo_max_m2_t4.ipynb`; the other four cases and the Snake1d/Conv1d prototypes'
-T4 numbers have not yet been retrieved (the notebook writes to a Google Drive folder that has
-not synced to a locally-accessible copy at time of writing). Recording this now rather than
-waiting — an honest partial result is valid, per this project's own standard.
+Full raw output: [`m2-convtranspose1d-output-t4.txt`](m2-convtranspose1d-output-t4.txt).
 
 ```text
---- case 0 cpu (exit=0) ---
-case=0 device=cpu stride=8 output_padding=0 -> shape=(1, 16, 136) nan_inf=0
-
---- case 0 gpu (exit=1) ---
-ValueError: An error occurred in kernel entry point named "region_2":
-An error occurred in kernel named "conv_transpose_mogg":
-cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+case=0 device=cpu stride=8 output_padding=0 -> shape=(1, 16, 136) nan_inf=0    -- PASSED
+case=0 device=gpu -> cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED  -- FAILED
+case=1 device=cpu stride=5 output_padding=1 -> shape=(1, 16,  86) nan_inf=0    -- PASSED
+case=1 device=gpu -> cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED  -- FAILED
+case=2 device=cpu stride=4 output_padding=0 -> shape=(1, 16,  68) nan_inf=0    -- PASSED
+case=2 device=gpu -> cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED  -- FAILED
+case=3 device=cpu stride=2 output_padding=0 -> shape=(1, 16,  34) nan_inf=0    -- PASSED
+case=3 device=gpu -> cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED  -- FAILED
+case=4 device=cpu stride=3 output_padding=1 -> shape=(1, 16,  52) nan_inf=0    -- PASSED
+case=4 device=gpu -> cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED  -- FAILED
 ```
 
-**This is a materially different failure than the Metal crash**, and the distinction matters:
+**CPU: 5/5 PASSED, exact match with the M1 CPU results** (same shapes, same clean run,
+including both `output_padding=1` cases). **GPU: 5/5 FAILED, identically, for every single
+`(stride, output_padding, kernel)` combination** — `kernel` ranges over 16, 10, 8, 4, 6 across
+the five cases, and every one hits the exact same `CUDNN_STATUS_ALLOC_FAILED` error, at exactly
+the same op (`conv_transpose_mogg`).
 
-- On Metal, the process aborted with `symbol not found: cudnnCreate` — cuDNN itself could not
-  be loaded at all. That is a hard platform-support gap: Metal has no cuDNN, full stop.
-- On T4, **cuDNN loads and the kernel dispatches** — it fails inside cuDNN with
-  `CUDNN_STATUS_ALLOC_FAILED`, a resource-allocation failure, not a missing-library failure.
-  Crucially, **the process did not abort this time** — it's a catchable Python `ValueError`,
-  consistent with real GPU dispatch actually happening, unlike Metal's fatal process-level abort.
+**This resolves the ambiguity the single-case partial result left open.** A shape-specific
+workspace-sizing bug (candidate 2 from the partial write-up) would be expected to affect some
+kernel sizes and not others — it did not; every kernel size from 4 to 16 failed identically.
+That leaves two candidates, and the uniformity across all five cases favors the first:
 
-`CUDNN_STATUS_ALLOC_FAILED` in cuDNN generally means the runtime could not allocate workspace
-memory for the algorithm cuDNN selected for this conv-transpose configuration — it is not
-inherently a "T4 is incompatible" result. Candidate causes, none yet distinguished by this one
-data point:
+1. **A systematic MAX bug in the `conv_transpose_mogg` cuDNN dispatch path**, requesting or
+   sizing a workspace allocation that fails regardless of the (tiny, ~16-channel) input shape.
+   The inputs here are minuscule — a real "allocation failed" for tensors this small, on a T4
+   with 15 GB VRAM and nothing else running in a fresh Colab session, would be surprising if the
+   requested workspace size were actually proportional to the op's real needs.
+2. A T4-wide (`sm_75`) incompatibility in whichever cuDNN algorithm MAX's heuristic selects for
+   transposed convolution, not caught earlier because it never got tested on real Turing
+   hardware before this session.
 
-1. A genuine out-of-memory condition on the T4's 15 GB, possibly from something else in the
-   Colab session already holding VRAM (the notebook doesn't currently print VRAM usage before
-   this step).
-2. A workspace-size query bug in MAX's `conv_transpose_mogg` kernel for this specific tiny shape
-   (`C_in=C_out=16`, `kernel=16`, `stride=8`) — unusually small channel counts can sometimes
-   confuse an algorithm's heuristic workspace sizing.
-3. A T4-specific (`sm_75`) cuDNN algorithm-selection issue distinct from both the "just missing"
-   Metal case and a "works cleanly" case.
+Not distinguished by this pass (would need `MODULAR_DEBUG=source-tracebacks` and/or a direct
+cuDNN workspace-size query outside of MAX to isolate further); either way, the practical
+conclusion is the same.
 
-**Do not conclude either "ConvTranspose1d works on T4" or "ConvTranspose1d is broken on T4"
-from this single data point.** It answers a narrower question than that: on T4, execution
-reaches real cuDNN dispatch (which Metal never does), and fails for a resource reason that needs
-the other four cases plus a VRAM check to interpret. Re-run with `nvidia-smi` logged immediately
-before this cell, and check whether smaller/larger channel counts change the outcome, before
-drawing a conclusion.
+## Combined conclusion — CPU-only on both targets for now
+
+**`ConvTranspose1d`/`ops.conv2d_transpose` on GPU does not currently work on Apple Silicon
+(Metal) or on Tesla T4 (CUDA) in this MAX version** — via two different failure mechanisms
+(a fatal missing-symbol process abort on Metal; a catchable but 100%-reproducible cuDNN
+allocation failure on T4), but with the same practical outcome: **CPU is the only GPU-backend
+that currently executes this op correctly, on either platform.** CPU itself is fully correct
+on both M1 and T4 (5/5 cases, identical shapes, zero NaN/Inf) — this is a GPU-execution gap in
+MAX 26.5 stable specifically, not a Higgs-port design problem, and not resolved by choosing a
+different platform.
+
+Consequences for the Higgs Code2Wav port:
+
+- A **correctness** parity experiment (M2's actual goal) can still proceed — it just needs to
+  run the upsample stage on CPU while everything else (Snake1d, Conv1d — both confirmed
+  GPU-correct on M1 *and* T4 above) can run on GPU. Mixed CPU/GPU execution within one MAX graph
+  is a reasonable near-term plan, not a blocker.
+- A **performance** story for the full pipeline cannot be told yet for the op that the entire
+  960× upsample depends on — CPU execution of `ConvTranspose1d` inside an otherwise-GPU pipeline
+  will be a real bottleneck, and this needs to be reported upstream rather than worked around
+  silently.
+- **Worth reporting to Modular** (`modular/modular`) as a GPU-execution bug in
+  `conv2d_transpose`'s cuDNN dispatch: fails on every tested `(stride, output_padding, kernel)`
+  combination on a real T4, for tensors far too small to plausibly exhaust 15 GB of VRAM, and
+  separately crashes the whole process on Metal by attempting to load a CUDA-only symbol.

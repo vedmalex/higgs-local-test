@@ -1,0 +1,4 @@
+padding=9, input T=64, reference output shape=(1, 32, 64)
+device: Device(type=gpu,id=0), accelerator_count=1
+MAX output shape=(1, 32, 64)
+max|err|=2.37133e-06 max_rel_err=0.000645421 nan/inf=0

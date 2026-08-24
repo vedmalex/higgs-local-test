@@ -1,0 +1,124 @@
+--- case 0 cpu (exit=0) ---
+case=0 device=cpu stride=8 output_padding=0 -> shape=(1, 16, 136) nan_inf=0
+
+--- case 0 gpu (exit=1) ---
+Traceback (most recent call last):
+  File "/content/run_one_case_t4.py", line 21, in <module>
+    out = m2.run_on(device_obj, c_in, c_out, kernel, stride, output_padding, x_np, filter_rscf)
+  File "/content/higgs-local-test/docs/research/mojo-max/m2_convtranspose1d_prototype.py", line 65, in run_on
+    result = model.execute(x_buf, filter_buf)[0]
+             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/profiler/tracing.py", line 113, in wrapper
+    return func(*args, **kwargs)
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/engine/api.py", line 145, in _Model_execute
+    return self._execute_device_tensors(input_impls)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+ValueError: An error occurred in kernel entry point named "region_2":
+An error occurred in kernel named "conv_transpose_mogg":
+cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+
+Fusion info:
+  mo.conv_transpose : (!mo.tensor<[1, 1, 16, 16], f32, gpu:0, {layout = #mo.layout<NHWC>}>, !mo.tensor<[1, 16, 16, 16], f32, gpu:0, {layout = #mo.layout<RSCF>}>, !mo.tensor<[2], si64>, !mo.tensor<[2], si64>, !mo.tensor<[4], si64>, !mo.tensor<[2], si64>) -> !mo.tensor<[1, 1, 136, 16], f32, gpu:0>
+
+
+To see the Python source location of this op, run again with the `max-debug.source-tracebacks` config key enabled (for example, `Graph.debug.source_tracebacks = True` or `MODULAR_DEBUG=source-tracebacks`).
+
+--- case 1 cpu (exit=0) ---
+case=1 device=cpu stride=5 output_padding=1 -> shape=(1, 16, 86) nan_inf=0
+
+--- case 1 gpu (exit=1) ---
+Traceback (most recent call last):
+  File "/content/run_one_case_t4.py", line 21, in <module>
+    out = m2.run_on(device_obj, c_in, c_out, kernel, stride, output_padding, x_np, filter_rscf)
+  File "/content/higgs-local-test/docs/research/mojo-max/m2_convtranspose1d_prototype.py", line 65, in run_on
+    result = model.execute(x_buf, filter_buf)[0]
+             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/profiler/tracing.py", line 113, in wrapper
+    return func(*args, **kwargs)
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/engine/api.py", line 145, in _Model_execute
+    return self._execute_device_tensors(input_impls)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+ValueError: An error occurred in kernel entry point named "region_2":
+An error occurred in kernel named "conv_transpose_mogg":
+cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+
+Fusion info:
+  mo.conv_transpose : (!mo.tensor<[1, 1, 16, 16], f32, gpu:0, {layout = #mo.layout<NHWC>}>, !mo.tensor<[1, 10, 16, 16], f32, gpu:0, {layout = #mo.layout<RSCF>}>, !mo.tensor<[2], si64>, !mo.tensor<[2], si64>, !mo.tensor<[4], si64>, !mo.tensor<[2], si64>) -> !mo.tensor<[1, 1, 86, 16], f32, gpu:0>
+
+
+To see the Python source location of this op, run again with the `max-debug.source-tracebacks` config key enabled (for example, `Graph.debug.source_tracebacks = True` or `MODULAR_DEBUG=source-tracebacks`).
+
+--- case 2 cpu (exit=0) ---
+case=2 device=cpu stride=4 output_padding=0 -> shape=(1, 16, 68) nan_inf=0
+
+--- case 2 gpu (exit=1) ---
+Traceback (most recent call last):
+  File "/content/run_one_case_t4.py", line 21, in <module>
+    out = m2.run_on(device_obj, c_in, c_out, kernel, stride, output_padding, x_np, filter_rscf)
+  File "/content/higgs-local-test/docs/research/mojo-max/m2_convtranspose1d_prototype.py", line 65, in run_on
+    result = model.execute(x_buf, filter_buf)[0]
+             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/profiler/tracing.py", line 113, in wrapper
+    return func(*args, **kwargs)
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/engine/api.py", line 145, in _Model_execute
+    return self._execute_device_tensors(input_impls)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+ValueError: An error occurred in kernel entry point named "region_2":
+An error occurred in kernel named "conv_transpose_mogg":
+cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+
+Fusion info:
+  mo.conv_transpose : (!mo.tensor<[1, 1, 16, 16], f32, gpu:0, {layout = #mo.layout<NHWC>}>, !mo.tensor<[1, 8, 16, 16], f32, gpu:0, {layout = #mo.layout<RSCF>}>, !mo.tensor<[2], si64>, !mo.tensor<[2], si64>, !mo.tensor<[4], si64>, !mo.tensor<[2], si64>) -> !mo.tensor<[1, 1, 68, 16], f32, gpu:0>
+
+
+To see the Python source location of this op, run again with the `max-debug.source-tracebacks` config key enabled (for example, `Graph.debug.source_tracebacks = True` or `MODULAR_DEBUG=source-tracebacks`).
+
+--- case 3 cpu (exit=0) ---
+case=3 device=cpu stride=2 output_padding=0 -> shape=(1, 16, 34) nan_inf=0
+
+--- case 3 gpu (exit=1) ---
+Traceback (most recent call last):
+  File "/content/run_one_case_t4.py", line 21, in <module>
+    out = m2.run_on(device_obj, c_in, c_out, kernel, stride, output_padding, x_np, filter_rscf)
+  File "/content/higgs-local-test/docs/research/mojo-max/m2_convtranspose1d_prototype.py", line 65, in run_on
+    result = model.execute(x_buf, filter_buf)[0]
+             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/profiler/tracing.py", line 113, in wrapper
+    return func(*args, **kwargs)
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/engine/api.py", line 145, in _Model_execute
+    return self._execute_device_tensors(input_impls)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+ValueError: An error occurred in kernel entry point named "region_2":
+An error occurred in kernel named "conv_transpose_mogg":
+cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+
+Fusion info:
+  mo.conv_transpose : (!mo.tensor<[1, 1, 16, 16], f32, gpu:0, {layout = #mo.layout<NHWC>}>, !mo.tensor<[1, 4, 16, 16], f32, gpu:0, {layout = #mo.layout<RSCF>}>, !mo.tensor<[2], si64>, !mo.tensor<[2], si64>, !mo.tensor<[4], si64>, !mo.tensor<[2], si64>) -> !mo.tensor<[1, 1, 34, 16], f32, gpu:0>
+
+
+To see the Python source location of this op, run again with the `max-debug.source-tracebacks` config key enabled (for example, `Graph.debug.source_tracebacks = True` or `MODULAR_DEBUG=source-tracebacks`).
+
+--- case 4 cpu (exit=0) ---
+case=4 device=cpu stride=3 output_padding=1 -> shape=(1, 16, 52) nan_inf=0
+
+--- case 4 gpu (exit=1) ---
+Traceback (most recent call last):
+  File "/content/run_one_case_t4.py", line 21, in <module>
+    out = m2.run_on(device_obj, c_in, c_out, kernel, stride, output_padding, x_np, filter_rscf)
+  File "/content/higgs-local-test/docs/research/mojo-max/m2_convtranspose1d_prototype.py", line 65, in run_on
+    result = model.execute(x_buf, filter_buf)[0]
+             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/profiler/tracing.py", line 113, in wrapper
+    return func(*args, **kwargs)
+  File "/content/mojo-probe-t4/.pixi/envs/default/lib/python3.14/site-packages/max/engine/api.py", line 145, in _Model_execute
+    return self._execute_device_tensors(input_impls)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+ValueError: An error occurred in kernel entry point named "region_2":
+An error occurred in kernel named "conv_transpose_mogg":
+cuDNN call failed with status CUDNN_STATUS_ALLOC_FAILED
+
+Fusion info:
+  mo.conv_transpose : (!mo.tensor<[1, 1, 16, 16], f32, gpu:0, {layout = #mo.layout<NHWC>}>, !mo.tensor<[1, 6, 16, 16], f32, gpu:0, {layout = #mo.layout<RSCF>}>, !mo.tensor<[2], si64>, !mo.tensor<[2], si64>, !mo.tensor<[4], si64>, !mo.tensor<[2], si64>) -> !mo.tensor<[1, 1, 52, 16], f32, gpu:0>
+
+
+To see the Python source location of this op, run again with the `max-debug.source-tracebacks` config key enabled (for example, `Graph.debug.source_tracebacks = True` or `MODULAR_DEBUG=source-tracebacks`).
