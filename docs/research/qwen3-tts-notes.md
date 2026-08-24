@@ -143,7 +143,20 @@ Sources:
 - [vLLM-Omni Qwen3-TTS support PR #895](https://github.com/vllm-project/vllm-omni/pull/895)
 - [vLLM-Omni default Qwen3-TTS deploy profile](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/deploy/qwen3_tts.yaml)
 
-## T4 / Turing compatibility — MEASURED on a real Colab T4 (2026-08-23)
+## T4 / Turing compatibility — MEASURED on a real Colab T4 (2026-08-23, reproduced 2026-08-24)
+
+**Re-run confirms this is deterministic, not a one-off.** A second full
+Colab T4 run (2026-08-24), after the log-naming and
+`attention_backend_observed` fixes below were applied, hit the exact same
+`RuntimeError: index_copy_(): ... Half ... BFloat16` at the exact same
+`gpu_model_runner.py:1723 flush_decode_batch` call site, on both
+`0.6b-base` and `0.6b-customvoice`, with separate per-variant logs
+(`qwen_vllm_server_0.6b-base.log`, `qwen_vllm_server_0.6b-customvoice.log`)
+confirming it independently for each. `attention_backend_observed` now
+correctly reports `["TRITON_ATTN"]` on both runs (previously the
+FLASHINFER-substring false positive) -- so both runner fixes are validated
+against a real second run, and the underlying Qwen3-TTS/T4 failure is
+confirmed reproducible rather than transient.
 
 **Result: FAILED for every job on both `0.6b-base` and `0.6b-customvoice`.**
 `src/tts_qwen_cuda.py` was actually run on a Colab Tesla T4 (compute 7.5,
