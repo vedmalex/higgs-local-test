@@ -1,0 +1,4 @@
+device: Device(type=gpu,id=0), accelerator_count=1
+[fp32] max|err|=1.62231e-06 max_rel_err=1.38224e-06 nan/inf=0 exact_zeros=0
+[fp16 storage, fp32 compute (explicit cast, per S9)] max|err|=0.00307625 max_rel_err=0.00199181 nan/inf=0 exact_zeros=0
+[fp16 storage, fp16 compute (no cast -- expected to break)] max|err|=nan max_rel_err=nan nan/inf=1024 exact_zeros=0

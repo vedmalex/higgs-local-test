@@ -406,13 +406,17 @@ available) is still the open, undetermined data point, not resolved by this M1-s
 also fails, the whole ConvTranspose1d path is CPU-only for now, on both targets; if T4 works,
 this is a Metal-backend bug worth reporting to Modular.
 
-**Partial T4 result, 2026-08-24 (one case of five):** T4 does **not** reproduce the Metal
-crash — cuDNN loads and the kernel dispatches — but case 0 (`stride=8, output_padding=0`) fails
-inside cuDNN with `CUDNN_STATUS_ALLOC_FAILED`, a catchable `ValueError`, not a process abort.
-This is a different failure class than Metal's missing-symbol crash, and not yet enough
-evidence to conclude either "T4 works" or "T4 is broken" — see the T4 section of
-[`m2-convtranspose1d-results.md`](m2-convtranspose1d-results.md) for the full reasoning and
-what's still needed (the other four cases, a VRAM check).
+**Complete T4 result, 2026-08-24 (all five cases):** T4 does **not** reproduce the Metal crash
+mechanism — cuDNN loads and the kernel dispatches — but **all five** tested
+`(stride, output_padding, kernel)` combinations fail identically inside cuDNN with
+`CUDNN_STATUS_ALLOC_FAILED` (a catchable `ValueError`, not a process abort). The uniformity
+across every kernel size (4 through 16) argues against a shape-specific bug and toward either a
+systematic MAX dispatch bug or a general T4 (`sm_75`) algorithm-selection issue — full reasoning
+in [`m2-convtranspose1d-results.md`](m2-convtranspose1d-results.md). **Combined conclusion: GPU
+execution of `ConvTranspose1d` currently works on neither Apple Silicon nor T4** — CPU is the
+only backend that executes it correctly on either platform. This does not block a correctness
+parity experiment (run the upsample stage on CPU, everything else on GPU) but does block any
+full-pipeline performance story until Modular fixes this.
 
 ---
 
