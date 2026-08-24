@@ -100,7 +100,9 @@ Separate research track, exploring whether [Mojo/MAX](https://www.modular.com/) 
 - Notebook (Colab T4 only, deliberately minimal — no TTS/STT/Qwen stack install): [`notebooks/mojo_max_m0_t4.ipynb`](notebooks/mojo_max_m0_t4.ipynb)
 - Open directly in Colab: <a href="https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/mojo_max_m0_t4.ipynb" target="_blank" rel="noopener noreferrer"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
 
-Status: M0's Apple M1 GPU probe **PASSED** (matmul FP32/FP16/BF16, all matching the CPU reference). The T4 side is queued next via the notebook above.
+Status: M0 **PASSED** on both Apple M1 and Colab T4 GPUs. M1 (vLLM-Omni → MAX responsibility map) is done. M2 (correctness prototypes) on M1: Snake1d and Conv1d **PASSED**; ConvTranspose1d **PASSED on CPU, hard-crashed on Metal GPU** (`cudnnCreate` symbol not found — attempting an NVIDIA-only library load on Apple Silicon).
+
+- M2 T4 runner (same three prototypes, unchanged): [`notebooks/mojo_max_m2_t4.ipynb`](notebooks/mojo_max_m2_t4.ipynb) — <a href="https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/mojo_max_m2_t4.ipynb" target="_blank" rel="noopener noreferrer"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
 
 ## Voice Cloning & Audiobook Production Guides
 
