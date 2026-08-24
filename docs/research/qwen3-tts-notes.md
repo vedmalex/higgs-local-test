@@ -323,6 +323,75 @@ Source: [vLLM issue #47549 — FlashInfer no longer available on SM75](https://g
   not as a guarantee — recheck the model card at implementation time in case of
   updates.
 
+## Stress control — no official mechanism; three in-text workarounds tried, none confirmed to work (2026-08-24)
+
+Motivation: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` (the local Apple
+Silicon path above) mispronounces stress on several `samples/tts_ru.txt`
+words, especially the Sanskrit/Vaishnava proper nouns. Before touching the
+shared fixture, this was researched, not guessed:
+
+- **Neither Higgs nor Qwen3-TTS documents a stress-control mechanism.**
+  Higgs's `PROMPTING.md` covers only emotion/prosody/style tags (see
+  `docs/research/higgs-current-apis.md`) and says nothing about diacritics or
+  pronunciation control. Qwen3-TTS has no tag-based DSL for anything word- or
+  phoneme-level either — its only structured markup is the `<|im_start|>` /
+  `<|im_end|>` ChatML wrapper around the free-text `instruct` argument (style
+  direction for the whole utterance, not per-word pronunciation); confirmed
+  by reading `mlx_audio/tts/models/qwen3_tts/qwen3_tts.py` directly in this
+  repository's own `.venv-tts`.
+- **This is a known, open, unresolved community request for Qwen3-TTS**:
+  [`QwenLM/Qwen3-TTS` Discussion #185](https://github.com/QwenLM/Qwen3-TTS/discussions/185)
+  ("Russian language TTS issues") reports the same mispronunciation and shows
+  users experimenting with the Unicode combining acute accent (U+0301);
+  [Discussion #53](https://github.com/QwenLM/Qwen3-TTS/discussions/53)
+  ("Adding Pronunciation/Stress Control") shows a community vote (76% for
+  SSML tags, 23% for a pronunciation dictionary) with no maintainer response
+  found. A related project, [`k2-fsa/OmniVoice` issue #65](https://github.com/k2-fsa/OmniVoice/issues/65),
+  states plainly that U+0301 is "ignored by model" for its own TTS stack —
+  a warning sign, not a guarantee either way for Qwen3-TTS specifically.
+
+Three in-text workarounds were tried against
+`mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` (local M1, `basic` mode),
+verified only by transcribing the generated WAV back through
+`mlx-community/Qwen3-ASR-0.6B-8bit` and comparing the round-trip text — this
+detects garbling but **cannot confirm correct stress placement**, since
+Russian ASR output does not mark stress. None of the three modified
+`samples/tts_ru.txt`, tested, then reverted it — the fixture stays unmarked
+in the repository until a workaround is actually confirmed to help by ear:
+
+1. **Combining acute accent (U+0301)** immediately after the stressed vowel
+   (e.g. `Вриндава́н`): made pronunciation measurably **worse**. The ASR
+   round-trip introduced spurious syllables exactly at the marked positions —
+   `Вриндава́н` → "Вриндава**Юн**", `Радхара́ни` → "Радхра**Юни**",
+   `Шрима́д` → "Шрема**Юд**" — where the unmarked baseline produced clean
+   `Вриндаван`, `Радхарани`, `Шри Мадбахагаватом`. The model does not ignore
+   the mark; it appears to vocalize something in response to it.
+2. **A literal `+` before the stressed vowel** (a convention used by some
+   Russian auto-accentuation tools, e.g. `Вриндав+ан`): **worse still** — the
+   symbol is read out loud as the word "plus"/"плюс" or similar noise
+   (`Сег+одня` → "Секплюгня", `+Это` → "Plus, Эйхолог", `Кр+ишна` →
+   "Карплюфишно"). Consistent with unrecognized symbols being "read
+   literally" rather than ignored.
+3. **Doubling the stressed vowel letter** (a length/emphasis hint using only
+   existing Cyrillic letters, no special symbols — e.g. `Вриндаваан`,
+   `Радхараани`): did **not** introduce the garbling of (1) or (2). The ASR
+   round-trip came back close to the clean baseline (`Вриндаван` →
+   "в рендован", `Радхарани` → "Радхарани", `Раадха-Раман` → "Раадха Раман",
+   with `Раадха` notably transcribed with its doubling still audible in some
+   form). This is the least-bad of the three, but **not a confirmed fix**:
+   ASR normalizes spelling regardless of where the stress actually landed, so
+   this only shows the workaround doesn't damage the *segmentation* of the
+   audio, not that it corrects the *stress*. Needs an actual listen before
+   being treated as anything more than "didn't make it worse."
+
+**Conclusion for this pass**: stress control is an unresolved upstream
+limitation for both TTS backends this project uses, not something to work
+around with an invented per-project convention until one is verified by ear.
+`samples/tts_ru.txt` is left unmarked. If pursued further, the vowel-doubling
+result is the only one of the three worth a human-listened follow-up; U+0301
+and `+` are now recorded as actively harmful for this checkpoint and should
+not be retried without new evidence.
+
 ## Выводы для реализации (`src/tts_qwen_cuda.py`)
 
 Follow the same architecture as `src/tts_cuda.py`, not a rewrite:
