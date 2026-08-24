@@ -119,14 +119,13 @@ is likewise a maintainer question, not something this report can answer.
 - **[#3253](https://github.com/vllm-project/vllm-omni/pull/3253) (merged)** —
   `[Bugfix][Qwen3TTS] Use float32 for code predictor on fp16-only GPUs`, tested on
   a `g4dn.xlarge` (T4). Same model, same class of bug (a submodule that a global
-  fp16 override does not reach), different submodule: it targets the *code
-  predictor*, not the talker's embedding dtype. Worth noting that reading
-  `qwen3_tts_code_predictor_vllm.py` and `qwen3_tts_talker.py` at `v0.26.0` and at
-  `main` shows no `torch.amp.autocast` / `float32` guard in either file, so which
-  release actually carries #3253's change is unclear from the source alone — a
-  maintainer can confirm. The test present at `v0.26.0`
-  (`tests/model_executor/models/qwen3_tts/test_code_predictor_dtype.py`) references
-  issue #2385, not #3253.
+  fp16 override does not reach), different submodule: it changes
+  `vllm_omni/model_executor/models/common/qwen3_code_predictor.py` (the only
+  file in its diff), not the talker's embedding dtype. Its merge commit
+  (`b9789091`) is an ancestor of the `v0.26.0` tag, and the autocast-to-float32
+  guard is present in that file at `v0.26.0` — so this crash happens **with
+  #3253's fix already installed**, in a different, earlier code path
+  (`_embedding_dtype` in `qwen3_tts_talker.py`).
 - **[#4838](https://github.com/vllm-project/vllm-omni/issues/4838) (open since
   2026-07-02)** — a *different* Omni TTS model (Voxtral TTS) failing on a T4 with
   the same error class, described as "Stage-1 has hardcoded `torch.bfloat16`,
