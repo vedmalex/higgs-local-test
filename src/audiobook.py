@@ -806,6 +806,132 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------------------
+# Voice reference (cloning): issue #57, "every fragment reads in a different voice".
+#
+# Without a reference, Higgs picks a voice by sampling from its speaker distribution as it
+# autoregresses through each segment's own text -- independently per `model.generate()`/
+# `model.batch_generate()` call, since nothing pins it across calls (fixing the random seed
+# does NOT help here: a fixed-seed, six-phrase measurement still spanned 105.7-244.9 Hz
+# median pitch, WORSE than the 82 Hz spread with no seed at all -- see
+# docs/research/audiobook/voice-clone-consistency-results.md). The only lever that has ever
+# been shown to pin the voice is `references`/`ref_audio_codes` -- an encoded reference
+# waveform fed into *every* segment's generation call, not just the first.
+#
+# `VoiceReference.codes` is computed exactly ONCE per run (`resolve_voice_reference`, called
+# from `main()` before the per-segment loop starts) and threaded down through
+# `generate_segments` -> `_generate_single_segment`/`_generate_batch_group` -> every
+# `model.generate()`/`model.batch_generate()` call as `ref_audio_codes=`/`ref_text=` --
+# never recomputed per segment or per batch.
+# ---------------------------------------------------------------------------
+
+VOICES_DIR = Path("voices")
+
+
+@dataclass
+class VoiceReference:
+    """One reference voice: pre-encoded codes (`model.encode_reference_audio()`'s output,
+    or a `voices/<name>.npy` array loaded straight off disk -- both are accepted directly
+    by `generate(..., ref_audio_codes=...)`) plus the reference transcript.
+
+    `source` and `ref_text` (not the codes array itself, which is large and not worth
+    hashing) are what identify this reference in the manifest header (`manifest_id()`) --
+    see `load_or_create_manifest`'s mismatch check: swapping the reference on an
+    in-progress chapter must invalidate the whole manifest, the same way changing
+    `max_chars`/`tag_scope`/`model` already does, because the reference is a property of
+    the *run*, not of any one segment -- a resumed run that silently kept old segments
+    generated against a different voice would quietly re-introduce exactly the
+    inconsistent-voice bug this feature exists to fix.
+    """
+
+    name: str
+    ref_text: str
+    codes: object  # mx.array (or a plain np.ndarray straight from voices/<name>.npy)
+    source: str  # "voices/<name>.npy" or the literal --ref-audio path, for diagnostics
+
+    def manifest_id(self) -> dict:
+        return {
+            "name": self.name,
+            "source": self.source,
+            "ref_text_hash": _text_hash(self.ref_text),
+        }
+
+
+def load_voice_from_registry(
+    name: str, voices_dir: Path = VOICES_DIR
+) -> tuple[np.ndarray, str, str]:
+    """Load a voice already registered per docs/guides/audiobook_guide.md sec. 2
+    (`register_voice()` -> `voices/<name>.npy` + `voices/<name>.txt`).
+
+    Returns (codes_array, ref_text, source_description). Raises `FileNotFoundError` naming
+    exactly which of the two files is missing, rather than a generic I/O error -- a chapter
+    run should fail fast and legibly if the voice was never registered, or was registered
+    under a different name.
+    """
+    npy_path = voices_dir / f"{name}.npy"
+    txt_path = voices_dir / f"{name}.txt"
+    if not npy_path.exists():
+        raise FileNotFoundError(
+            f"voice {name!r} not found: {npy_path} does not exist -- register it first "
+            "(docs/guides/audiobook_guide.md sec. 2, register_voice(), or "
+            "--ref-audio/--ref-text with --save-voice-as to do it from this CLI)"
+        )
+    if not txt_path.exists():
+        raise FileNotFoundError(
+            f"voice {name!r} is missing its reference transcript: {txt_path} does not exist"
+        )
+    codes = np.load(npy_path)
+    ref_text = txt_path.read_text(encoding="utf-8").strip()
+    return codes, ref_text, f"voices/{name}.npy"
+
+
+def register_voice(
+    model, name: str, ref_audio_path: Path, ref_text: str, voices_dir: Path = VOICES_DIR
+) -> VoiceReference:
+    """Encode `ref_audio_path` once and save it as `voices/<name>.npy` + `.txt`, exactly
+    the format docs/guides/audiobook_guide.md sec. 2's standalone Python snippet writes --
+    this is the same mechanism, callable from the CLI (`--save-voice-as`) instead of a
+    separate one-off script, so there is exactly one registered-voice format, not two.
+    """
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    codes = model.encode_reference_audio(str(ref_audio_path))
+    np.save(voices_dir / f"{name}.npy", np.array(codes))
+    (voices_dir / f"{name}.txt").write_text(ref_text, encoding="utf-8")
+    return VoiceReference(
+        name=name, ref_text=ref_text, codes=codes, source=f"voices/{name}.npy"
+    )
+
+
+def resolve_voice_reference(
+    model,
+    voice_name: Optional[str],
+    ref_audio: Optional[Path],
+    ref_text: Optional[str],
+    save_voice_as: Optional[str] = None,
+    voices_dir: Path = VOICES_DIR,
+) -> Optional["VoiceReference"]:
+    """Resolve `--voice-name`/`--ref-audio`+`--ref-text` into a `VoiceReference`, or `None`
+    if neither was given (unchanged, no-reference behavior). `model` is only used to encode
+    a raw `--ref-audio` waveform -- a `--voice-name` load is pre-encoded already (`.npy` on
+    disk), so it costs nothing beyond a file read, which is also why `--voice-name` is the
+    cheaper, preferred path for any voice reused across more than one run.
+    """
+    if voice_name is not None and ref_audio is not None:
+        raise ValueError("--voice-name and --ref-audio are mutually exclusive")
+    if voice_name is not None:
+        codes, text, source = load_voice_from_registry(voice_name, voices_dir)
+        return VoiceReference(name=voice_name, ref_text=text, codes=codes, source=source)
+    if ref_audio is not None:
+        if not ref_text:
+            raise ValueError("--ref-audio requires --ref-text (or --ref-text-file)")
+        name = save_voice_as or ref_audio.stem
+        if save_voice_as is not None:
+            return register_voice(model, name, ref_audio, ref_text, voices_dir)
+        codes = model.encode_reference_audio(str(ref_audio))
+        return VoiceReference(name=name, ref_text=ref_text, codes=codes, source=str(ref_audio))
+    return None
+
+
 def _segment_hash_input(chunk: "Chunk") -> str:
     """Everything about `chunk` that can change the audio it generates: who speaks it
     (`speaker` -- selects the voice, once per-speaker voices exist) and its final text
@@ -844,7 +970,12 @@ def _new_segment_entry(chunk: "Chunk") -> dict:
     }
 
 
-def build_manifest(chunks: list[Chunk], max_chars: int, tag_scope: str) -> dict:
+def build_manifest(
+    chunks: list[Chunk],
+    max_chars: int,
+    tag_scope: str,
+    voice_reference: Optional["VoiceReference"] = None,
+) -> dict:
     # Auto-detected, not author-set (Refs #57): the author of a screenplay/chapter has no
     # other way to tell a later reader/tool whether stress marks were already placed in the
     # text. Recording the counts here -- rather than requiring a manual flag the author could
@@ -857,6 +988,10 @@ def build_manifest(chunks: list[Chunk], max_chars: int, tag_scope: str) -> dict:
         "model": MODEL_ID,
         "max_chars": max_chars,
         "tag_scope": tag_scope,
+        # Refs #57: the voice reference is a property of the whole run, not of any one
+        # segment -- see VoiceReference's docstring for why this must invalidate resume on
+        # mismatch the same way model/max_chars/tag_scope already do (load_or_create_manifest).
+        "voice_reference": voice_reference.manifest_id() if voice_reference else None,
         "created": time.time(),
         "stress_marks_detected": count_stress_marks(full_text),
         "ambiguous_apostrophes_detected": count_ambiguous_apostrophes(full_text),
@@ -900,6 +1035,7 @@ def load_or_create_manifest(
     chunks: list[Chunk],
     max_chars: int,
     tag_scope: str,
+    voice_reference: Optional["VoiceReference"] = None,
 ) -> dict:
     if manifest_path.exists():
         manifest = _load_manifest_with_recovery(manifest_path)
@@ -916,6 +1052,19 @@ def load_or_create_manifest(
         if manifest.get("tag_scope") != tag_scope:
             mismatches.append(
                 f"tag_scope: manifest={manifest.get('tag_scope')!r} vs current={tag_scope!r}"
+            )
+        # Refs #57: a manifest built with one reference voice (or none) must never be
+        # silently resumed under a different one -- every "done" segment on disk was
+        # generated against the OLD reference, so blind resume would splice a chapter
+        # containing two different voices at whatever point the reference was swapped,
+        # exactly reproducing the bug this feature exists to fix, just quietly instead of
+        # audibly. `.get("voice_reference")` on an older manifest predating this field
+        # reads as `None`, which correctly compares unequal to any real reference below.
+        current_ref_id = voice_reference.manifest_id() if voice_reference else None
+        if manifest.get("voice_reference") != current_ref_id:
+            mismatches.append(
+                f"voice_reference: manifest={manifest.get('voice_reference')!r} vs "
+                f"current={current_ref_id!r}"
             )
         if mismatches:
             raise RuntimeError(
@@ -955,7 +1104,7 @@ def load_or_create_manifest(
         save_manifest(manifest, manifest_path)
         return manifest
 
-    manifest = build_manifest(chunks, max_chars, tag_scope)
+    manifest = build_manifest(chunks, max_chars, tag_scope, voice_reference=voice_reference)
     save_manifest(manifest, manifest_path)
     return manifest
 
@@ -1077,6 +1226,8 @@ def _generate_single_segment(
     retry_base_delay: float,
     manifest: dict,
     manifest_path: Path,
+    ref_audio_codes=None,
+    ref_text: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """Generate one segment via `model.generate()` with retry/backoff (F5) and per-segment
     audio-sanity validation (F6). Mutates `entry` in place and calls `save_manifest` after
@@ -1086,6 +1237,11 @@ def _generate_single_segment(
     batching existed (`--batch-size 1` still goes through this function only, unchanged) --
     factored out so the batched path (`_generate_batch_group` below) can also fall back to
     it, one segment at a time, when a batch cannot be trusted as a whole.
+
+    `ref_audio_codes`/`ref_text` (Refs #57): the pre-encoded voice reference, computed once
+    per run by `resolve_voice_reference` and passed to EVERY segment's call here -- this is
+    the actual fix for "every fragment reads in a different voice" (see VoiceReference's
+    docstring). `None` (the default) is the old, unchanged, no-reference behavior.
     """
     last_error: Optional[str] = None
     for attempt in range(1, max_retries + 1):
@@ -1098,6 +1254,8 @@ def _generate_single_segment(
                     text=entry["text"],
                     temperature=temperature,
                     max_new_tokens=max_new_tokens,
+                    ref_audio_codes=ref_audio_codes,
+                    ref_text=ref_text,
                 )
             )
             generation_seconds = time.perf_counter() - started
@@ -1141,6 +1299,8 @@ def _generate_batch_group(
     retry_base_delay: float,
     manifest: dict,
     manifest_path: Path,
+    ref_audio_codes=None,
+    ref_text: Optional[str] = None,
 ) -> list[tuple[int, dict, bool, Optional[str]]]:
     """Generate every entry in `group` (list of `(seg_i, entry)`, len <= --batch-size)
     through `model.batch_generate()`, with a self-narrowing fallback on failure.
@@ -1182,6 +1342,14 @@ def _generate_batch_group(
     isolates exactly the segment(s) actually at fault instead of writing off the whole batch,
     and doubles as automatic degradation toward a smaller effective batch size if the failure
     is memory pressure (F6/"memory ceiling" risk) rather than a bad segment.
+
+    `ref_audio_codes`/`ref_text` (Refs #57): passed as a single shared value (not a
+    per-row list) to `model.batch_generate()` -- `_normalize_batch_references` in
+    `higgs_audio_v3/model.py` encodes/broadcasts a shared reference exactly once across
+    every row of the batch when it is given this way, so voice cloning does not cost an
+    extra encode per row and does not disable batching (verified in
+    docs/research/audiobook/voice-clone-consistency-results.md's batching-compatibility
+    measurement).
     """
     if len(group) == 1:
         seg_i, entry = group[0]
@@ -1189,6 +1357,7 @@ def _generate_batch_group(
         ok, err = _generate_single_segment(
             model, entry, out_path, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
+            ref_audio_codes=ref_audio_codes, ref_text=ref_text,
         )
         return [(seg_i, entry, ok, err)]
 
@@ -1208,7 +1377,8 @@ def _generate_batch_group(
         try:
             result_by_pos: dict[int, object] = {}
             for r in model.batch_generate(
-                texts=texts, temperature=temperature, max_new_tokens=max_new_tokens
+                texts=texts, temperature=temperature, max_new_tokens=max_new_tokens,
+                ref_audio_codes=ref_audio_codes, ref_text=ref_text,
             ):
                 result_by_pos[r.sequence_idx] = r
             if len(result_by_pos) != len(remaining_now):
@@ -1259,11 +1429,13 @@ def _generate_batch_group(
     left = _generate_batch_group(
         model, remaining[:mid], base_dir, temperature, max_new_tokens, max_retries,
         retry_base_delay, manifest, manifest_path,
+        ref_audio_codes=ref_audio_codes, ref_text=ref_text,
     )
     right = (
         _generate_batch_group(
             model, remaining[mid:], base_dir, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
+            ref_audio_codes=ref_audio_codes, ref_text=ref_text,
         )
         if remaining[mid:]
         else []
@@ -1282,8 +1454,16 @@ def generate_segments(
     continue_on_error: bool = False,
     clear_cache_every: int = 50,
     batch_size: int = 1,
+    ref_audio_codes=None,
+    ref_text: Optional[str] = None,
 ) -> dict:
     """Generate every pending segment, writing progress to disk after each one.
+
+    `ref_audio_codes`/`ref_text` (Refs #57): a pre-encoded voice reference (see
+    `VoiceReference`/`resolve_voice_reference`), computed exactly once by the caller and
+    passed to EVERY segment's `model.generate()`/`model.batch_generate()` call below --
+    both the unbatched and batched paths. `None` (default) reproduces the old,
+    no-reference behavior exactly.
 
     On restart, a segment already marked "done" is re-validated against the WAV actually on
     disk (F6) -- a missing file, an empty/corrupt WAV, or a sample count/rate mismatch
@@ -1332,6 +1512,7 @@ def generate_segments(
             succeeded, last_error = _generate_single_segment(
                 model, entry, out_path, temperature, max_new_tokens, max_retries,
                 retry_base_delay, manifest, manifest_path,
+                ref_audio_codes=ref_audio_codes, ref_text=ref_text,
             )
             if not succeeded:
                 if not continue_on_error:
@@ -1367,6 +1548,7 @@ def generate_segments(
         outcomes = _generate_batch_group(
             model, group, base_dir, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
+            ref_audio_codes=ref_audio_codes, ref_text=ref_text,
         )
         for _seg_i, entry, succeeded, last_error in outcomes:
             if not succeeded:
@@ -1577,8 +1759,10 @@ def main() -> None:
         help=(
             "JSON screenplay file: a list of {'speaker': ..., 'text': ...} lines "
             "(docs/guides/audiobook_guide.md sec. 3). Mutually exclusive with "
-            "--text/--text-file. Per-speaker voice cloning is NOT wired in yet -- every "
-            "line is synthesized with the model's single default voice; see chunk_screenplay."
+            "--text/--text-file. Per-SPEAKER (multi-character) voice selection is still NOT "
+            "wired in -- every line is synthesized with the same single voice reference "
+            "(--voice-name/--ref-audio, or the model default if neither is given); see "
+            "chunk_screenplay."
         ),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -1619,6 +1803,40 @@ def main() -> None:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--voice-name",
+        type=str,
+        default=None,
+        help=(
+            "Use a voice already registered under voices/<name>.npy + voices/<name>.txt "
+            "(docs/guides/audiobook_guide.md sec. 2, register_voice()) as the reference for "
+            "EVERY segment generated this run (Refs #57 -- pins the voice across the whole "
+            "chapter instead of letting it drift segment to segment). Mutually exclusive "
+            "with --ref-audio. Cheapest option: the reference is loaded pre-encoded from "
+            "disk, not re-encoded."
+        ),
+    )
+    parser.add_argument(
+        "--ref-audio",
+        type=Path,
+        default=None,
+        help=(
+            "Reference WAV to encode and use as the voice for every segment this run "
+            "(Refs #57). Requires --ref-text or --ref-text-file. Encoded exactly once for "
+            "the whole run, not per segment. Mutually exclusive with --voice-name. Combine "
+            "with --save-voice-as to also register it under voices/<name>.npy for reuse via "
+            "--voice-name next time -- there is one registered-voice format, not two."
+        ),
+    )
+    parser.add_argument("--ref-text", type=str, default=None)
+    parser.add_argument("--ref-text-file", type=Path, default=None)
+    parser.add_argument(
+        "--save-voice-as",
+        type=str,
+        default=None,
+        help="With --ref-audio, also save the encoded reference under voices/<name>.npy+.txt.",
+    )
+    parser.add_argument("--voices-dir", type=Path, default=VOICES_DIR)
     args = parser.parse_args()
 
     given = [
@@ -1664,16 +1882,46 @@ def main() -> None:
             )
         return
 
+    if args.voice_name is not None and args.ref_audio is not None:
+        parser.error("--voice-name and --ref-audio are mutually exclusive")
+    ref_text = args.ref_text
+    if args.ref_text_file is not None:
+        ref_text = args.ref_text_file.read_text(encoding="utf-8").strip()
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.output_dir / "manifest.json"
-    manifest = load_or_create_manifest(
-        manifest_path, chunks, max_chars=args.max_chars, tag_scope=args.tag_scope
-    )
 
+    # A voice reference is resolved before the manifest is (re)loaded, whether or not this
+    # run will generate anything, so the manifest header comparison below (Refs #57) sees
+    # the real value on assemble-only runs too, not a placeholder that would falsely
+    # "mismatch" against a manifest built with a real reference. --voice-name never needs
+    # the model (its codes are already encoded on disk); --ref-audio does, so the model is
+    # loaded early in that one case even for an otherwise assemble-only invocation.
+    model = None
     if not args.assemble_only:
         from mlx_audio.tts.utils import load
 
         model = load(MODEL_ID, model_type="higgs_audio_v3")
+
+    voice_reference = None
+    if args.voice_name is not None or args.ref_audio is not None:
+        if model is None:
+            from mlx_audio.tts.utils import load
+
+            model = load(MODEL_ID, model_type="higgs_audio_v3")
+        voice_reference = resolve_voice_reference(
+            model, args.voice_name, args.ref_audio, ref_text, args.save_voice_as, args.voices_dir
+        )
+
+    manifest = load_or_create_manifest(
+        manifest_path,
+        chunks,
+        max_chars=args.max_chars,
+        tag_scope=args.tag_scope,
+        voice_reference=voice_reference,
+    )
+
+    if not args.assemble_only:
         gen_result = generate_segments(
             model,
             manifest,
@@ -1685,6 +1933,8 @@ def main() -> None:
             continue_on_error=args.continue_on_error,
             clear_cache_every=args.clear_cache_every,
             batch_size=args.batch_size,
+            ref_audio_codes=voice_reference.codes if voice_reference else None,
+            ref_text=voice_reference.ref_text if voice_reference else None,
         )
         if gen_result["failures"]:
             print(

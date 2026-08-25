@@ -166,7 +166,7 @@ class TestF5RetryAndContinueOnError(unittest.TestCase):
             self.always_fail = always_fail
             self.calls = 0
 
-        def generate(self, text, temperature, max_new_tokens):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
             self.calls += 1
             if self.always_fail or self.calls <= self.fail_times:
                 raise RuntimeError("simulated generation failure")
@@ -222,7 +222,7 @@ class TestF5RetryAndContinueOnError(unittest.TestCase):
             real_generate = model.generate
             calls_per_text = {}
 
-            def flaky_generate(text, temperature, max_new_tokens):
+            def flaky_generate(text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
                 calls_per_text[text] = calls_per_text.get(text, 0) + 1
                 if "падающее" in text:
                     raise RuntimeError("permanent failure for this segment")
@@ -1104,20 +1104,24 @@ class TestBatchGenerationIntegration(unittest.TestCase):
             self.fail_batch_times = fail_batch_times
             self.batch_calls: list[list[str]] = []
             self.generate_calls: list[str] = []
+            self.generate_ref_kwargs: list[tuple] = []
+            self.batch_ref_kwargs: list[tuple] = []
 
         def _audio_for(self, text: str) -> np.ndarray:
             n = max(1, int(len(text) * 0.05 * self.SR))
             return np.zeros(n, dtype=np.float64)
 
-        def generate(self, text, temperature, max_new_tokens):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
             # Deliberately always succeeds here, even for a `fail_substrings` text -- that
             # knob only makes `batch_generate` produce bad audio for the matching row, so
             # tests can verify the single-segment fallback path actually rescues it.
             self.generate_calls.append(text)
+            self.generate_ref_kwargs.append((ref_audio_codes, ref_text))
             return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
 
-        def batch_generate(self, texts, temperature, max_new_tokens):
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
             self.batch_calls.append(list(texts))
+            self.batch_ref_kwargs.append((ref_audio_codes, ref_text))
             if len(self.batch_calls) <= self.fail_batch_times:
                 raise RuntimeError("simulated whole-batch failure")
             for idx in reversed(range(len(texts))):
@@ -1302,6 +1306,281 @@ class TestBatchGenerationIntegration(unittest.TestCase):
             self.assertEqual(result["failures"], [])
             self.assertTrue(all(s["status"] == "done" for s in manifest["segments"]))
             self.assertEqual(len(model.generate_calls), len(texts))
+
+
+class TestVoiceReferenceResolution(unittest.TestCase):
+    """Refs #57: --voice-name / --ref-audio resolve into a VoiceReference that pins the
+    voice for the whole run. No model/GPU involved -- `_FakeEncodeModel` stands in for
+    `HiggsAudioV3.encode_reference_audio()`."""
+
+    class _FakeEncodeModel:
+        def encode_reference_audio(self, path):
+            return np.array([[1, 2, 3]], dtype=np.int32)  # stand-in "codes"
+
+    def test_voice_name_loads_preencoded_codes_without_touching_the_model(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            voices_dir = Path(d)
+            np.save(voices_dir / "narrator.npy", np.array([[9, 9, 9]]))
+            (voices_dir / "narrator.txt").write_text("образец голоса", encoding="utf-8")
+
+            class _ExplodingModel:
+                def encode_reference_audio(self, path):
+                    raise AssertionError("--voice-name must not call encode_reference_audio")
+
+            ref = ab.resolve_voice_reference(
+                _ExplodingModel(), "narrator", None, None, voices_dir=voices_dir
+            )
+            self.assertEqual(ref.name, "narrator")
+            self.assertEqual(ref.ref_text, "образец голоса")
+            self.assertEqual(ref.source, "voices/narrator.npy")
+            np.testing.assert_array_equal(ref.codes, np.array([[9, 9, 9]]))
+
+    def test_voice_name_missing_npy_raises_with_clear_message(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(FileNotFoundError) as ctx:
+                ab.resolve_voice_reference(
+                    self._FakeEncodeModel(), "ghost", None, None, voices_dir=Path(d)
+                )
+            self.assertIn("ghost", str(ctx.exception))
+            self.assertIn("ghost.npy", str(ctx.exception))
+
+    def test_voice_name_missing_txt_raises_with_clear_message(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            voices_dir = Path(d)
+            np.save(voices_dir / "onlynpy.npy", np.array([[1]]))
+            with self.assertRaises(FileNotFoundError) as ctx:
+                ab.resolve_voice_reference(
+                    self._FakeEncodeModel(), "onlynpy", None, None, voices_dir=voices_dir
+                )
+            self.assertIn("onlynpy.txt", str(ctx.exception))
+
+    def test_ref_audio_requires_ref_text(self):
+        with self.assertRaises(ValueError):
+            ab.resolve_voice_reference(
+                self._FakeEncodeModel(), None, Path("ref.wav"), None
+            )
+
+    def test_voice_name_and_ref_audio_are_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            ab.resolve_voice_reference(
+                self._FakeEncodeModel(), "narrator", Path("ref.wav"), "text"
+            )
+
+    def test_neither_given_returns_none(self):
+        ref = ab.resolve_voice_reference(self._FakeEncodeModel(), None, None, None)
+        self.assertIsNone(ref)
+
+    def test_ref_audio_without_save_encodes_but_does_not_write_voices_dir(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            voices_dir = Path(d) / "voices"  # deliberately not created
+            ref = ab.resolve_voice_reference(
+                self._FakeEncodeModel(), None, Path("ref.wav"), "текст референса",
+                voices_dir=voices_dir,
+            )
+            self.assertEqual(ref.ref_text, "текст референса")
+            self.assertEqual(ref.source, "ref.wav")
+            self.assertFalse(voices_dir.exists())
+
+    def test_save_voice_as_registers_it_for_future_voice_name_reuse(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            voices_dir = Path(d)
+            ref = ab.resolve_voice_reference(
+                self._FakeEncodeModel(), None, Path("ref.wav"), "текст референса",
+                save_voice_as="cloned_narrator", voices_dir=voices_dir,
+            )
+            self.assertEqual(ref.source, "voices/cloned_narrator.npy")
+            self.assertTrue((voices_dir / "cloned_narrator.npy").exists())
+            self.assertEqual(
+                (voices_dir / "cloned_narrator.txt").read_text(encoding="utf-8"),
+                "текст референса",
+            )
+            # Round-trips through --voice-name afterwards, same mechanism, one format.
+            reloaded = ab.resolve_voice_reference(
+                self._FakeEncodeModel(), "cloned_narrator", None, None, voices_dir=voices_dir
+            )
+            self.assertEqual(reloaded.ref_text, "текст референса")
+
+
+class TestVoiceReferenceManifestInvalidation(unittest.TestCase):
+    """Refs #57 task item 5: the voice reference is a property of the whole run (recorded
+    in the manifest header), not of a single segment. Resuming a manifest under a
+    DIFFERENT reference (or no reference at all) must refuse, the same way a max_chars/
+    tag_scope mismatch already does -- otherwise a resumed run would silently splice
+    segments generated under two different voices, quietly reproducing the bug this
+    feature exists to fix.
+    """
+
+    def _chunks(self, texts):
+        return [ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t) for i, t in enumerate(texts)]
+
+    def _ref(self, name="narrator", text="образец"):
+        return ab.VoiceReference(name=name, ref_text=text, codes=np.array([[1]]), source=f"voices/{name}.npy")
+
+    def test_same_reference_resumes_without_error(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение.", "Второе предложение."])
+            ref = self._ref()
+            ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=ref)
+            # Resuming with an equivalent (same name/source/ref_text) but distinct
+            # VoiceReference object must not raise -- identity is by manifest_id(), not by
+            # object identity or by the (possibly large) codes array.
+            ref2 = self._ref()
+            reloaded = ab.load_or_create_manifest(
+                manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=ref2
+            )
+            self.assertEqual(reloaded["voice_reference"]["name"], "narrator")
+
+    def test_swapping_the_reference_refuses_to_resume(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение.", "Второе предложение."])
+            ab.load_or_create_manifest(
+                manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=self._ref("narrator")
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                ab.load_or_create_manifest(
+                    manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                    voice_reference=self._ref("different_voice"),
+                )
+            self.assertIn("voice_reference", str(ctx.exception))
+
+    def test_dropping_the_reference_on_resume_also_refuses(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение.", "Второе предложение."])
+            ab.load_or_create_manifest(
+                manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=self._ref()
+            )
+            with self.assertRaises(RuntimeError):
+                ab.load_or_create_manifest(
+                    manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=None
+                )
+
+    def test_adding_a_reference_where_none_existed_also_refuses(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение.", "Второе предложение."])
+            ab.load_or_create_manifest(
+                manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=None
+            )
+            with self.assertRaises(RuntimeError):
+                ab.load_or_create_manifest(
+                    manifest_path, chunks, max_chars=500, tag_scope="sentence", voice_reference=self._ref()
+                )
+
+    def test_no_reference_manifests_are_unaffected_by_default(self):
+        """The common no-cloning path must keep working exactly as before: omitting
+        voice_reference entirely resumes fine against a manifest also built without one."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Одно предложение."])
+            ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence")
+            reloaded = ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence")
+            self.assertIsNone(reloaded["voice_reference"])
+
+
+class TestVoiceReferenceThreadedIntoGeneration(unittest.TestCase):
+    """Refs #57: the resolved reference must reach EVERY segment's model call, in both the
+    unbatched (batch_size=1) and batched (batch_size>1) paths -- not just the first
+    segment, and not recomputed per call (the caller passes the same pre-encoded object
+    every time; this test checks it is literally the same object reaching the model, not
+    just an equal one)."""
+
+    class _RefCapturingModel:
+        SR = 24000
+
+        def __init__(self):
+            self.generate_ref_kwargs: list[tuple] = []
+            self.batch_ref_kwargs: list[tuple] = []
+
+        def _audio_for(self, text):
+            n = max(1, int(len(text) * 0.05 * self.SR))
+            return np.zeros(n, dtype=np.float64)
+
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+            self.generate_ref_kwargs.append((ref_audio_codes, ref_text))
+            return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
+
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+            self.batch_ref_kwargs.append((ref_audio_codes, ref_text))
+            for idx, t in enumerate(texts):
+                yield type(
+                    "R", (),
+                    {"audio": self._audio_for(t), "sample_rate": self.SR, "sequence_idx": idx,
+                     "processing_time_seconds": 0.01},
+                )()
+
+    def _manifest(self, d, texts):
+        chunks = [ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t) for i, t in enumerate(texts)]
+        manifest_path = Path(d) / "manifest.json"
+        manifest = ab.load_or_create_manifest(manifest_path, chunks, max_chars=1000, tag_scope="chunk")
+        return manifest, manifest_path
+
+    def test_unbatched_path_passes_reference_to_every_segment(self):
+        import tempfile
+
+        codes_sentinel = object()
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(
+                d, ["Первое.", "Второе.", "Третье."]
+            )
+            model = self._RefCapturingModel()
+            ab.generate_segments(
+                model, manifest, manifest_path, max_retries=1, retry_base_delay=0.0,
+                batch_size=1, ref_audio_codes=codes_sentinel, ref_text="эталонный текст",
+            )
+            self.assertEqual(len(model.generate_ref_kwargs), 3)
+            for codes, text in model.generate_ref_kwargs:
+                self.assertIs(codes, codes_sentinel)
+                self.assertEqual(text, "эталонный текст")
+
+    def test_batched_path_passes_a_single_shared_reference_not_recomputed_per_batch(self):
+        import tempfile
+
+        codes_sentinel = object()
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(
+                d, ["Первое.", "Второе.", "Третье.", "Четвёртое."]
+            )
+            model = self._RefCapturingModel()
+            ab.generate_segments(
+                model, manifest, manifest_path, max_retries=1, retry_base_delay=0.0,
+                batch_size=4, ref_audio_codes=codes_sentinel, ref_text="эталонный текст",
+            )
+            self.assertEqual(len(model.batch_ref_kwargs), 1)
+            codes, text = model.batch_ref_kwargs[0]
+            self.assertIs(codes, codes_sentinel)
+            self.assertEqual(text, "эталонный текст")
+
+    def test_no_reference_reproduces_old_none_none_behavior(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(d, ["Одно."])
+            model = self._RefCapturingModel()
+            ab.generate_segments(model, manifest, manifest_path, max_retries=1, retry_base_delay=0.0, batch_size=1)
+            self.assertEqual(model.generate_ref_kwargs, [(None, None)])
 
 
 if __name__ == "__main__":
