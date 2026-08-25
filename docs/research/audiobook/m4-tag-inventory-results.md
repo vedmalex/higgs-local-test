@@ -477,8 +477,25 @@ nothing here is committed). The 8 highest-priority items, condensed:
    confirmed STT-transcript corruption elsewhere. **Resolved 2026-08-25: owner confirms this
    notation is unreliable — see §3.6.**
 6. `05_final_intonation/boundary_1_complete_thought.wav` vs `..._2_continuing_thought.wav` —
-   **the segmentation-defect question**: does our own chunk-per-chunk generation leave sentences
-   sounding cut off.
+   was framed as **the segmentation-defect question**: does our own chunk-per-chunk generation
+   leave sentences sounding cut off. **Update 2026-08-25 (issue #57 follow-up): this pair does
+   NOT answer that question, and the framing above is wrong.** `boundary_2_continuing_thought.wav`'s
+   text (`BOUNDARY_CONTINUING` in `m4_tag_inventory_bench.py`) is a grammatically COMPLETE
+   sentence ending in a period — `"Он медленно подошёл к двери и взялся за ручку."` — only its
+   *narrative* continuation (what happens next in the story) is left open; nothing about the
+   chunk boundary itself is tested here, since the clip is not actually cut off mid-sentence. The
+   owner listened and correctly heard "мысль завершена" (the sentence IS grammatically finished);
+   the task had asked for "мысль не завершена" as if the model were expected to intuit unwritten
+   narrative intent from a full stop, which is not a defect in chunking or in the model's
+   intonation — it is a badly posed question. The corresponding survey task
+   (`final-boundary-continuing` in `src/sentiment_survey/task_sets/final_intonation.json`) has
+   had its `correct_answer` retracted to `null` (no gradable expectation) rather than kept as a
+   false miss; see that file's `hidden.A.note` and `src/sentiment_survey/server.py`'s
+   `record_is_still_gradable()` for how the historical answer is excluded from scoring without
+   being rewritten. **The real segmentation-defect question — what happens when a long sentence
+   is force-split mid-clause (comma/conjunction, not a period) via `_force_split_long_sentence()`
+   — was still untested by this pair and is the subject of a separate, targeted probe:
+   `docs/research/audiobook/m4_midsentence_split_bench.py` (issue #57 follow-up).**
 7. `05_final_intonation/punct_3_exclaim.wav` vs `punct_1_period.wav` — does punctuation alone
    change delivery.
 
