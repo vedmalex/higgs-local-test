@@ -70,10 +70,12 @@ conv1d, dilation 1 / 3 / 9                                      1.32e-05 … 1.7
 Snake1d                                                         4.13e-07
 ```
 
-**Honesty note about this probe:** its raw stdout was never committed as a `*-results.md` artifact
-in this repository — the numbers above are as reported when it was run, and `m4-plan.md` is their
-only in-repo record. They are quoted here because they corroborate a conclusion that does not
-depend on them; the closure rests on §1.2's committed measurement.
+**Update (2026-08-25):** this probe's script and raw output are now committed — see
+[`m4-mlx-probe-results.md`](m4-mlx-probe-results.md),
+[`m4_mlx_gpu_probe.py`](m4_mlx_gpu_probe.py) / [`m4_mlx_probe_case_runner.py`](m4_mlx_probe_case_runner.py),
+and the raw dump at [`m4-mlx-probe-output-m1.json`](m4-mlx-probe-output-m1.json). The numbers above
+are confirmed against that JSON with no discrepancy. They are quoted here because they corroborate
+a conclusion that does not depend on them; the closure rests on §1.2's committed measurement.
 
 ### 1.4 MAX's structural disadvantage on this graph is concrete, not vague
 
@@ -196,3 +198,4 @@ non-goals for M4.
 - [`m3-device-mixing-results.md`](m3-device-mixing-results.md) — the forced CPU placement of `conv_t1`
 - [`m2-convtranspose1d-results.md`](m2-convtranspose1d-results.md) — the GPU crash and the upstream reports
 - [`m0-results.md`](m0-results.md) — superseded on the GPU-availability point (see §1.6)
+- [`m4-mlx-probe-results.md`](m4-mlx-probe-results.md) — the committed MLX GPU correctness probe (10/10 PASSED) referenced in §1.3
