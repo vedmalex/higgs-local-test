@@ -560,5 +560,331 @@ class TestF13AllowGapsAssembly(unittest.TestCase):
             self.assertTrue((Path(d) / "chapter.wav").exists())
 
 
+class TestScreenplayParsing(unittest.TestCase):
+    """parse_screenplay: reads docs/guides/audiobook_guide.md sec. 3's
+    [{"speaker": ..., "text": ...}, ...] DSL, validates it, and drops any field besides
+    speaker/text so unrelated edits can never affect a segment's content hash."""
+
+    def test_valid_screenplay_parses_and_keeps_only_speaker_and_text(self):
+        data = [
+            {"speaker": "narrator", "text": "Глава первая.", "note": "intro line"},
+            {"speaker": "arjuna", "text": "<|emotion:sadness|>О Кришна."},
+        ]
+        lines = ab.parse_screenplay(data)
+        self.assertEqual(
+            lines,
+            [
+                {"speaker": "narrator", "text": "Глава первая."},
+                {"speaker": "arjuna", "text": "<|emotion:sadness|>О Кришна."},
+            ],
+        )
+
+    def test_top_level_must_be_a_list(self):
+        with self.assertRaises(ValueError) as ctx:
+            ab.parse_screenplay({"speaker": "narrator", "text": "x"})
+        self.assertIn("array", str(ctx.exception))
+
+    def test_empty_screenplay_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            ab.parse_screenplay([])
+        self.assertIn("empty", str(ctx.exception))
+
+    def test_non_object_line_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            ab.parse_screenplay(["Глава первая."])
+        self.assertIn("line 0", str(ctx.exception))
+
+    def test_missing_speaker_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            ab.parse_screenplay([{"text": "Глава первая."}])
+        self.assertIn("speaker", str(ctx.exception))
+
+    def test_blank_speaker_rejected(self):
+        with self.assertRaises(ValueError):
+            ab.parse_screenplay([{"speaker": "   ", "text": "Глава первая."}])
+
+    def test_non_string_speaker_rejected(self):
+        with self.assertRaises(ValueError):
+            ab.parse_screenplay([{"speaker": 5, "text": "Глава первая."}])
+
+    def test_missing_text_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            ab.parse_screenplay([{"speaker": "narrator"}])
+        self.assertIn("text", str(ctx.exception))
+
+    def test_blank_text_rejected(self):
+        with self.assertRaises(ValueError):
+            ab.parse_screenplay([{"speaker": "narrator", "text": "   "}])
+
+    def test_unknown_control_tag_in_line_text_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            ab.parse_screenplay(
+                [{"speaker": "narrator", "text": "<|emotion:Elation|>Привет."}]
+            )
+        self.assertIn("unknown control tag", str(ctx.exception))
+
+    def test_invalid_style_whispering_tag_still_validates_as_a_known_tag(self):
+        # whispering IS one of the 34 known-valid tags (VALID_TAGS) -- it just doesn't
+        # sound like whispering (docs/research/audiobook/m4-sentiment-results.md sec 6b).
+        # parse_screenplay only checks the tag is a real one, not that it "works".
+        lines = ab.parse_screenplay(
+            [{"speaker": "narrator", "text": "<|style:whispering|>Тише."}]
+        )
+        self.assertEqual(lines[0]["text"], "<|style:whispering|>Тише.")
+
+
+class TestScreenplayChunking(unittest.TestCase):
+    """chunk_screenplay: reuses split_sentences/chunk_sentences per line, resets tag state
+    at every speaker line, and threads `speaker` into every resulting Chunk."""
+
+    def test_each_chunk_is_tagged_with_its_speaker(self):
+        lines = ab.parse_screenplay(
+            [
+                {"speaker": "narrator", "text": "Глава первая. Все собрались."},
+                {"speaker": "arjuna", "text": "О Кришна, что происходит?"},
+            ]
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            chunks = ab.chunk_screenplay(lines, max_chars=1000, tag_scope="sentence")
+        speakers = [c.speaker for c in chunks]
+        self.assertIn("narrator", speakers)
+        self.assertIn("arjuna", speakers)
+
+    def test_indices_are_renumbered_globally_across_lines(self):
+        lines = ab.parse_screenplay(
+            [
+                {"speaker": "narrator", "text": "Раз. Два. Три."},
+                {"speaker": "arjuna", "text": "Четыре."},
+            ]
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            chunks = ab.chunk_screenplay(lines, max_chars=1000, tag_scope="sentence")
+        self.assertEqual([c.index for c in chunks], list(range(len(chunks))))
+
+    def test_emotion_tag_does_not_leak_across_a_speaker_change(self):
+        # arjuna's line opens <|emotion:sadness|> and never closes it; krishna's very next
+        # line must NOT have that tag reopened onto it -- a character's leftover emotional
+        # state has no textual basis once a different speaker starts talking.
+        lines = ab.parse_screenplay(
+            [
+                {"speaker": "arjuna", "text": "<|emotion:sadness|>Мне грустно."},
+                {"speaker": "krishna", "text": "Не грусти, Арджуна."},
+            ]
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            chunks = ab.chunk_screenplay(lines, max_chars=1000, tag_scope="sentence")
+        krishna_chunk = next(c for c in chunks if c.speaker == "krishna")
+        self.assertNotIn("<|emotion:sadness|>", krishna_chunk.text)
+
+    def test_single_speaker_screenplay_emits_no_multivoice_warning(self):
+        lines = ab.parse_screenplay(
+            [
+                {"speaker": "narrator", "text": "Первая строка."},
+                {"speaker": "narrator", "text": "Вторая строка."},
+            ]
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ab.chunk_screenplay(lines, max_chars=1000, tag_scope="sentence")
+        self.assertEqual(caught, [])
+
+    def test_multi_speaker_screenplay_warns_naming_speakers_once(self):
+        lines = ab.parse_screenplay(
+            [
+                {"speaker": "narrator", "text": "Первая строка."},
+                {"speaker": "arjuna", "text": "Вторая строка."},
+                {"speaker": "krishna", "text": "Третья строка."},
+            ]
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ab.chunk_screenplay(lines, max_chars=1000, tag_scope="sentence")
+        multivoice_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        self.assertEqual(len(multivoice_warnings), 1)
+        msg = str(multivoice_warnings[0].message)
+        self.assertIn("narrator", msg)
+        self.assertIn("arjuna", msg)
+        self.assertIn("krishna", msg)
+        self.assertIn("default voice", msg)
+
+    def test_long_reply_from_one_speaker_still_chunks_and_reopens_tags(self):
+        # A single reply longer than max_chars must still be split into multiple chunks
+        # by the existing chunk_sentences machinery, with its own tag reopened across
+        # those internal chunk boundaries -- this is the exact gap the plain guide-example
+        # pipeline (one model.generate() call per line) had (m4-chapter-results.md sec 2).
+        long_text = "<|emotion:sadness|>" + " ".join(
+            f"Предложение номер {i}." for i in range(1, 30)
+        )
+        lines = ab.parse_screenplay([{"speaker": "arjuna", "text": long_text}])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            chunks = ab.chunk_screenplay(lines, max_chars=100, tag_scope="sentence")
+        self.assertGreater(len(chunks), 1)
+        for c in chunks:
+            self.assertIn("<|emotion:sadness|>", c.text)
+            self.assertEqual(c.speaker, "arjuna")
+
+
+class TestScreenplayIncrementalRegeneration(unittest.TestCase):
+    """The key property (Refs #57 task item 2): editing ONE line of an N-line screenplay
+    and rebuilding the manifest must regenerate exactly that one segment -- everything else
+    must be reused via the content hash (F7), extended to include `speaker`."""
+
+    def _screenplay_chunks(self, lines_data):
+        lines = ab.parse_screenplay(lines_data)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return ab.chunk_screenplay(lines, max_chars=1000, tag_scope="chunk")
+
+    def test_editing_one_line_only_invalidates_that_lines_segment(self):
+        import tempfile
+
+        base_lines = [
+            {"speaker": "narrator", "text": "Первая строка."},
+            {"speaker": "arjuna", "text": "Вторая строка."},
+            {"speaker": "krishna", "text": "Третья строка."},
+            {"speaker": "narrator", "text": "Четвёртая строка."},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks_v1 = self._screenplay_chunks(base_lines)
+            manifest = ab.load_or_create_manifest(
+                manifest_path, chunks_v1, max_chars=1000, tag_scope="chunk"
+            )
+            for i, seg in enumerate(manifest["segments"]):
+                seg["status"] = "done"
+                seg["num_samples"] = 1000 + i
+            ab.save_manifest(manifest, manifest_path)
+
+            edited_lines = [dict(l) for l in base_lines]
+            edited_lines[2] = {"speaker": "krishna", "text": "Совсем другая третья строка."}
+            chunks_v2 = self._screenplay_chunks(edited_lines)
+            manifest2 = ab.load_or_create_manifest(
+                manifest_path, chunks_v2, max_chars=1000, tag_scope="chunk"
+            )
+
+            statuses = [seg["status"] for seg in manifest2["segments"]]
+            self.assertEqual(statuses.count("pending"), 1)
+            self.assertEqual(statuses.count("done"), 3)
+            # The three UNCHANGED lines kept their original num_samples (real reuse, not
+            # just a matching status string).
+            unchanged_samples = sorted(
+                seg["num_samples"] for seg in manifest2["segments"] if seg["status"] == "done"
+            )
+            self.assertEqual(unchanged_samples, [1000, 1001, 1003])
+
+    def test_editing_an_unrelated_field_does_not_invalidate_any_segment(self):
+        import tempfile
+
+        base_lines = [
+            {"speaker": "narrator", "text": "Первая строка.", "id": "L1"},
+            {"speaker": "arjuna", "text": "Вторая строка.", "id": "L2"},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks_v1 = self._screenplay_chunks(base_lines)
+            manifest = ab.load_or_create_manifest(
+                manifest_path, chunks_v1, max_chars=1000, tag_scope="chunk"
+            )
+            for seg in manifest["segments"]:
+                seg["status"] = "done"
+                seg["num_samples"] = 42
+            ab.save_manifest(manifest, manifest_path)
+
+            # Only the extraneous "id"/"note" field changes -- speaker and text untouched.
+            edited_lines = [
+                {"speaker": "narrator", "text": "Первая строка.", "id": "L1-renamed"},
+                {"speaker": "arjuna", "text": "Вторая строка.", "note": "unrelated"},
+            ]
+            chunks_v2 = self._screenplay_chunks(edited_lines)
+            manifest2 = ab.load_or_create_manifest(
+                manifest_path, chunks_v2, max_chars=1000, tag_scope="chunk"
+            )
+            self.assertTrue(all(seg["status"] == "done" for seg in manifest2["segments"]))
+            self.assertTrue(all(seg["num_samples"] == 42 for seg in manifest2["segments"]))
+
+    def test_renaming_the_speaker_of_an_unchanged_line_invalidates_its_segment(self):
+        # Same wording, different speaker -- the hash MUST change (speaker selects the
+        # voice once cloning is wired in), so this must NOT be silently reused.
+        import tempfile
+
+        base_lines = [{"speaker": "narrator", "text": "Общая фраза."}]
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks_v1 = self._screenplay_chunks(base_lines)
+            manifest = ab.load_or_create_manifest(
+                manifest_path, chunks_v1, max_chars=1000, tag_scope="chunk"
+            )
+            manifest["segments"][0]["status"] = "done"
+            manifest["segments"][0]["num_samples"] = 7
+            ab.save_manifest(manifest, manifest_path)
+
+            renamed_lines = [{"speaker": "arjuna", "text": "Общая фраза."}]
+            chunks_v2 = self._screenplay_chunks(renamed_lines)
+            manifest2 = ab.load_or_create_manifest(
+                manifest_path, chunks_v2, max_chars=1000, tag_scope="chunk"
+            )
+            self.assertEqual(manifest2["segments"][0]["status"], "pending")
+            self.assertEqual(manifest2["segments"][0]["speaker"], "arjuna")
+
+
+class TestScreenplaySpeakerChangeAssembly(unittest.TestCase):
+    """assemble_chapter's optional speaker_change_silence_ms (screenplay format)."""
+
+    def _make_segment(self, d, name, seconds, sr=8000, value=0.2):
+        path = Path(d) / name
+        n = int(seconds * sr)
+        ab.write_wav(path, np.full(n, value, dtype=np.float64), sr)
+
+    def test_speaker_change_uses_the_longer_pause(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            self._make_segment(d, "seg2.wav", 0.1)
+            manifest = {
+                "segments": [
+                    {"index": 0, "status": "done", "output_path": "seg0.wav", "text": "x", "speaker": "narrator"},
+                    {"index": 1, "status": "done", "output_path": "seg1.wav", "text": "x", "speaker": "narrator"},
+                    {"index": 2, "status": "done", "output_path": "seg2.wav", "text": "x", "speaker": "arjuna"},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=100,
+                speaker_change_silence_ms=900,
+            )
+            # 3 segments of 0.1s + one same-speaker join (100ms) + one speaker-change join
+            # (900ms) = 0.3 + 0.1 + 0.9 = 1.3s.
+            self.assertAlmostEqual(result["total_duration_seconds"], 1.3, places=2)
+
+    def test_missing_speaker_key_falls_back_to_uniform_silence(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            manifest = {
+                "segments": [
+                    {"index": 0, "status": "done", "output_path": "seg0.wav", "text": "x"},
+                    {"index": 1, "status": "done", "output_path": "seg1.wav", "text": "x"},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=100,
+                speaker_change_silence_ms=900,
+            )
+            self.assertAlmostEqual(result["total_duration_seconds"], 0.3, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()
