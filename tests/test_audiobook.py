@@ -1073,5 +1073,236 @@ class TestStressApostropheNotation(unittest.TestCase):
             self.assertEqual(manifest2["segments"][1]["num_samples"], 99)
 
 
+class TestBatchGenerationIntegration(unittest.TestCase):
+    """Refs #114: `generate_segments(..., batch_size=N)` wires `model.batch_generate()`
+    into the working pipeline. These tests target exactly the risk areas the audit called
+    out: result<->segment identity across the batch boundary, resumable atomic manifest
+    writes mid-batch, per-segment (not per-batch) audio validation, and `--batch-size 1`
+    being byte-for-byte the pre-#114 behavior.
+    """
+
+    class _FakeBatchModel:
+        """`.generate()` and `.batch_generate()` both derive deterministic, distinguishable
+        audio length from the text's own length, so a scrambled segment<->result mapping
+        shows up as a length (and therefore duration) mismatch against the *wrong* text.
+        `batch_generate` yields in REVERSED order on purpose -- return order must never be
+        trusted, only `sequence_idx` -- and can be told to always fail (or fail for texts
+        matching a substring) to exercise the retry/degrade/fallback path.
+        """
+
+        SR = 24000
+
+        class _BatchResult:
+            def __init__(self, audio, sequence_idx, sample_rate, processing_time_seconds=0.01):
+                self.audio = audio
+                self.sequence_idx = sequence_idx
+                self.sample_rate = sample_rate
+                self.processing_time_seconds = processing_time_seconds
+
+        def __init__(self, fail_substrings: tuple[str, ...] = (), fail_batch_times: int = 0):
+            self.fail_substrings = fail_substrings
+            self.fail_batch_times = fail_batch_times
+            self.batch_calls: list[list[str]] = []
+            self.generate_calls: list[str] = []
+
+        def _audio_for(self, text: str) -> np.ndarray:
+            n = max(1, int(len(text) * 0.05 * self.SR))
+            return np.zeros(n, dtype=np.float64)
+
+        def generate(self, text, temperature, max_new_tokens):
+            # Deliberately always succeeds here, even for a `fail_substrings` text -- that
+            # knob only makes `batch_generate` produce bad audio for the matching row, so
+            # tests can verify the single-segment fallback path actually rescues it.
+            self.generate_calls.append(text)
+            return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
+
+        def batch_generate(self, texts, temperature, max_new_tokens):
+            self.batch_calls.append(list(texts))
+            if len(self.batch_calls) <= self.fail_batch_times:
+                raise RuntimeError("simulated whole-batch failure")
+            for idx in reversed(range(len(texts))):
+                text = texts[idx]
+                if any(s in text for s in self.fail_substrings):
+                    # Bad audio for exactly this row -- too short to pass F6 validation --
+                    # while the rest of the batch still yields plausible audio.
+                    yield self._BatchResult(np.zeros(1, dtype=np.float64), idx, self.SR)
+                else:
+                    yield self._BatchResult(self._audio_for(text), idx, self.SR)
+
+    def _manifest(self, d, texts):
+        chunks = [
+            ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t)
+            for i, t in enumerate(texts)
+        ]
+        manifest_path = Path(d) / "manifest.json"
+        manifest = ab.load_or_create_manifest(manifest_path, chunks, max_chars=1000, tag_scope="chunk")
+        return manifest, manifest_path
+
+    def test_batch_results_map_to_correct_segments_despite_reversed_yield_order(self):
+        import tempfile
+
+        texts = [
+            "Короткий текст.",
+            "Существенно более длинный текст для второго сегмента совсем.",
+            "Средний по длине текст тут.",
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(d, texts)
+            model = self._FakeBatchModel()
+            result = ab.generate_segments(
+                model, manifest, manifest_path, max_retries=2, retry_base_delay=0.0, batch_size=3
+            )
+            self.assertEqual(result["failures"], [])
+            self.assertEqual(len(model.batch_calls), 1)
+            for i, text in enumerate(texts):
+                entry = manifest["segments"][i]
+                self.assertEqual(entry["status"], "done")
+                expected_samples = model._audio_for(text).size
+                self.assertEqual(
+                    entry["num_samples"],
+                    expected_samples,
+                    f"segment {i} ({text!r}) got the wrong audio -- batch result<->segment "
+                    "mapping was scrambled",
+                )
+                # Cross-check against the actual WAV written to disk, not just the manifest.
+                audio, sr = ab.read_wav(Path(d) / entry["output_path"])
+                self.assertEqual(sr, model.SR)
+                self.assertEqual(len(audio), expected_samples)
+
+    def test_batch_size_one_is_byte_for_byte_the_original_unbatched_path(self):
+        import tempfile
+
+        texts = ["Первый сегмент тут.", "Второй сегмент здесь.", "Третий сегмент готов."]
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            manifest1, path1 = self._manifest(d1, texts)
+            model1 = self._FakeBatchModel()
+            ab.generate_segments(
+                model1, manifest1, path1, max_retries=2, retry_base_delay=0.0, batch_size=1
+            )
+
+            manifest2, path2 = self._manifest(d2, texts)
+            model2 = self._FakeBatchModel()
+            ab.generate_segments(
+                model2, manifest2, path2, max_retries=2, retry_base_delay=0.0
+            )  # default batch_size
+
+            # batch_generate must never be called on the batch_size=1 path.
+            self.assertEqual(model1.batch_calls, [])
+            self.assertEqual(len(model1.generate_calls), len(texts))
+
+            for s1, s2 in zip(manifest1["segments"], manifest2["segments"]):
+                self.assertEqual(s1["status"], "done")
+                self.assertEqual(s2["status"], "done")
+                self.assertEqual(s1["num_samples"], s2["num_samples"])
+                self.assertEqual(s1["sample_rate"], s2["sample_rate"])
+                self.assertEqual(s1["text_hash"], s2["text_hash"])
+
+    def test_resume_after_interruption_mid_batch_only_regenerates_missing_segment(self):
+        import tempfile
+
+        texts = ["Первый.", "Второй.", "Третий.", "Четвёртый."]
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(d, texts)
+            model = self._FakeBatchModel()
+            ab.generate_segments(
+                model, manifest, manifest_path, max_retries=2, retry_base_delay=0.0, batch_size=4
+            )
+            self.assertTrue(all(s["status"] == "done" for s in manifest["segments"]))
+
+            # Simulate a kill mid-batch: segment 2's WAV never made it to disk (as if the
+            # process died before batch_generate yielded that row), but the manifest still
+            # (incorrectly, as a killed process would leave it) claims "done".
+            killed_entry = manifest["segments"][2]
+            (Path(d) / killed_entry["output_path"]).unlink()
+
+            reloaded = ab.load_or_create_manifest(
+                manifest_path,
+                [ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t) for i, t in enumerate(texts)],
+                max_chars=1000,
+                tag_scope="chunk",
+            )
+            model2 = self._FakeBatchModel()
+            result = ab.generate_segments(
+                model2, reloaded, manifest_path, max_retries=2, retry_base_delay=0.0, batch_size=4
+            )
+            self.assertEqual(result["failures"], [])
+            # Only the missing segment should have been (re)requested from the model -- a
+            # single leftover segment takes the `_generate_single_segment`/`model.generate`
+            # path (a "batch" of one gains nothing from `batch_generate`), so check
+            # `generate_calls`, not `batch_calls`.
+            self.assertEqual(model2.batch_calls, [])
+            self.assertEqual(model2.generate_calls, ["Третий."])
+            self.assertTrue(all(s["status"] == "done" for s in reloaded["segments"]))
+
+    def test_validation_applied_per_segment_isolates_one_bad_row_in_a_batch(self):
+        import tempfile
+
+        texts = ["Хороший сегмент один.", "ПЛОХОЙ сегмент здесь.", "Хороший сегмент три."]
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(d, texts)
+            # batch_generate always yields empty/too-short audio for the "ПЛОХОЙ" row, but
+            # model.generate() (the single-segment fallback path) succeeds for it.
+            model = self._FakeBatchModel(fail_substrings=("ПЛОХОЙ",))
+            result = ab.generate_segments(
+                model, manifest, manifest_path, max_retries=2, retry_base_delay=0.0, batch_size=3
+            )
+            self.assertEqual(result["failures"], [])
+            self.assertTrue(all(s["status"] == "done" for s in manifest["segments"]))
+            # The bad row must have been isolated down to a single-segment fallback call,
+            # not silently accepted, and not have taken the two good rows down with it.
+            self.assertIn("ПЛОХОЙ сегмент здесь.", model.generate_calls)
+            good_entry_0 = manifest["segments"][0]
+            good_entry_2 = manifest["segments"][2]
+            self.assertGreater(good_entry_0["num_samples"], 1)
+            self.assertGreater(good_entry_2["num_samples"], 1)
+
+    def test_manifest_written_after_each_segment_within_a_batch_not_only_after_whole_batch(self):
+        import tempfile
+
+        texts = ["Один два три.", "Четыре пять шесть семь.", "Восемь девять."]
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(d, texts)
+            model = self._FakeBatchModel()
+            save_calls = []
+            real_save = ab.save_manifest
+
+            def counting_save(m, p):
+                # Snapshot how many segments are already "done" at each save -- if writes
+                # only happened once per whole batch, this would jump straight from 0 to 3
+                # in one call instead of climbing 1 at a time.
+                save_calls.append(sum(1 for s in m["segments"] if s["status"] == "done"))
+                real_save(m, p)
+
+            ab.save_manifest = counting_save
+            try:
+                ab.generate_segments(
+                    model, manifest, manifest_path, max_retries=2, retry_base_delay=0.0, batch_size=3
+                )
+            finally:
+                ab.save_manifest = real_save
+
+            done_counts_seen = sorted(set(save_calls))
+            self.assertIn(1, done_counts_seen)
+            self.assertIn(2, done_counts_seen)
+            self.assertIn(3, done_counts_seen)
+
+    def test_whole_batch_failure_degrades_and_still_completes_via_fallback(self):
+        import tempfile
+
+        texts = ["Сегмент А.", "Сегмент Б.", "Сегмент В.", "Сегмент Г."]
+        with tempfile.TemporaryDirectory() as d:
+            manifest, manifest_path = self._manifest(d, texts)
+            # batch_generate fails outright for the first `max_retries` attempts at ANY
+            # size (transient-looking failure), forcing the batch to retry, then split into
+            # halves, then singles -- and still finish successfully via model.generate().
+            model = self._FakeBatchModel(fail_batch_times=100)
+            result = ab.generate_segments(
+                model, manifest, manifest_path, max_retries=1, retry_base_delay=0.0, batch_size=4
+            )
+            self.assertEqual(result["failures"], [])
+            self.assertTrue(all(s["status"] == "done" for s in manifest["segments"]))
+            self.assertEqual(len(model.generate_calls), len(texts))
+
+
 if __name__ == "__main__":
     unittest.main()

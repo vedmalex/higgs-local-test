@@ -1067,6 +1067,198 @@ def _clear_mlx_cache() -> None:
         pass
 
 
+def _generate_single_segment(
+    model,
+    entry: dict,
+    out_path: Path,
+    temperature: float,
+    max_new_tokens: int,
+    max_retries: int,
+    retry_base_delay: float,
+    manifest: dict,
+    manifest_path: Path,
+) -> tuple[bool, Optional[str]]:
+    """Generate one segment via `model.generate()` with retry/backoff (F5) and per-segment
+    audio-sanity validation (F6). Mutates `entry` in place and calls `save_manifest` after
+    every status change, so a kill at any point leaves the manifest resumable (F4).
+
+    This is the exact single-segment call convention `generate_segments` always used before
+    batching existed (`--batch-size 1` still goes through this function only, unchanged) --
+    factored out so the batched path (`_generate_batch_group` below) can also fall back to
+    it, one segment at a time, when a batch cannot be trusted as a whole.
+    """
+    last_error: Optional[str] = None
+    for attempt in range(1, max_retries + 1):
+        entry["status"] = "in_progress"
+        save_manifest(manifest, manifest_path)
+        try:
+            started = time.perf_counter()
+            results = list(
+                model.generate(
+                    text=entry["text"],
+                    temperature=temperature,
+                    max_new_tokens=max_new_tokens,
+                )
+            )
+            generation_seconds = time.perf_counter() - started
+            if not results:
+                raise RuntimeError("model.generate produced no result")
+            sample_rate = results[0].sample_rate
+            audio = np.concatenate([np.asarray(r.audio).reshape(-1) for r in results])
+            bad_reason = _validate_generated_audio(audio, sample_rate, entry["text"])
+            if bad_reason:
+                raise RuntimeError(bad_reason)
+            write_wav(out_path, audio, sample_rate)
+            entry["status"] = "done"
+            entry["sample_rate"] = sample_rate
+            entry["num_samples"] = int(len(audio))
+            entry["audio_duration_seconds"] = len(audio) / sample_rate if sample_rate else None
+            entry["generation_seconds"] = generation_seconds
+            entry["memory"] = _capture_memory_metrics()
+            entry["error"] = None
+            save_manifest(manifest, manifest_path)
+            return True, None
+        except Exception as exc:  # noqa: BLE001 -- must record and keep the manifest resumable
+            last_error = f"{type(exc).__name__}: {exc}"
+            entry["error"] = last_error
+            if attempt < max_retries:
+                entry["status"] = "pending"  # explicit reset before retrying (F5)
+                save_manifest(manifest, manifest_path)
+                time.sleep(retry_base_delay * (2 ** (attempt - 1)))
+                continue
+            entry["status"] = "failed"
+            save_manifest(manifest, manifest_path)
+    return False, last_error
+
+
+def _generate_batch_group(
+    model,
+    group: list[tuple[int, dict]],
+    base_dir: Path,
+    temperature: float,
+    max_new_tokens: int,
+    max_retries: int,
+    retry_base_delay: float,
+    manifest: dict,
+    manifest_path: Path,
+) -> list[tuple[int, dict, bool, Optional[str]]]:
+    """Generate every entry in `group` (list of `(seg_i, entry)`, len <= --batch-size)
+    through `model.batch_generate()`, with a self-narrowing fallback on failure.
+
+    Segment identity across the batch boundary (this task's most dangerous spot): `group`
+    preserves manifest order, so position `pos` in `texts` is passed to `batch_generate` and
+    the returned `BatchGenerationResult.sequence_idx` is used -- never return order -- to map
+    each decoded result back to `group[pos]`'s own entry. `sequence_idx` equals `pos` in the
+    current mlx_audio implementation (both are built from the same `enumerate(texts)`), but
+    this still keys off `sequence_idx` explicitly, not off yield order, in case a future
+    mlx_audio revision reorders yields (continuous batching evicts finished rows early) --
+    exactly the m4_batching_bench.py convention (`chunk_results.sort(key=lambda r:
+    r.sequence_idx)`).
+
+    Manifest writes happen per segment, not once per batch (chosen over "after the whole
+    batch"): `batch_generate` already yields one `BatchGenerationResult` per segment as each
+    finishes decoding, so writing immediately after each one bounds the work lost to a kill
+    mid-batch to whatever has not yet been yielded, not the whole batch -- for the same
+    reason a 30-hour run must not lose more than the segment in flight.
+
+    Retries and isolation (F5, extended to batches): a whole-batch exception (or a
+    per-segment audio-sanity failure inside it, F6) is retried whole up to `max_retries`
+    times, since `batch_generate`'s shared forward pass gives no way to blame one row before
+    the batch completes. If the batch keeps failing at that size, the *unfinished* entries
+    (already-done ones are kept, not redone) are split in half and each half is retried
+    independently, recursing down to single-segment `_generate_single_segment` calls -- this
+    isolates exactly the segment(s) actually at fault instead of writing off the whole batch,
+    and doubles as automatic degradation toward a smaller effective batch size if the failure
+    is memory pressure (F6/"memory ceiling" risk) rather than a bad segment.
+    """
+    if len(group) == 1:
+        seg_i, entry = group[0]
+        out_path = base_dir / entry["output_path"]
+        ok, err = _generate_single_segment(
+            model, entry, out_path, temperature, max_new_tokens, max_retries,
+            retry_base_delay, manifest, manifest_path,
+        )
+        return [(seg_i, entry, ok, err)]
+
+    for _, entry in group:
+        entry["status"] = "in_progress"
+    save_manifest(manifest, manifest_path)
+
+    last_error: Optional[str] = None
+    for attempt in range(1, max_retries + 1):
+        # Recomputed every attempt: a segment already written to "done" earlier in a
+        # previous partially-successful attempt (see the per-row loop below, which can
+        # raise partway through) is never resent to batch_generate again on retry.
+        remaining_now = [(seg_i, entry) for seg_i, entry in group if entry["status"] != "done"]
+        if not remaining_now:
+            break
+        texts = [entry["text"] for _, entry in remaining_now]
+        try:
+            result_by_pos: dict[int, object] = {}
+            for r in model.batch_generate(
+                texts=texts, temperature=temperature, max_new_tokens=max_new_tokens
+            ):
+                result_by_pos[r.sequence_idx] = r
+            if len(result_by_pos) != len(remaining_now):
+                raise RuntimeError(
+                    f"batch_generate returned {len(result_by_pos)} result(s) for "
+                    f"{len(remaining_now)} requested segment(s)"
+                )
+            for pos, (seg_i, entry) in enumerate(remaining_now):
+                r = result_by_pos[pos]
+                out_path = base_dir / entry["output_path"]
+                audio = np.asarray(r.audio).reshape(-1)
+                sample_rate = r.sample_rate
+                # F6, applied per segment, not to the batch as a whole -- one bad row in an
+                # otherwise-fine batch must not silently pass because the other rows are fine.
+                bad_reason = _validate_generated_audio(audio, sample_rate, entry["text"])
+                if bad_reason:
+                    raise RuntimeError(f"segment {entry['index']}: {bad_reason}")
+                write_wav(out_path, audio, sample_rate)
+                entry["status"] = "done"
+                entry["sample_rate"] = sample_rate
+                entry["num_samples"] = int(len(audio))
+                entry["audio_duration_seconds"] = len(audio) / sample_rate if sample_rate else None
+                entry["generation_seconds"] = getattr(r, "processing_time_seconds", None)
+                entry["memory"] = _capture_memory_metrics()
+                entry["error"] = None
+                save_manifest(manifest, manifest_path)  # per segment, not per batch
+        except Exception as exc:  # noqa: BLE001 -- must record and keep the manifest resumable
+            last_error = f"{type(exc).__name__}: {exc}"
+            for _, entry in remaining_now:
+                if entry["status"] != "done":
+                    entry["error"] = last_error
+            if attempt < max_retries:
+                for _, entry in remaining_now:
+                    if entry["status"] != "done":
+                        entry["status"] = "pending"
+                save_manifest(manifest, manifest_path)
+                time.sleep(retry_base_delay * (2 ** (attempt - 1)))
+                continue
+            break  # exhausted whole-batch retries at this size -- degrade below
+
+    already_done = [
+        (seg_i, entry, True, None) for seg_i, entry in group if entry["status"] == "done"
+    ]
+    remaining = [(seg_i, entry) for seg_i, entry in group if entry["status"] != "done"]
+    if not remaining:
+        return already_done
+    mid = max(1, len(remaining) // 2)
+    left = _generate_batch_group(
+        model, remaining[:mid], base_dir, temperature, max_new_tokens, max_retries,
+        retry_base_delay, manifest, manifest_path,
+    )
+    right = (
+        _generate_batch_group(
+            model, remaining[mid:], base_dir, temperature, max_new_tokens, max_retries,
+            retry_base_delay, manifest, manifest_path,
+        )
+        if remaining[mid:]
+        else []
+    )
+    return already_done + left + right
+
+
 def generate_segments(
     model,
     manifest: dict,
@@ -1077,18 +1269,35 @@ def generate_segments(
     retry_base_delay: float = 2.0,
     continue_on_error: bool = False,
     clear_cache_every: int = 50,
+    batch_size: int = 1,
 ) -> dict:
     """Generate every pending segment, writing progress to disk after each one.
 
     On restart, a segment already marked "done" is re-validated against the WAV actually on
     disk (F6) -- a missing file, an empty/corrupt WAV, or a sample count/rate mismatch
-    against the manifest resets it to "pending" instead of being trusted blindly.
+    against the manifest resets it to "pending" instead of being trusted blindly. A segment
+    left "in_progress" by a killed run is handled identically to "pending" here -- neither
+    status short-circuits the loop below, both just fall through to (re)generation.
 
-    On a generation failure, the segment is retried up to `max_retries` times with
-    exponential backoff, explicitly reset to "pending" before each retry (F5). If every
-    retry fails: under `continue_on_error=True` the segment is marked "failed" and the loop
-    keeps going (losing only that segment, not the rest of a multi-hour run); otherwise the
-    original all-or-nothing behavior is preserved and the exception is re-raised.
+    `batch_size=1` (default) is the exact original per-segment path: one `model.generate()`
+    call per segment, in order, via `_generate_single_segment`. `batch_size > 1` groups the
+    segments that still need generating (after the resume check above) into groups of at
+    most `batch_size` and generates each group through `model.batch_generate()` via
+    `_generate_batch_group`, which maps results back to segments by `sequence_idx` (never by
+    return order) and falls back to smaller groups / single-segment generation on failure --
+    see that function's docstring for the full retry/isolation contract. Both paths write the
+    manifest after every individual segment completes, validate every individual segment's
+    audio before accepting it, and clear the MLX cache every `clear_cache_every` *segments
+    actually generated* (a resumed/skipped segment does not count, matching the pre-batching
+    behavior) -- batching only changes how many segments are requested from the model per
+    call, not any of the per-segment bookkeeping around it.
+
+    On a generation failure, the segment is retried (with exponential backoff) up to
+    `max_retries` times -- per segment when `batch_size=1`, per batch (then per smaller
+    sub-batch, then per segment) when `batch_size>1`. If every retry is exhausted for a given
+    segment: under `continue_on_error=True` it is marked "failed" and the loop keeps going
+    (losing only that segment, not the rest of a multi-hour run); otherwise the original
+    all-or-nothing behavior is preserved and the exception is re-raised immediately.
 
     Returns {"failures": [{"index": ..., "error": ...}, ...]} -- empty when everything
     either succeeded or was skipped via a valid resume.
@@ -1096,71 +1305,70 @@ def generate_segments(
     base_dir = manifest_path.parent
     failures: list[dict] = []
 
+    if batch_size <= 1:
+        processed = 0
+        for entry in manifest["segments"]:
+            out_path = base_dir / entry["output_path"]
+
+            if entry["status"] == "done":
+                ok, reason = _resume_check_ok(entry, out_path)
+                if ok:
+                    continue
+                entry["status"] = "pending"
+                entry["error"] = f"resume check failed, regenerating: {reason}"
+
+            succeeded, last_error = _generate_single_segment(
+                model, entry, out_path, temperature, max_new_tokens, max_retries,
+                retry_base_delay, manifest, manifest_path,
+            )
+            if not succeeded:
+                if not continue_on_error:
+                    raise RuntimeError(
+                        f"segment {entry['index']} failed after {max_retries} attempt(s): "
+                        f"{last_error} -- pass --continue-on-error to keep going and report "
+                        "failed segments at the end"
+                    )
+                failures.append({"index": entry["index"], "error": last_error})
+
+            processed += 1
+            if clear_cache_every and processed % clear_cache_every == 0:
+                _clear_mlx_cache()
+
+        return {"failures": failures}
+
+    # batch_size > 1: resume-check every segment first (unchanged rule), then hand only the
+    # segments that still need generating to the batched path, `batch_size` at a time.
+    pending: list[tuple[int, dict]] = []
     for seg_i, entry in enumerate(manifest["segments"]):
         out_path = base_dir / entry["output_path"]
-
         if entry["status"] == "done":
             ok, reason = _resume_check_ok(entry, out_path)
             if ok:
                 continue
             entry["status"] = "pending"
             entry["error"] = f"resume check failed, regenerating: {reason}"
+        pending.append((seg_i, entry))
 
-        last_error: Optional[str] = None
-        succeeded = False
-        for attempt in range(1, max_retries + 1):
-            entry["status"] = "in_progress"
-            save_manifest(manifest, manifest_path)
-            try:
-                started = time.perf_counter()
-                results = list(
-                    model.generate(
-                        text=entry["text"],
-                        temperature=temperature,
-                        max_new_tokens=max_new_tokens,
+    processed = 0
+    for group_start in range(0, len(pending), batch_size):
+        group = pending[group_start : group_start + batch_size]
+        outcomes = _generate_batch_group(
+            model, group, base_dir, temperature, max_new_tokens, max_retries,
+            retry_base_delay, manifest, manifest_path,
+        )
+        for _seg_i, entry, succeeded, last_error in outcomes:
+            if not succeeded:
+                if not continue_on_error:
+                    raise RuntimeError(
+                        f"segment {entry['index']} failed after retries: {last_error} -- "
+                        "pass --continue-on-error to keep going and report failed segments "
+                        "at the end"
                     )
-                )
-                generation_seconds = time.perf_counter() - started
-                if not results:
-                    raise RuntimeError("model.generate produced no result")
-                sample_rate = results[0].sample_rate
-                audio = np.concatenate([np.asarray(r.audio).reshape(-1) for r in results])
-                bad_reason = _validate_generated_audio(audio, sample_rate, entry["text"])
-                if bad_reason:
-                    raise RuntimeError(bad_reason)
-                write_wav(out_path, audio, sample_rate)
-                entry["status"] = "done"
-                entry["sample_rate"] = sample_rate
-                entry["num_samples"] = int(len(audio))
-                entry["audio_duration_seconds"] = len(audio) / sample_rate if sample_rate else None
-                entry["generation_seconds"] = generation_seconds
-                entry["memory"] = _capture_memory_metrics()
-                entry["error"] = None
-                succeeded = True
-            except Exception as exc:  # noqa: BLE001 -- must record and keep the manifest resumable
-                last_error = f"{type(exc).__name__}: {exc}"
-                entry["error"] = last_error
-                if attempt < max_retries:
-                    entry["status"] = "pending"  # explicit reset before retrying (F5)
-                    save_manifest(manifest, manifest_path)
-                    time.sleep(retry_base_delay * (2 ** (attempt - 1)))
-                    continue
-                entry["status"] = "failed"
-            save_manifest(manifest, manifest_path)
-            if succeeded:
-                break
+                failures.append({"index": entry["index"], "error": last_error})
 
-        if not succeeded:
-            if not continue_on_error:
-                raise RuntimeError(
-                    f"segment {entry['index']} failed after {max_retries} attempt(s): "
-                    f"{last_error} -- pass --continue-on-error to keep going and report "
-                    "failed segments at the end"
-                )
-            failures.append({"index": entry["index"], "error": last_error})
-
-        if clear_cache_every and (seg_i + 1) % clear_cache_every == 0:
-            _clear_mlx_cache()
+            processed += 1
+            if clear_cache_every and processed % clear_cache_every == 0:
+                _clear_mlx_cache()
 
     return {"failures": failures}
 
@@ -1370,6 +1578,20 @@ def main() -> None:
     parser.add_argument("--retry-base-delay", type=float, default=2.0)
     parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--clear-cache-every", type=int, default=50)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help=(
+            "Segments generated per model.batch_generate() call (Refs #114). Default 4: "
+            "measured speedup was 3.40x-3.69x at batch=8 with no memory ceiling found up to "
+            "8, but that measurement covered only dozens of segments, not the hundreds in a "
+            "real chapter, so 4 is a deliberately smaller starting point with headroom to "
+            "raise; --batch-size 8 reproduces the exact measured configuration. "
+            "--batch-size 1 is the original, unbatched, one-model.generate()-call-per-segment "
+            "path -- byte-for-byte the pre-#114 behavior -- for comparison or rollback."
+        ),
+    )
     parser.add_argument("--assemble", action="store_true")
     parser.add_argument("--assemble-only", action="store_true")
     parser.add_argument("--allow-gaps", action="store_true")
@@ -1450,6 +1672,7 @@ def main() -> None:
             retry_base_delay=args.retry_base_delay,
             continue_on_error=args.continue_on_error,
             clear_cache_every=args.clear_cache_every,
+            batch_size=args.batch_size,
         )
         if gen_result["failures"]:
             print(
