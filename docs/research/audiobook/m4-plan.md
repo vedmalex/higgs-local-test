@@ -23,11 +23,13 @@ Stage profile (M4-T1)   MEASURED, PR #95. AR loop (prefill + per-frame backbone)
                         wall time; codec.decode (one call) = 1.78-3.76%. See §3, M4-T1.
 Decoder                 already MLX, already on GPU. MLX-probe run: 10/10 PASSED (correctness
                         only — no performance or sentiment claim, see §8).
-Sentiment tags          34 added_tokens exist in the tokenizer, all special/non-normalized. T0
-                        PASSED (2026-08-25, owner verdict, SUBJECTIVE): `emotion` tags are
+Sentiment tags          43 added_tokens exist in the tokenizer, all special/non-normalized
+                        (21 emotion + 10 prosody + 3 style + 9 sfx; §0.4 originally missed the
+                        9 sfx tags and said 34 -- corrected 2026-08-25, see the note in §0.4).
+                        T0 PASSED (2026-08-25, owner verdict, SUBJECTIVE): `emotion` tags are
                         audibly distinguishable. `style:whispering` confirmed NOT usable for
-                        whispering (sounds quieter, not whispered). Only 4/34 tags checked. See
-                        §0.4, §3 M4-T0.
+                        whispering (sounds quieter, not whispered). Only 4/43 tags checked, and
+                        the 9 `sfx:*` tags have not been checked at all. See §0.4, §3 M4-T0.
 Batching                already implemented (`continuous_batching.py`), never benchmarked.
 Quantization            infrastructure complete (`python -m mlx_audio.convert`), never run on
                         this checkpoint. Codec fate under conversion is UNVERIFIED and risky —
@@ -65,27 +67,32 @@ speed or sentiment fidelity (§8). The probe's script and raw output are committ
 [`../mojo-max/m4-mlx-probe-results.md`](../mojo-max/m4-mlx-probe-results.md).
 
 **0.4 Sentiment tag inventory — measured directly against the real checkpoint's `tokenizer.json`,
-not assumed.** `bosonai/higgs-tts-3-4b`'s tokenizer has **84 `added_tokens`**, of which **34 are
+not assumed.** `bosonai/higgs-tts-3-4b`'s tokenizer has **84 `added_tokens`**, of which **43 are
 control-markup tags**, all `special: true`, `normalized: false`:
 
 ```text
 <|emotion:*|>   21 tokens, ids 151681-151701
-<|prosody:*|>   10 tokens, ids 151716-151726
 <|style:*|>      3 tokens, ids 151704-151706
+<|sfx:*|>        9 tokens, ids 151707-151715
+<|prosody:*|>   10 tokens, ids 151716-151726
 ```
 
 (Verified by parsing `~/.cache/huggingface/hub/models--bosonai--higgs-tts-3-4b/snapshots/*/tokenizer.json`
-directly — 21 emotion / 10 prosody / 3 style / 34 total, not "20 emotion / 33 total" as an earlier
-draft of this plan stated.) None of the 34 appear in the base BPE vocabulary. `prompt.py:46`'s
-`encode(text, add_special_tokens=False)` suppresses BOS/EOS, **not** added-tokens, so all 34 tags
+directly — 21 emotion / 10 prosody / 3 style / 9 sfx / 43 total, not "20 emotion / 33 total" as an
+earlier draft of this plan stated, and not "34 total" as this section itself said until 2026-08-25
+— that first pass missed the `sfx:*` category entirely, which `src/audiobook.py`'s `VALID_TAGS`
+inherited as a real defect: it rejected 9 tags the model actually understands. See
+[`m4-tag-inventory-results.md`](m4-tag-inventory-results.md) for how the inventory task itself
+also only checked 34 of the 43.) None of the 43 appear in the base BPE vocabulary. `prompt.py:46`'s
+`encode(text, add_special_tokens=False)` suppresses BOS/EOS, **not** added-tokens, so all 43 tags
 do reach the model as intended token ids. **But "reaches the model" is not "the model obeys it" —
 nobody has listened.** The repo's own existing control-tag fixture (`src/tts_test.py:14`) already
-exercises 7 of these 34 tags across all three categories (`contentment`, `speed_slow`, `pause`,
-`enthusiasm`, `expressive_high`, `long_pause`, `whispering`) and has never been graded blind for
-whether the emotion/prosody actually changed. There is a direct precedent for tags landing wrong:
-`README.md:245` records the model literally speaking a stress-mark annotation aloud instead of
-using it prosodically. This gap — tags reach the model, nobody has confirmed they are heard — is
-the reason T0 is a blocking first task (§3).
+exercises 7 of these 43 tags across all three sentence-level categories (`contentment`,
+`speed_slow`, `pause`, `enthusiasm`, `expressive_high`, `long_pause`, `whispering`; none of the 9
+`sfx:*` tags) and has never been graded blind for whether the emotion/prosody actually changed.
+There is a direct precedent for tags landing wrong: `README.md:245` records the model literally
+speaking a stress-mark annotation aloud instead of using it prosodically. This gap — tags reach
+the model, nobody has confirmed they are heard — is the reason T0 is a blocking first task (§3).
 
 **T0 result and its practical consequence for tag choice (2026-08-25, see §3/M4-T0 and
 `m4-sentiment-results.md` §6):** the owner's blind verdict (SUBJECTIVE) confirms `emotion` tags
@@ -95,8 +102,9 @@ whispering — the owner reports it "sounds like a quiet sound," matching the ob
 (only ~3 dB quieter than neutral, F0 median unchanged from neutral). Where a script calls for
 whispered narration, do not reach for `style:whispering`; use an `emotion`/`prosody` combination
 (e.g. slower tempo + a low-arousal emotion) or handle it as a separate audio-processing step
-instead. **This generalizes to a caution for the rest of the 34-tag inventory (only 4 have been
-checked by ear so far, per T0): a tag can measurably change generation output (energy, pausing)
+instead. **This generalizes to a caution for the rest of the 43-tag inventory (only 4 have been
+checked by ear so far, per T0, and the 9 `sfx:*` tags have had no audio check at all): a tag can
+measurably change generation output (energy, pausing)
 without producing the semantic effect its name promises.** M4-T5's tag dump/chunk-boundary check
 must evaluate each remaining tag against what it is supposed to *mean*, not merely whether some
 metric moves when it is applied — a moved metric is necessary evidence, not sufficient proof, per
@@ -295,8 +303,9 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   which looked like the wrong direction — is now understood as a misleading proxy, not a failed
   emotion, since the owner confirms `sadness` sounds genuinely sad. F0 spread/std and pause
   duration (which did point the expected direction) are corroborated instead; **do not use F0
-  median as a pass/fail signal in M4-T4** (see that task's updated proxy list below). Only 4 of 34
-  tags have been checked by ear; this verdict does not extend to the other 30 (see M4-T5).
+  median as a pass/fail signal in M4-T4** (see that task's updated proxy list below). Only 4 of 43
+  tags have been checked by ear; this verdict does not extend to the other 39, including all 9
+  `sfx:*` tags (see M4-T5).
   *Tier:* **opus** for the verdict framing/aggregation; the generation itself is mechanical.
 
 - [x] **M4-T1. Profile the existing MLX pipeline stage-by-stage.** **DONE — measured, PR #95
@@ -430,13 +439,14 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   State the "codec stays full precision" fact correctly: it is true because the codec sits outside
   the quantized parameter tree entirely (§0.6a), not because `copy_model_files` protects it.
   **Third-party weight rejection criterion, applied before downloading anything** (P7): pull
-  `added_tokens` from the candidate checkpoint's `tokenizer.json` and confirm the same 34 markup
-  tags at the same ids (151681-151701 emotion, 151704-151706 style, 151716-151726 prosody, per
-  §0.4's measured inventory). A mismatch means a different tokenizer generation — do not download
+  `added_tokens` from the candidate checkpoint's `tokenizer.json` and confirm the same 43 markup
+  tags at the same ids (151681-151701 emotion, 151704-151706 style, 151707-151715 sfx,
+  151716-151726 prosody, per §0.4's measured inventory). A mismatch means a different tokenizer
+  generation — do not download
   those weights.
   **Predicate variant hypothesis, to compare in T4**: the upstream predicate
   (`model.py:82-85`, confirmed `isinstance(module, (nn.Linear, nn.Embedding))`) quantizes
-  `nn.Embedding`, which means the embeddings for all 34 markup tokens (ids 151681+) land in
+  `nn.Embedding`, which means the embeddings for all 43 markup tokens (ids 151681+) land in
   quantization groups of 64 alongside high-frequency ordinary tokens — the most plausible
   mechanism for an "emotion gets smoothed out" failure. **Variant A** = the upstream predicate
   as-is. **Variant B** = the same predicate restricted to `isinstance(module, nn.Linear)` only
@@ -495,14 +505,20 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 | Quantized KV-cache | Frees memory, does not by itself deliver speed — kept only as an *enabler* to raise T2's batch-size ceiling if 2/4 hit memory pressure. |
 | Vocoder kernel optimization (the whole M0-M3 Mojo/MAX effort) | Measured ceiling ≈4% of wall time (M4-T1). Rejected on data, not on suspicion. |
 
-- [x] **M4-T5. Dump the full 34-tag dictionary and check chunk-boundary behavior.** Per §0.4, this
+- [x] **M4-T5. Dump the full tag dictionary and check chunk-boundary behavior.** Per §0.4, this
   is now a lookup, not research — the tag inventory (21 emotion / 10 prosody / 3 style, ids
   151681-151701 / 151704-151706 / 151716-151726) is already measured from `tokenizer.json`; this
   task exports it into project docs and tests each tag once across a synthetic chunk boundary
-  (relevant once T7's segmentation exists). **Done** —
-  [`docs/research/audiobook/m4-tag-inventory-results.md`](m4-tag-inventory-results.md): all 34
-  tags generated and objectively triaged (Group A 20 / B 7 / C 7 — all four `speed_*` tags and
-  `style:whispering` land in C), plus two owner-requested extensions covered in the same pass:
+  (relevant once T7's segmentation exists). **Done, but incomplete** — the task's own inventory
+  pass missed the `sfx:*` category (9 tags, ids 151707-151715) entirely, so only 34 of the
+  checkpoint's real 43 control tags were dumped/tested; this was discovered and corrected in a
+  later pass (issue #57) that added the 9 `sfx:*` tags to `VALID_TAGS` and to
+  `m4-tag-inventory-results.md`'s own accounting, but did **not** re-run the audio triage below
+  for them — see that doc's note. —
+  [`docs/research/audiobook/m4-tag-inventory-results.md`](m4-tag-inventory-results.md): the 34
+  emotion/prosody/style tags were generated and objectively triaged (Group A 20 / B 7 / C 7 — all
+  four `speed_*` tags and `style:whispering` land in C), plus two owner-requested extensions
+  covered in the same pass:
   terminal/falling sentence-end intonation (no dedicated tag exists; the segmentation-boundary
   question is flagged for listening, not decided by metric) and a first-ever Higgs stress-mark
   notation probe (6 notations x 3 Russian homograph pairs, STT round-tripped) that also
@@ -620,7 +636,7 @@ honesty          a partial or failing stage is written up as partial or failing.
   8-bit-vs-FP16 caveat, not a clean model-vs-model claim.
 - **NOT** streaming generation.
 - **NOT** a standalone Whisper integration without a separate justification.
-- **NOT** inventing new control tags — the 34 that exist are the complete inventory (§0.4).
+- **NOT** inventing new control tags — the 43 that exist are the complete inventory (§0.4).
 - **NOT** using a third-party SER classifier to judge sentiment fidelity — replaced by the ASR
   round-trip + prosodic-metric proxy (M4-T4) and the owner's own blind-pair verdict.
 
@@ -629,9 +645,9 @@ honesty          a partial or failing stage is written up as partial or failing.
 - That Higgs audibly obeys its control tags **in general** — T0 confirmed only that `emotion` tags
   are distinguishable (`sadness`/`elation`, owner verdict, `m4-sentiment-results.md` §6) and that
   `style:whispering` specifically does **not** produce whisper-quality speech (only a quieter,
-  otherwise-unchanged rendering). 4 of the 34 tags have been checked by ear; the other 30 (and
-  `prosody` tags beyond `speed_slow`) remain unverified — do not generalize the T0 pass to "all
-  tags work."
+  otherwise-unchanged rendering). 4 of the 43 tags have been checked by ear; the other 39 (and
+  `prosody` tags beyond `speed_slow`, and all 9 `sfx:*` tags) remain unverified — do not
+  generalize the T0 pass to "all tags work."
 - That batching will actually deliver >= 1.5x (T2 measures this; it is not assumed).
 - That 8-bit quantization will be sufficient, or safe for sentiment, before T4's gate runs.
 - That sentiment survives chunk boundaries — untested until T5/T7.

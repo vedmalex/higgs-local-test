@@ -317,19 +317,20 @@ def split_sentences(text: str) -> list[str]:
 # Control-tag tracking and chunking
 # ---------------------------------------------------------------------------
 
-TAG_RE = re.compile(r"<\|(emotion|prosody|style):([a-z0-9_]+)\|>")
+TAG_RE = re.compile(r"<\|(emotion|prosody|style|sfx):([a-z0-9_]+)\|>")
 
 # Loose shape used only for validation -- deliberately wider than TAG_RE (any category
 # word, any case, digits) so a typo'd/mis-cased tag is *caught*, not silently ignored.
 _TAG_SHAPE_RE = re.compile(r"<\|[A-Za-z0-9_]+:[A-Za-z0-9_]+\|>")
 
-# The full, exact set of the model's 34 emotion/prosody/style control tags, extracted
+# The full, exact set of the model's 43 emotion/prosody/style/sfx control tags, extracted
 # directly from bosonai/higgs-tts-3-4b's tokenizer.json `added_tokens`
 # (snapshot 7556c17e05201fccd9c8cc120bc216dcc7b5d561, the pinned revision this project
-# uses -- see AGENTS.md's model-constraints section). Any control-tag-shaped span in the
-# input that is not exactly one of these is a bug in the source text (typo, wrong case, or
-# an invented tag) and must fail loudly before a multi-hour run starts, per PROMPTING.md's
-# instruction to never invent tags.
+# uses -- see AGENTS.md's model-constraints section) and cross-checked against that
+# snapshot's PROMPTING.md "Full tag catalog (43)": 21 emotion + 10 prosody + 3 style +
+# 9 sfx. Any control-tag-shaped span in the input that is not exactly one of these is a
+# bug in the source text (typo, wrong case, or an invented tag) and must fail loudly
+# before a multi-hour run starts, per PROMPTING.md's instruction to never invent tags.
 VALID_TAGS = {
     "<|emotion:affection|>", "<|emotion:amusement|>", "<|emotion:anger|>",
     "<|emotion:arousal|>", "<|emotion:awe|>", "<|emotion:bitterness|>",
@@ -343,6 +344,9 @@ VALID_TAGS = {
     "<|prosody:speed_fast|>", "<|prosody:speed_slow|>", "<|prosody:speed_very_fast|>",
     "<|prosody:speed_very_slow|>", "<|style:shouting|>", "<|style:singing|>",
     "<|style:whispering|>",
+    "<|sfx:burping|>", "<|sfx:cough|>", "<|sfx:crying|>", "<|sfx:humming|>",
+    "<|sfx:laughter|>", "<|sfx:screaming|>", "<|sfx:sigh|>", "<|sfx:sneeze|>",
+    "<|sfx:sniff|>",
 }
 
 # Per PROMPTING.md (bosonai/higgs-tts-3-4b, verified against the cached snapshot):
@@ -350,9 +354,17 @@ VALID_TAGS = {
 # sentence -- they are not a sustained state and must never be reopened as one.
 INLINE_ONE_SHOT_PROSODY = {"pause", "long_pause"}
 
+# Per the same PROMPTING.md: ALL sfx tags are inline, one-shot events ("Insert at the
+# exact position in the sentence where the effect should occur"), never a sustained
+# state -- unlike emotion/prosody/style, there is no sentence-level sfx placement at
+# all. Reopening an sfx tag at the start of every subsequent chunk/sentence would make a
+# character cough or sneeze again at the start of each one, which is not what the source
+# text authored. `active` (in chunk_sentences) therefore never gains an "sfx" key -- see
+# the `category == "sfx"` skip below -- so _reopen_prefix can never reopen it.
+
 
 def validate_control_tags(text: str) -> None:
-    """Raise ValueError on any control-tag-shaped span that is not one of the 34 known-valid
+    """Raise ValueError on any control-tag-shaped span that is not one of the 43 known-valid
     Higgs TTS 3 tags (F11). Without this, a typo like ``<|emotion:Elation|>`` silently fails
     to match TAG_RE, is never tracked as an active tag, and is read aloud as literal text (or
     silently dropped) for the rest of the chapter with no warning -- exactly the kind of
@@ -477,8 +489,8 @@ def chunk_sentences(
                          whole sentence") -- see m4-chapter-results.md for the empirical
                          test that motivated making this the default.
 
-    Inline one-shot prosody (`pause`, `long_pause`) is never reopened; it fires once at
-    its authored position and carries no state.
+    Inline one-shot prosody (`pause`, `long_pause`) and all `sfx` tags are never
+    reopened; each fires once at its authored position and carries no state.
 
     Any sentence longer than `max_chars` on its own is force-split (F2, see
     `_force_split_long_sentence`) with a warning, so `max_chars` is a real hard cap on
@@ -555,6 +567,10 @@ def chunk_sentences(
         cur_len += store_len + 1
 
         for category, tag_name in own_tags:
+            if category == "sfx":
+                # Always inline/one-shot (PROMPTING.md) -- never tracked as active state,
+                # so it can never be reopened at the top of a later chunk/sentence.
+                continue
             if category == "prosody" and tag_name in INLINE_ONE_SHOT_PROSODY:
                 continue
             active[category] = f"<|{category}:{tag_name}|>"

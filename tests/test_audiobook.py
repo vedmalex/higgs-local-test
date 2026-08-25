@@ -417,6 +417,73 @@ class TestF10TagReopenMidSentence(unittest.TestCase):
         self.assertNotIn("<|emotion:sad|>Второе", text)
 
 
+class TestSfxOneShotNotReopened(unittest.TestCase):
+    """Refs #57 sfx tag inventory: PROMPTING.md places `sfx` in the same "inline" bucket
+    as `pause`/`long_pause` -- a one-shot effect at an exact position, not a sustained
+    state. If `sfx` were tracked in `active` like emotion/prosody/style, a chunk boundary
+    right after an `<|sfx:sneeze|>` tag would reopen it at the top of the next chunk,
+    making the character sneeze again there -- a defect that is invisible in code review
+    and expensive to catch only after a full book has been generated.
+    """
+
+    def test_prosody_pause_is_not_reopened_across_a_chunk_boundary(self):
+        max_chars = 50
+        sentences = [
+            "Первое <|prosody:pause|> предложение здесь.",
+            "Второе предложение отдельным куском тут.",
+        ]
+        chunks = ab.chunk_sentences(sentences, max_chars=max_chars, tag_scope="chunk")
+        self.assertGreaterEqual(len(chunks), 2)
+        for c in chunks[1:]:
+            self.assertNotIn("<|prosody:pause|>", c.text)
+
+    def test_sfx_tag_is_not_reopened_across_a_chunk_boundary(self):
+        max_chars = 50
+        sentences = [
+            "Первое <|sfx:sneeze|>апчхи предложение здесь.",
+            "Второе предложение отдельным куском тут.",
+        ]
+        chunks = ab.chunk_sentences(sentences, max_chars=max_chars, tag_scope="chunk")
+        self.assertGreaterEqual(len(chunks), 2)
+        for c in chunks[1:]:
+            self.assertNotIn("<|sfx:sneeze|>", c.text)
+
+    def test_sfx_tag_is_not_reopened_across_a_chunk_boundary_sentence_scope(self):
+        max_chars = 50
+        sentences = [
+            "Первое <|sfx:sneeze|>апчхи предложение здесь.",
+            "Второе предложение отдельным куском тут.",
+        ]
+        chunks = ab.chunk_sentences(sentences, max_chars=max_chars, tag_scope="sentence")
+        self.assertGreaterEqual(len(chunks), 2)
+        for c in chunks[1:]:
+            self.assertNotIn("<|sfx:sneeze|>", c.text)
+
+    def test_sfx_tag_does_not_suppress_an_active_emotion_reopen(self):
+        # An sfx tag in a sentence must not be mistaken for an emotion/prosody/style
+        # declaration that would suppress reopening of a genuinely active category.
+        sentences = [
+            "<|emotion:sadness|>Первое <|sfx:sigh|>предложение здесь.",
+            "Второе предложение.",
+        ]
+        chunks = ab.chunk_sentences(sentences, max_chars=1000, tag_scope="sentence")
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("<|emotion:sadness|>", chunks[0].text)
+
+
+class TestSfxCategoryParsing(unittest.TestCase):
+    """The `sfx` category must be recognized by TAG_RE (not silently dropped like an
+    unrecognized category would be) once VALID_TAGS accepts it."""
+
+    def test_tag_re_parses_sfx_category(self):
+        matches = ab.TAG_RE.findall("текст <|sfx:cough|> текст")
+        self.assertEqual(matches, [("sfx", "cough")])
+
+    def test_sentence_own_tags_includes_sfx(self):
+        tags = ab._sentence_own_tags("<|sfx:laughter|>Ха-ха!")
+        self.assertEqual(tags, [("sfx", "laughter")])
+
+
 class TestF11TagValidation(unittest.TestCase):
     """F11: TAG_RE's character class ([a-z_]+) silently failed to match a tag with a
     digit or uppercase letter (e.g. a typo like '<|emotion:Elation|>'), so the tag was
@@ -434,10 +501,26 @@ class TestF11TagValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             ab.validate_control_tags("Текст с <|emotion:ecstasy|> тегом.")
 
-    def test_all_34_known_tags_are_accepted(self):
-        self.assertEqual(len(ab.VALID_TAGS), 34)
+    def test_all_43_known_tags_are_accepted(self):
+        # 21 emotion + 10 prosody + 3 style + 9 sfx, per the pinned checkpoint's
+        # PROMPTING.md "Full tag catalog (43)" (bosonai/higgs-tts-3-4b,
+        # snapshot 7556c17e05201fccd9c8cc120bc216dcc7b5d561).
+        self.assertEqual(len(ab.VALID_TAGS), 43)
         for tag in ab.VALID_TAGS:
             ab.validate_control_tags(f"проверка {tag} тега")  # must not raise
+
+    def test_sfx_tags_are_recognized_and_correctly_categorized(self):
+        expected_sfx = {
+            "<|sfx:cough|>", "<|sfx:laughter|>", "<|sfx:crying|>", "<|sfx:screaming|>",
+            "<|sfx:burping|>", "<|sfx:humming|>", "<|sfx:sigh|>", "<|sfx:sniff|>",
+            "<|sfx:sneeze|>",
+        }
+        actual_sfx = {t for t in ab.VALID_TAGS if t.startswith("<|sfx:")}
+        self.assertEqual(actual_sfx, expected_sfx)
+
+    def test_unknown_sfx_tag_is_still_rejected(self):
+        with self.assertRaises(ValueError):
+            ab.validate_control_tags("Текст с <|sfx:giggle|> тегом.")
 
 
 class TestF12TruncatedWavDetection(unittest.TestCase):
