@@ -1,0 +1,147 @@
+{
+  "seeded": [
+    {
+      "tag": "seeded_0",
+      "text": "Сегодня прекрасная погода для прогулки в парке.",
+      "seed": 42,
+      "wall_seconds": 20.31,
+      "duration_s": 3.32,
+      "f0_median_hz": 244.9,
+      "f0_std_hz": 61.7,
+      "audio_sha256_prefix": "fb33c0e04ae4ecfe",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/seeded_0.wav"
+    },
+    {
+      "tag": "seeded_1",
+      "text": "Компьютер медленно загружался этим утром.",
+      "seed": 42,
+      "wall_seconds": 10.59,
+      "duration_s": 2.64,
+      "f0_median_hz": 105.7,
+      "f0_std_hz": 52.6,
+      "audio_sha256_prefix": "247eaa7226017091",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/seeded_1.wav"
+    },
+    {
+      "tag": "seeded_2",
+      "text": "Она приготовила вкусный борщ на обед.",
+      "seed": 42,
+      "wall_seconds": 10.92,
+      "duration_s": 2.68,
+      "f0_median_hz": 180.5,
+      "f0_std_hz": 55.3,
+      "audio_sha256_prefix": "fb92df6fb3000c3f",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/seeded_2.wav"
+    },
+    {
+      "tag": "seeded_3",
+      "text": "Дети играли во дворе до самого вечера.",
+      "seed": 42,
+      "wall_seconds": 11.56,
+      "duration_s": 2.84,
+      "f0_median_hz": 243.7,
+      "f0_std_hz": 77.3,
+      "audio_sha256_prefix": "90e6beb667da9eaa",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/seeded_3.wav"
+    },
+    {
+      "tag": "seeded_4",
+      "text": "Поезд опоздал на пятнадцать минут.",
+      "seed": 42,
+      "wall_seconds": 9.98,
+      "duration_s": 2.4,
+      "f0_median_hz": 187.5,
+      "f0_std_hz": 63.5,
+      "audio_sha256_prefix": "afef7a7d3964d350",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/seeded_4.wav"
+    },
+    {
+      "tag": "seeded_5",
+      "text": "Река тихо несла свои воды мимо старого моста.",
+      "seed": 42,
+      "wall_seconds": 14.25,
+      "duration_s": 3.64,
+      "f0_median_hz": 136.4,
+      "f0_std_hz": 42.8,
+      "audio_sha256_prefix": "bb283169bd3d1733",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/seeded_5.wav"
+    }
+  ],
+  "unseeded": [
+    {
+      "tag": "unseeded_0",
+      "text": "Сегодня прекрасная погода для прогулки в парке.",
+      "seed": null,
+      "wall_seconds": 13.1,
+      "duration_s": 3.36,
+      "f0_median_hz": 192.8,
+      "f0_std_hz": 50.2,
+      "audio_sha256_prefix": "18c84eaa5e7efbda",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/unseeded_0.wav"
+    },
+    {
+      "tag": "unseeded_1",
+      "text": "Компьютер медленно загружался этим утром.",
+      "seed": null,
+      "wall_seconds": 9.0,
+      "duration_s": 2.16,
+      "f0_median_hz": 111.1,
+      "f0_std_hz": 48.3,
+      "audio_sha256_prefix": "e1d5769a38ee9389",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/unseeded_1.wav"
+    },
+    {
+      "tag": "unseeded_2",
+      "text": "Она приготовила вкусный борщ на обед.",
+      "seed": null,
+      "wall_seconds": 13.64,
+      "duration_s": 3.48,
+      "f0_median_hz": 179.1,
+      "f0_std_hz": 77.0,
+      "audio_sha256_prefix": "791e0dcd6ef43479",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/unseeded_2.wav"
+    },
+    {
+      "tag": "unseeded_3",
+      "text": "Дети играли во дворе до самого вечера.",
+      "seed": null,
+      "wall_seconds": 11.84,
+      "duration_s": 2.96,
+      "f0_median_hz": 114.3,
+      "f0_std_hz": 76.5,
+      "audio_sha256_prefix": "3aedc88479e851f6",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/unseeded_3.wav"
+    },
+    {
+      "tag": "unseeded_4",
+      "text": "Поезд опоздал на пятнадцать минут.",
+      "seed": null,
+      "wall_seconds": 13.29,
+      "duration_s": 3.4,
+      "f0_median_hz": 125.7,
+      "f0_std_hz": 140.5,
+      "audio_sha256_prefix": "8c8a5e5ba9d919ae",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/unseeded_4.wav"
+    },
+    {
+      "tag": "unseeded_5",
+      "text": "Река тихо несла свои воды мимо старого моста.",
+      "seed": null,
+      "wall_seconds": 13.86,
+      "duration_s": 3.56,
+      "f0_median_hz": 142.9,
+      "f0_std_hz": 45.8,
+      "audio_sha256_prefix": "7238bee7d5c14643",
+      "path": "/Users/vedmalex/work/higgs-local-test/.plan/seed_experiment_wavs/unseeded_5.wav"
+    }
+  ],
+  "bitwise_check": {
+    "text": "Сегодня прекрасная погода для прогулки в парке.",
+    "seed": 42,
+    "sha256_a": "fb33c0e04ae4ecfe0c2c149fa8377385dc1cf2019d2bba6710876d30a32ef0bb",
+    "sha256_b": "fb33c0e04ae4ecfe0c2c149fa8377385dc1cf2019d2bba6710876d30a32ef0bb",
+    "identical": true,
+    "f0_a": 244.9,
+    "f0_b": 244.9
+  }
+}

@@ -123,6 +123,65 @@ class TestTaskSetJSONFilesValidate(unittest.TestCase):
                 self.assertTrue(ts.tasks)
 
 
+class TestMissingClipDoesNotTakeDownTheApp(unittest.TestCase):
+    """A missing wav in ONE set must not make the whole app unloadable.
+
+    Regression: `output/` is gitignored, so a cleaned output/, a fresh
+    checkout, or a removed agent worktree that held the only copy of a clip
+    left `load_task_sets()` raising at import time — which took down every
+    other set too, including voice casting whose own audio was present.
+    Structural authoring faults must still refuse to load, so the two cases
+    are asserted together here rather than in separate tests.
+    """
+
+    def _doc(self, clip_path):
+        return {
+            "id": "probe_set",
+            "title": "probe",
+            "tasks": [{
+                "id": "probe-task",
+                "type": "pair_compare",
+                "answer_kind": "which",
+                "question": "?",
+                "options": ["A", "B"],
+                "clips": {"A": clip_path, "B": clip_path},
+                "hidden": {"correct_answer": "A"},
+            }],
+        }
+
+    def test_missing_clip_raises_the_transient_subclass(self):
+        doc = self._doc("output/definitely_not_here_12345/nope.wav")
+        with self.assertRaises(server.MissingClipError):
+            server.TaskSet(doc, Path("<probe>"))
+
+    def test_structural_faults_stay_plain_value_errors(self):
+        """Not a MissingClipError — these are real bugs, never skipped."""
+        doc = self._doc("output/whatever.wav")
+        doc["tasks"][0]["type"] = "no_such_type"
+        with self.assertRaises(ValueError) as ctx:
+            server.TaskSet(doc, Path("<probe>"))
+        self.assertNotIsInstance(ctx.exception, server.MissingClipError)
+
+    def test_escaping_clip_path_is_not_treated_as_transient(self):
+        doc = self._doc("../../etc/passwd")
+        with self.assertRaises(ValueError) as ctx:
+            server.TaskSet(doc, Path("<probe>"))
+        self.assertNotIsInstance(ctx.exception, server.MissingClipError)
+
+    def test_load_task_sets_survives_a_set_with_a_missing_clip(self):
+        """The real loader, with a genuinely broken set dropped into the
+        live task_sets dir — every other set must still come back."""
+        broken = SURVEY_DIR / "task_sets" / "_zz_probe_broken.json"
+        with broken.open("w", encoding="utf-8") as fh:
+            json.dump(self._doc("output/definitely_not_here_12345/nope.wav"), fh)
+        try:
+            sets = server.load_task_sets()
+        finally:
+            broken.unlink()
+        self.assertNotIn("probe_set", sets, "the broken set should be skipped")
+        self.assertTrue(sets, "every other set must still load")
+
+
 class TestServerAnswerLogic(unittest.TestCase):
     def test_compute_matches_expected_differ(self):
         task = {"answer_kind": "differ", "hidden": {"correct_answer": "Да, отличаются"}}

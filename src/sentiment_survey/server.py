@@ -74,6 +74,23 @@ SKIP_LABEL = "Пропустить — уже есть более ранний �
 # Task set loading
 # --------------------------------------------------------------------------- #
 
+class MissingClipError(ValueError):
+    """A task set references a clip that is not on disk right now.
+
+    Distinct from every other validation failure on purpose: `output/` is
+    gitignored and regenerable, so a missing wav is a *transient* condition
+    (a fresh checkout, a cleaned output/, a removed agent worktree that held
+    the only copy) — not a defect in the set's definition. Structural faults
+    (duplicate task id, unknown type, no clips, a path escaping the repo)
+    stay plain ValueErrors and still refuse to load, because those are real
+    authoring bugs that silence would hide.
+
+    Skipping just the affected set keeps the rest of the app usable: one
+    missing wav used to take down every task set, including ones whose audio
+    was present, which is how the owner lost access to voice casting.
+    """
+
+
 class TaskSet:
     def __init__(self, doc: dict, source_path: Path | str):
         self.id = doc["id"]
@@ -113,7 +130,9 @@ class TaskSet:
                 if REPO_ROOT not in abs_path.parents and abs_path != REPO_ROOT:
                     raise ValueError(f"{self.source_path}: task {t['id']!r} clip {role!r} escapes repo root")
                 if not abs_path.is_file():
-                    raise ValueError(f"{self.source_path}: task {t['id']!r} clip {role!r} missing on disk: {abs_path}")
+                    raise MissingClipError(
+                        f"{self.source_path}: task {t['id']!r} clip {role!r} missing on disk: {abs_path}"
+                    )
 
     def task(self, task_id: str) -> dict | None:
         return self._tasks_by_id.get(task_id)
@@ -161,7 +180,13 @@ def load_task_sets() -> dict[str, TaskSet]:
 
     sets: dict[str, TaskSet] = {}
     for path, doc in json_docs:
-        ts = TaskSet(doc, path)
+        try:
+            ts = TaskSet(doc, path)
+        except MissingClipError as exc:
+            # Transient, regenerable: skip this one set, keep serving the rest.
+            # Structural ValueErrors deliberately still propagate.
+            print(f"warning: skipping set from {path.name}: {exc}", file=sys.stderr)
+            continue
         sets[ts.id] = ts
 
     for doc in dynamic_docs:
