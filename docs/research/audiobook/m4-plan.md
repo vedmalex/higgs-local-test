@@ -57,7 +57,8 @@ arithmetic problem M4's optimization lane exists to attack.
 **0.3 The decoder is already MLX on GPU.** Nothing about the vocoder needs porting to run on
 Metal — it already does. The MLX-Audio probe recorded 10/10 PASSED, but that is a correctness
 check only (load + inference completes, output is finite/well-shaped); it says nothing about
-speed or sentiment fidelity (§8).
+speed or sentiment fidelity (§8). The probe's script and raw output are committed at
+[`../mojo-max/m4-mlx-probe-results.md`](../mojo-max/m4-mlx-probe-results.md).
 
 **0.4 Sentiment tag inventory — measured directly against the real checkpoint's `tokenizer.json`,
 not assumed.** `bosonai/higgs-tts-3-4b`'s tokenizer has **84 `added_tokens`**, of which **34 are
@@ -538,7 +539,8 @@ honesty          a partial or failing stage is written up as partial or failing.
 - That sentiment survives chunk boundaries — untested until T5/T7.
 - That Russian quality holds at full-chapter scale — untested until T6.
 - No claim about STT accuracy before S1 produces verified reference transcripts.
-- The MLX-Audio probe's 10/10 PASSED measured correctness only, not speed or sentiment.
+- The MLX-Audio probe's 10/10 PASSED measured correctness only, not speed or sentiment
+  ([`../mojo-max/m4-mlx-probe-results.md`](../mojo-max/m4-mlx-probe-results.md)).
 - The result of this plan is not production-grade.
 - Which of the two measured RTF values (4.26 vs. 6.56, §0.2) is the "real" one for planning
   purposes — that is exactly what M4-T1b exists to resolve, and until it does, this plan reports

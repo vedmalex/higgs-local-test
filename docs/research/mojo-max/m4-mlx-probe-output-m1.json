@@ -1,0 +1,344 @@
+[
+  {
+    "case_id": "ct_stride8_op0",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        16,
+        136
+      ],
+      "ref_shape": [
+        1,
+        16,
+        136
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.5506182049485062e-07,
+      "nan_inf": 0,
+      "case_id": "ct_stride8_op0",
+      "cfg": {
+        "kind": "convtranspose",
+        "c_in": 16,
+        "c_out": 16,
+        "kernel": 16,
+        "stride": 8,
+        "padding": 0,
+        "output_padding": 0,
+        "seq_len": 16,
+        "seed": 9012
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 16, 136], \"ref_shape\": [1, 16, 136], \"shape_match\": true, \"max_abs_err\": 1.5506182049485062e-07, \"nan_inf\": 0, \"case_id\": \"ct_stride8_op0\", \"cfg\": {\"kind\": \"convtranspose\", \"c_in\": 16, \"c_out\": 16, \"kernel\": 16, \"stride\": 8, \"padding\": 0, \"output_padding\": 0, \"seq_len\": 16, \"seed\": 9012}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "ct_stride5_op1",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        16,
+        86
+      ],
+      "ref_shape": [
+        1,
+        16,
+        86
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.275368469166871e-07,
+      "nan_inf": 0,
+      "case_id": "ct_stride5_op1",
+      "cfg": {
+        "kind": "convtranspose",
+        "c_in": 16,
+        "c_out": 16,
+        "kernel": 10,
+        "stride": 5,
+        "padding": 0,
+        "output_padding": 1,
+        "seq_len": 16,
+        "seed": 9012
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 16, 86], \"ref_shape\": [1, 16, 86], \"shape_match\": true, \"max_abs_err\": 1.275368469166871e-07, \"nan_inf\": 0, \"case_id\": \"ct_stride5_op1\", \"cfg\": {\"kind\": \"convtranspose\", \"c_in\": 16, \"c_out\": 16, \"kernel\": 10, \"stride\": 5, \"padding\": 0, \"output_padding\": 1, \"seq_len\": 16, \"seed\": 9012}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "ct_stride4_op0",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        16,
+        68
+      ],
+      "ref_shape": [
+        1,
+        16,
+        68
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.5366556826990063e-07,
+      "nan_inf": 0,
+      "case_id": "ct_stride4_op0",
+      "cfg": {
+        "kind": "convtranspose",
+        "c_in": 16,
+        "c_out": 16,
+        "kernel": 8,
+        "stride": 4,
+        "padding": 0,
+        "output_padding": 0,
+        "seq_len": 16,
+        "seed": 9012
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 16, 68], \"ref_shape\": [1, 16, 68], \"shape_match\": true, \"max_abs_err\": 1.5366556826990063e-07, \"nan_inf\": 0, \"case_id\": \"ct_stride4_op0\", \"cfg\": {\"kind\": \"convtranspose\", \"c_in\": 16, \"c_out\": 16, \"kernel\": 8, \"stride\": 4, \"padding\": 0, \"output_padding\": 0, \"seq_len\": 16, \"seed\": 9012}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "ct_stride2_op0",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        16,
+        34
+      ],
+      "ref_shape": [
+        1,
+        16,
+        34
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.4742174703208377e-07,
+      "nan_inf": 0,
+      "case_id": "ct_stride2_op0",
+      "cfg": {
+        "kind": "convtranspose",
+        "c_in": 16,
+        "c_out": 16,
+        "kernel": 4,
+        "stride": 2,
+        "padding": 0,
+        "output_padding": 0,
+        "seq_len": 16,
+        "seed": 9012
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 16, 34], \"ref_shape\": [1, 16, 34], \"shape_match\": true, \"max_abs_err\": 1.4742174703208377e-07, \"nan_inf\": 0, \"case_id\": \"ct_stride2_op0\", \"cfg\": {\"kind\": \"convtranspose\", \"c_in\": 16, \"c_out\": 16, \"kernel\": 4, \"stride\": 2, \"padding\": 0, \"output_padding\": 0, \"seq_len\": 16, \"seed\": 9012}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "ct_stride3_op1",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        16,
+        52
+      ],
+      "ref_shape": [
+        1,
+        16,
+        52
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.851479327630301e-07,
+      "nan_inf": 0,
+      "case_id": "ct_stride3_op1",
+      "cfg": {
+        "kind": "convtranspose",
+        "c_in": 16,
+        "c_out": 16,
+        "kernel": 6,
+        "stride": 3,
+        "padding": 0,
+        "output_padding": 1,
+        "seq_len": 16,
+        "seed": 9012
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 16, 52], \"ref_shape\": [1, 16, 52], \"shape_match\": true, \"max_abs_err\": 1.851479327630301e-07, \"nan_inf\": 0, \"case_id\": \"ct_stride3_op1\", \"cfg\": {\"kind\": \"convtranspose\", \"c_in\": 16, \"c_out\": 16, \"kernel\": 6, \"stride\": 3, \"padding\": 0, \"output_padding\": 1, \"seq_len\": 16, \"seed\": 9012}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "ct_m3_real_stride5",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        256,
+        100
+      ],
+      "ref_shape": [
+        1,
+        256,
+        100
+      ],
+      "shape_match": true,
+      "max_abs_err": 3.2030380889835897e-06,
+      "nan_inf": 0,
+      "case_id": "ct_m3_real_stride5",
+      "cfg": {
+        "kind": "convtranspose",
+        "c_in": 512,
+        "c_out": 256,
+        "kernel": 10,
+        "stride": 5,
+        "padding": 3,
+        "output_padding": 1,
+        "seq_len": 20,
+        "seed": 57305
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 256, 100], \"ref_shape\": [1, 256, 100], \"shape_match\": true, \"max_abs_err\": 3.2030380889835897e-06, \"nan_inf\": 0, \"case_id\": \"ct_m3_real_stride5\", \"cfg\": {\"kind\": \"convtranspose\", \"c_in\": 512, \"c_out\": 256, \"kernel\": 10, \"stride\": 5, \"padding\": 3, \"output_padding\": 1, \"seq_len\": 20, \"seed\": 57305}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "conv1d_dilation1",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        256,
+        86
+      ],
+      "ref_shape": [
+        1,
+        256,
+        86
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.7691219243332057e-05,
+      "nan_inf": 0,
+      "case_id": "conv1d_dilation1",
+      "cfg": {
+        "kind": "conv1d",
+        "c_in": 256,
+        "c_out": 256,
+        "kernel": 7,
+        "dilation": 1,
+        "padding": 3,
+        "seq_len": 86,
+        "seed": 1
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 256, 86], \"ref_shape\": [1, 256, 86], \"shape_match\": true, \"max_abs_err\": 1.7691219243332057e-05, \"nan_inf\": 0, \"case_id\": \"conv1d_dilation1\", \"cfg\": {\"kind\": \"conv1d\", \"c_in\": 256, \"c_out\": 256, \"kernel\": 7, \"dilation\": 1, \"padding\": 3, \"seq_len\": 86, \"seed\": 1}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "conv1d_dilation3",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        256,
+        86
+      ],
+      "ref_shape": [
+        1,
+        256,
+        86
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.646213176886846e-05,
+      "nan_inf": 0,
+      "case_id": "conv1d_dilation3",
+      "cfg": {
+        "kind": "conv1d",
+        "c_in": 256,
+        "c_out": 256,
+        "kernel": 7,
+        "dilation": 3,
+        "padding": 9,
+        "seq_len": 86,
+        "seed": 3
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 256, 86], \"ref_shape\": [1, 256, 86], \"shape_match\": true, \"max_abs_err\": 1.646213176886846e-05, \"nan_inf\": 0, \"case_id\": \"conv1d_dilation3\", \"cfg\": {\"kind\": \"conv1d\", \"c_in\": 256, \"c_out\": 256, \"kernel\": 7, \"dilation\": 3, \"padding\": 9, \"seq_len\": 86, \"seed\": 3}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "conv1d_dilation9",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        256,
+        86
+      ],
+      "ref_shape": [
+        1,
+        256,
+        86
+      ],
+      "shape_match": true,
+      "max_abs_err": 1.3179415519815052e-05,
+      "nan_inf": 0,
+      "case_id": "conv1d_dilation9",
+      "cfg": {
+        "kind": "conv1d",
+        "c_in": 256,
+        "c_out": 256,
+        "kernel": 7,
+        "dilation": 9,
+        "padding": 27,
+        "seq_len": 86,
+        "seed": 9
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 256, 86], \"ref_shape\": [1, 256, 86], \"shape_match\": true, \"max_abs_err\": 1.3179415519815052e-05, \"nan_inf\": 0, \"case_id\": \"conv1d_dilation9\", \"cfg\": {\"kind\": \"conv1d\", \"c_in\": 256, \"c_out\": 256, \"kernel\": 7, \"dilation\": 9, \"padding\": 27, \"seq_len\": 86, \"seed\": 9}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  },
+  {
+    "case_id": "snake",
+    "returncode": 0,
+    "verdict": "PASSED",
+    "result": {
+      "got_shape": [
+        1,
+        256,
+        86
+      ],
+      "ref_shape": [
+        1,
+        256,
+        86
+      ],
+      "shape_match": true,
+      "max_abs_err": 4.1266541117579436e-07,
+      "nan_inf": 0,
+      "case_id": "snake",
+      "cfg": {
+        "kind": "snake",
+        "c": 256,
+        "seq_len": 86,
+        "seed": 42
+      },
+      "mlx_default_device": "Device(gpu, 0)"
+    },
+    "stdout_tail": "RESULT_JSON={\"got_shape\": [1, 256, 86], \"ref_shape\": [1, 256, 86], \"shape_match\": true, \"max_abs_err\": 4.1266541117579436e-07, \"nan_inf\": 0, \"case_id\": \"snake\", \"cfg\": {\"kind\": \"snake\", \"c\": 256, \"seq_len\": 86, \"seed\": 42}, \"mlx_default_device\": \"Device(gpu, 0)\"}\n",
+    "stderr_tail": ""
+  }
+]
