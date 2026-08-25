@@ -152,6 +152,30 @@
       "notes": "Explicitly rejected in docs/guides/audiobook_guide.md (Section on stress alternatives): an extra model in the pipeline, its own error class the project can't distinguish from the source problem without a fresh listen. #114 instead uses a manual apostrophe DSL notation confirmed by ear by the owner. Do not fetch unless #114 reopens this decision."
     },
     {
+      "name": "silero-stress-tagger",
+      "repo_id": null,
+      "revision": null,
+      "allow_patterns": null,
+      "role": "Automatic Russian stress placement, same category as RUAccent, considered for issue #114",
+      "license": "unverified",
+      "size_gb": null,
+      "status": "candidate",
+      "fetch_now": false,
+      "notes": "Not desk-surveyed by this project's own docs (only RUAccent was, and rejected -- see the ruaccent-stress-tagger entry above). Listed here only as a named alternative in the same 'automatic stress model' category #114 already rejected; repo_id not pinned, nothing downloaded or verified. Re-evaluate against the same rejection reasoning before fetching."
+    },
+    {
+      "name": "stressrnn",
+      "repo_id": null,
+      "revision": null,
+      "allow_patterns": null,
+      "role": "Automatic Russian stress placement, same category as RUAccent, considered for issue #114",
+      "license": "unverified",
+      "size_gb": null,
+      "status": "candidate",
+      "fetch_now": false,
+      "notes": "Not desk-surveyed by this project's own docs (only RUAccent was, and rejected -- see the ruaccent-stress-tagger entry above). Listed here only as a named alternative in the same 'automatic stress model' category #114 already rejected; repo_id not pinned, nothing downloaded or verified. Re-evaluate against the same rejection reasoning before fetching."
+    },
+    {
       "name": "music-stable-audio-open",
       "repo_id": null,
       "revision": null,
@@ -258,6 +282,18 @@
       "status": "candidate",
       "fetch_now": false,
       "notes": "Survey explicitly says do not start here: no confirmed MLX acceleration and no structural markup tags. See m5-music-models-survey.md Section 5."
+    },
+    {
+      "name": "music-musiclm",
+      "repo_id": null,
+      "revision": null,
+      "allow_patterns": null,
+      "role": "Closed Google model, considered for issue #115 for comparative completeness only",
+      "license": "n/a -- no official open weights",
+      "size_gb": null,
+      "status": "candidate",
+      "fetch_now": false,
+      "notes": "NOT FOUND: no official weights, only unofficial reimplementations of varying fidelity depending on the fork. Survey calls it 'effectively obsolete'. See m5-music-models-survey.md Section 1. Not a realistic fetch target."
     }
   ]
 }
