@@ -15,7 +15,8 @@ and lives in `AGENTS.md`.
   model it uses, has used, or has considered. Each entry records `status` (`local+drive`,
   `drive_only`, `local_only`, `needed`, `candidate`, `rejected`) and a `size_gb`/`license` where
   known. Treat `status` as a snapshot from whenever it was last verified, not live truth — the
-  two checks above are the ground truth.
+  two checks above are the ground truth, or refresh the snapshot itself in one command:
+  `python3 scripts/model_drive_sync.py refresh-catalog` (see section 4 below).
 
 If it's already on Drive: `tar -xf <name>.tar -C ~/.cache/huggingface/hub/` and you're done —
 `huggingface_hub` recognizes the extracted `models--<org>--<name>` directory as already cached
@@ -42,3 +43,48 @@ and `status: "candidate"` until the model is actually decided on and about to be
 catalog is meant to hold considered-but-not-fetched models too (e.g. the music-generation
 survey candidates for issue #115), so listing something there does not by itself queue a
 download.
+
+## 4. Reverse direction: local cache -> Drive
+
+The notebook above only ever writes Drive *from the internet* (via Colab). A model can also
+end up local-only: downloaded directly on a working connection, restored from an old archive,
+or fetched before this catalog/Drive workflow existed. Left there, it disappears the next time
+the local cache is cleared, or is simply absent on another machine — and has to be re-fetched
+from the internet, which is exactly what this whole workflow exists to avoid. `scripts/
+model_drive_sync.py` closes that gap:
+
+```bash
+# Read-only: what's local, what's on Drive, what the catalog claims, and where any of the
+# three disagree -- including local models the catalog doesn't mention at all.
+python3 scripts/model_drive_sync.py reconcile
+
+# Read-only: what a full upload run would push and its total size. Stops there -- nothing
+# is uploaded, and it should stay that way without the owner's explicit go-ahead for
+# anything beyond a single small model used to prove the pipeline works.
+python3 scripts/model_drive_sync.py plan
+
+# Pack one model's local HF cache dir into a .tar (same symlink-preserving recipe the
+# notebook uses -- see scripts/model_cache_lib.py) and upload it.
+python3 scripts/model_drive_sync.py upload --model <catalog-name>
+
+# If an archive of that name already exists on Drive: skipped automatically when the local
+# pack is the same size as what's on Drive (nothing to gain by re-uploading); blocked with
+# an explicit message if the sizes differ, requiring a deliberate:
+python3 scripts/model_drive_sync.py upload --model <catalog-name> --force
+```
+
+Re-uploading a differing archive **replaces** what was on Drive — there is no version
+history, so `--force` is never the default and never implied by `reconcile`/`plan`. Nothing
+is ever deleted locally by this script; it only reads the local cache.
+
+After an upload (or a `reconcile` that turns up drift), refresh the catalog's `status`/`notes`/
+`verified` fields from what was actually observed instead of hand-editing them:
+
+```bash
+python3 scripts/model_drive_sync.py refresh-catalog          # writes model_catalog.json
+python3 scripts/model_drive_sync.py refresh-catalog --dry-run  # preview only
+```
+
+`refresh-catalog` only touches facts it can observe directly (local/Drive presence, the
+Drive archive's size in `notes`, the `verified` timestamp) — it never changes `needed`/
+`candidate`/`rejected` judgment calls, which stay editorial and hand-maintained.
