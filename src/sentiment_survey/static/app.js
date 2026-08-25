@@ -88,12 +88,20 @@ function renderSidebar() {
     const row = document.createElement("div");
     let cls = "sidebar-row";
     if (idx === state.currentIndex) cls += " current";
-    if (t.skipped_prior) cls += " skipped";
+    if (t.type === "voice_casting") {
+      // Not a blind task -- never use the blind-gate colors (skipped/
+      // non-blind/corrected) for it, just plain answered/unanswered plus
+      // a distinct "selected as a dictor" marker.
+      if (t.selected) cls += " cast-selected";
+      else if (t.answered) cls += " answered";
+    } else if (t.skipped_prior) cls += " skipped";
     else if (t.answered_after_reveal) cls += " non-blind";
     else if (t.is_correction) cls += " corrected";
     else if (t.answered) cls += " answered";
     row.className = cls;
-    const mark = t.skipped_prior ? "–" : t.answered ? "✓" : "·";
+    const mark = t.type === "voice_casting"
+      ? (t.selected ? "🎙" : t.answered ? "✓" : "·")
+      : (t.skipped_prior ? "–" : t.answered ? "✓" : "·");
     const noteMark = t.has_note ? '<span class="row-note" title="Есть заметка">📝</span>' : "";
     row.innerHTML = `<span class="row-mark">${mark}</span><span class="row-idx">${idx + 1}.</span>`
       + `<span class="row-q">${escapeHtml(truncate(t.question, 60))}</span>${noteMark}`;
@@ -151,7 +159,10 @@ function renderAnswered(d) {
   card.hidden = false;
   const rec = d.previous_answer;
   const flag = el("answered-flag");
-  if (rec.answered_after_reveal) {
+  if (rec.type === "voice_casting") {
+    flag.textContent = "Отбор голоса — не слепая проверка, метки не скрывались.";
+    flag.className = "answered-flag";
+  } else if (rec.answered_after_reveal) {
     flag.textContent = "Этот ответ дан ПОСЛЕ раскрытия меток (исправление) — не считается слепым в итогах.";
     flag.className = "answered-flag non-blind";
   } else if (rec.skipped_prior) {
@@ -246,6 +257,16 @@ function renderTaskForm(task) {
     state.audioEls.push(audio);
   }
 
+  if (task.response_mode === "voice_cast") {
+    el("task-options").hidden = true;
+    el("vc-submit-btn").hidden = false;
+    renderVoiceCastForm(task);
+    return;
+  }
+  el("task-options").hidden = false;
+  el("voice-cast-form").hidden = true;
+  el("vc-submit-btn").hidden = true;
+
   const optsEl = el("task-options");
   optsEl.innerHTML = "";
   task.options.forEach((opt, idx) => {
@@ -257,6 +278,76 @@ function renderTaskForm(task) {
     btn.addEventListener("click", () => submitAnswer(task, opt));
     optsEl.appendChild(btn);
   });
+}
+
+// ---------------------------------------------------------------- voice casting (not blind)
+
+function renderVoiceCastForm(task) {
+  el("voice-cast-form").hidden = false;
+  el("voice-cast-transcript").textContent = task.transcript || "";
+  el("voice-cast-f0").textContent = task.measured_f0_hz != null
+    ? `Измеренная медиана основного тона: ${task.measured_f0_hz} Гц`
+    : "Медиана основного тона не измерена (нет numpy в этом запуске).";
+
+  const prior = state.currentDetail.previous_answer;
+  document.querySelectorAll('input[name="vc-gender"]').forEach((r) => {
+    r.checked = !!prior && r.value === prior.gender;
+  });
+  document.querySelectorAll('input[name="vc-age"]').forEach((r) => {
+    r.checked = !!prior && r.value === prior.age_bucket;
+  });
+  const selectedBox = el("vc-selected");
+  selectedBox.checked = !!prior && !!prior.selected;
+  el("vc-name").value = (prior && prior.name) || "";
+  el("vc-name-field").hidden = !selectedBox.checked;
+}
+
+el("vc-selected").addEventListener("change", () => {
+  el("vc-name-field").hidden = !el("vc-selected").checked;
+});
+
+el("vc-submit-btn").addEventListener("click", () => submitVoiceCast(state.currentDetail.task));
+
+async function submitVoiceCast(task) {
+  for (const a of state.audioEls) a.pause();
+  const genderEl = document.querySelector('input[name="vc-gender"]:checked');
+  const ageEl = document.querySelector('input[name="vc-age"]:checked');
+  if (!genderEl || !ageEl) {
+    alert("Выберите пол и примерный возраст.");
+    return;
+  }
+  const selected = el("vc-selected").checked;
+  const name = el("vc-name").value.trim();
+  if (selected && !name) {
+    alert("Для отобранного голоса нужно имя.");
+    return;
+  }
+  const body = {
+    task_id: task.id,
+    gender: genderEl.value,
+    age_bucket: ageEl.value,
+    selected,
+    name,
+    note: el("task-note").value,
+    listen_ms: totalListenMs(),
+  };
+  const result = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  updateProgress(result.answered, result.total);
+  // Not blind -- nothing to reveal, just move on (or refresh in place if
+  // this was an edit of an already-cast segment).
+  await refreshTaskList();
+  if (state.editMode) {
+    state.editMode = false;
+    const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/task/${encodeURIComponent(task.id)}`);
+    state.currentDetail = data;
+    renderCurrentTask();
+  } else {
+    await advanceAfterReveal();
+  }
 }
 
 function trackListening(audio, key) {
@@ -369,6 +460,9 @@ async function showSummary() {
   }
   if (data.graded_total) {
     html += `<p><strong>Совпало с ожиданием:</strong> ${data.graded_correct} из ${data.graded_total}.</p>`;
+  }
+  if (data.cast_total) {
+    html += `<p><strong>Отбор голосов:</strong> оценено ${data.cast_total}, отобрано и названо ${data.cast_selected_total}.</p>`;
   }
   body.innerHTML = html;
 }

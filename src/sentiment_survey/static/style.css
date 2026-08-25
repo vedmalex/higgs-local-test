@@ -156,6 +156,7 @@ footer {
 .sidebar-row.corrected .row-mark { color: var(--accent); }
 .sidebar-row.non-blind .row-mark { color: #b8860b; }
 .sidebar-row.skipped .row-mark { color: var(--muted); }
+.sidebar-row.cast-selected .row-mark { color: var(--ok); font-weight: 700; }
 .row-mark { font-weight: 700; width: 1em; text-align: center; }
 .row-idx { color: var(--muted); }
 .sidebar-row.current .row-q { color: var(--accent-fg); }
@@ -271,6 +272,50 @@ button.secondary {
   cursor: pointer;
 }
 button.secondary:hover { border-color: var(--accent); }
+
+.voice-cast-form {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.voice-cast-form .transcript {
+  font-style: italic;
+  color: var(--fg);
+  margin: 0 0 0.5rem;
+}
+.voice-cast-form .f0-hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+.cast-field {
+  border: none;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+.cast-field legend {
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0;
+  margin-bottom: 0.3rem;
+}
+.cast-field label, .cast-select {
+  display: inline-block;
+  margin-right: 1rem;
+  font-size: 0.95rem;
+}
+.cast-field input[type="text"] {
+  width: 100%;
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  margin-top: 0.3rem;
+}
 
 .note-field {
   margin-top: 1rem;

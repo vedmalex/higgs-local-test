@@ -64,7 +64,14 @@ GitHub Issues are the canonical surface for task state and development history. 
   `pitch_warning` — visible before answering, excluded from the graded/gate statistics, never
   silently dropped; needs numpy (present via `.venv-tts`, which `make sentiment-survey` prefers)
   and degrades to "no pitch analysis" rather than crashing when numpy is absent, keeping the rest
-  of the app stdlib-only. Run via `make sentiment-survey`; see `docs/guides/sentiment_survey_guide.md`.
+  of the app stdlib-only. A `voice_casting_chapter114e0` set (issue #118) plays each of
+  `output/chapter-114-e0/`'s 70 segments (each read by an effectively-random voice, since Higgs
+  pins no seed/reference across generations) and lets the owner tag gender/rough age/name and
+  mark a segment as a kept dictor candidate — deliberately NOT blind (nothing to hide) and kept
+  out of every blind-gate statistic; its `answers.jsonl` IS the casting result
+  `docs/guides/audiobook_guide.md` §2a reads to call `register_voice()` (a separate, deliberately
+  manual, model-loading step this app does not perform). Run via `make sentiment-survey`; see
+  `docs/guides/sentiment_survey_guide.md`.
 - `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
 
 Keep TTS and STT environments and processes isolated. Do not introduce a shared daemon or module that holds both models in memory.

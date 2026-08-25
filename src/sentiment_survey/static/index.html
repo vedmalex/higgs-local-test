@@ -49,10 +49,35 @@
           </p>
           <p id="pitch-warning-hint" class="pitch-warning-hint" hidden></p>
           <div id="task-options" class="options"></div>
+
+          <div id="voice-cast-form" class="voice-cast-form" hidden>
+            <p id="voice-cast-transcript" class="transcript"></p>
+            <p id="voice-cast-f0" class="f0-hint"></p>
+            <fieldset class="cast-field">
+              <legend>Пол</legend>
+              <label><input type="radio" name="vc-gender" value="male"> Мужской</label>
+              <label><input type="radio" name="vc-gender" value="female"> Женский</label>
+              <label><input type="radio" name="vc-gender" value="unclear"> Не разобрать</label>
+            </fieldset>
+            <fieldset class="cast-field">
+              <legend>Возраст (на вскидку, не годы)</legend>
+              <label><input type="radio" name="vc-age" value="young"> Молодой</label>
+              <label><input type="radio" name="vc-age" value="middle"> Средний</label>
+              <label><input type="radio" name="vc-age" value="old"> Пожилой</label>
+              <label><input type="radio" name="vc-age" value="unclear"> Не разобрать</label>
+            </fieldset>
+            <label class="cast-select"><input type="checkbox" id="vc-selected"> Отобрать этот голос для книги</label>
+            <div id="vc-name-field" class="cast-field" hidden>
+              <label for="vc-name">Имя диктора (так он будет назначаться персонажу):</label>
+              <input type="text" id="vc-name" placeholder="например: narrator, krishna, parikshit">
+            </div>
+          </div>
+
           <div class="note-field">
             <label for="task-note">Заметка (необязательно) — что слышно, чего нет в вариантах:</label>
             <textarea id="task-note" rows="2" placeholder="например: «фон гуляет», «голос между фрагментами разный»…"></textarea>
           </div>
+          <button id="vc-submit-btn" class="primary" hidden>Сохранить и далее →</button>
         </div>
 
         <div id="answered-card" class="card answered" hidden>
