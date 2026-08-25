@@ -495,11 +495,22 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 | Quantized KV-cache | Frees memory, does not by itself deliver speed — kept only as an *enabler* to raise T2's batch-size ceiling if 2/4 hit memory pressure. |
 | Vocoder kernel optimization (the whole M0-M3 Mojo/MAX effort) | Measured ceiling ≈4% of wall time (M4-T1). Rejected on data, not on suspicion. |
 
-- [ ] **M4-T5. Dump the full 34-tag dictionary and check chunk-boundary behavior.** Per §0.4, this
+- [x] **M4-T5. Dump the full 34-tag dictionary and check chunk-boundary behavior.** Per §0.4, this
   is now a lookup, not research — the tag inventory (21 emotion / 10 prosody / 3 style, ids
   151681-151701 / 151704-151706 / 151716-151726) is already measured from `tokenizer.json`; this
   task exports it into project docs and tests each tag once across a synthetic chunk boundary
-  (relevant once T7's segmentation exists).
+  (relevant once T7's segmentation exists). **Done** —
+  [`docs/research/audiobook/m4-tag-inventory-results.md`](m4-tag-inventory-results.md): all 34
+  tags generated and objectively triaged (Group A 20 / B 7 / C 7 — all four `speed_*` tags and
+  `style:whispering` land in C), plus two owner-requested extensions covered in the same pass:
+  terminal/falling sentence-end intonation (no dedicated tag exists; the segmentation-boundary
+  question is flagged for listening, not decided by metric) and a first-ever Higgs stress-mark
+  notation probe (6 notations x 3 Russian homograph pairs, STT round-tripped) that also
+  corrected a `README.md` passage that had misattributed Qwen-only stress-notation failures to
+  both backends. Chunk-boundary tag-survival itself was already separately measured in
+  `m4-chapter-results.md` §2 (a tag does not survive an independent chunk boundary without
+  `chunk_sentences()`'s reopening). Final on-ear judgment of every tag remains for the owner —
+  `output/m4_tags/LISTEN.md` (local only, not committed) prioritizes 8 clips/pairs.
   *Tier:* **sonnet**, size **S**.
 
 - [ ] **M4-T6. Russian quality at chapter scale; emotion drift check.** N=10 paragraphs each using
