@@ -1155,11 +1155,23 @@ def _generate_batch_group(
     exactly the m4_batching_bench.py convention (`chunk_results.sort(key=lambda r:
     r.sequence_idx)`).
 
-    Manifest writes happen per segment, not once per batch (chosen over "after the whole
-    batch"): `batch_generate` already yields one `BatchGenerationResult` per segment as each
-    finishes decoding, so writing immediately after each one bounds the work lost to a kill
-    mid-batch to whatever has not yet been yielded, not the whole batch -- for the same
-    reason a 30-hour run must not lose more than the segment in flight.
+    Manifest writes happen per segment, not once per batch -- but this does NOT bound a kill
+    mid-batch to losing "at most one segment" (an earlier version of this docstring, and of
+    `docs/research/audiobook/m4-batching-integration-results.md`, claimed exactly that; both
+    were wrong -- see Refs #114, "batching kill-loses-a-whole-batch" follow-up). Measured
+    fact, both by reading `mlx_audio`'s `Higgs*V3.batch_generate()` and by a real
+    kill-mid-batch experiment: the whole `for _ in range(limit): ...` decode loop for every
+    row in the batch runs to completion (or hits the token limit) BEFORE the function's
+    single `for state in states: yield BatchGenerationResult(...)` loop runs at all -- so
+    nothing is yielded until the entire batch has finished decoding. On top of that,
+    `_generate_batch_group` itself drains the whole `model.batch_generate()` generator into
+    `result_by_pos` (the loop right below this docstring) before writing or saving anything;
+    the per-segment `write_wav`/`save_manifest` calls happen in a second loop afterwards, so
+    even a truly-incremental `batch_generate()` would still be fully buffered here. A kill
+    during the (dominant, GPU-bound) generation phase therefore loses the *entire* batch --
+    up to `--batch-size` segments, not one. The per-segment writes in the second loop only
+    protect against a kill during that fast, CPU-bound tail (numpy write + JSON dump), which
+    is a tiny fraction of a batch's wall time.
 
     Retries and isolation (F5, extended to batches): a whole-batch exception (or a
     per-segment audio-sanity failure inside it, F6) is retried whole up to `max_retries`

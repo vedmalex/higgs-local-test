@@ -36,16 +36,52 @@ not the ~11.4 hours the batching measurement implied was possible.
   `test_batch_results_map_to_correct_segments_despite_reversed_yield_order`, which forces a
   fake model to yield in reversed order and checks each segment got audio of the length its
   *own* text implies, not a neighbor's.
-- **Manifest write granularity: per segment, not per batch.** `batch_generate()` already
-  yields one `BatchGenerationResult` per segment as it finishes decoding (it does not wait
-  for the whole batch to write its first result); `_generate_batch_group` calls
-  `save_manifest` after each one, exactly like the unbatched path. A kill mid-batch can
-  therefore lose at most the segment(s) not yet yielded/validated/written, not the whole
-  batch — the same "at most one unit of work lost" guarantee the unbatched path already
-  gave per segment. Verified by
-  `test_manifest_written_after_each_segment_within_a_batch_not_only_after_whole_batch`
-  (counts how many segments are `"done"` at each `save_manifest` call and checks the count
-  climbs 1-by-1, not 0-to-N in one jump).
+- **Manifest write granularity: per segment on the way out, but a kill mid-batch loses the
+  whole batch — CORRECTED 2026-08-25 (Refs #114).** The original claim here was wrong and
+  is left visible, struck through, so anyone who cached the old text can see exactly what
+  changed:
+
+  ~~`batch_generate()` already yields one `BatchGenerationResult` per segment as it finishes
+  decoding (it does not wait for the whole batch to write its first result);
+  `_generate_batch_group` calls `save_manifest` after each one, exactly like the unbatched
+  path. A kill mid-batch can therefore lose at most the segment(s) not yet
+  yielded/validated/written, not the whole batch — the same "at most one unit of work lost"
+  guarantee the unbatched path already gave per segment.~~
+
+  **What is actually true**, established by reading `mlx_audio`'s
+  `HiggsAudioV3.batch_generate()` (`.venv-tts/.../mlx_audio/tts/models/higgs_audio_v3/model.py`,
+  the `for _ in range(limit): ...` decode loop at ~L667 followed by a *separate*
+  `for state in states: yield BatchGenerationResult(...)` loop at ~L714) and confirmed with a
+  real kill-mid-batch experiment (16 synthetic segments, `--batch-size 8`, killed with `kill
+  -9` partway through the second batch):
+
+  1. `batch_generate()` does **not** yield progressively. Every row in the batch is decoded
+     in lockstep inside one `for _ in range(limit)` loop (rows that finish early are evicted
+     from the active set, saving compute, but nothing is yielded for them yet); only after
+     that whole loop exits does a second loop run once, yielding all N results back-to-back.
+     Nothing reaches `_generate_batch_group` until the entire batch has finished decoding.
+  2. `_generate_batch_group` compounds this: it drains the whole `model.batch_generate()`
+     generator into a `result_by_pos` dict (`for r in model.batch_generate(...):
+     result_by_pos[r.sequence_idx] = r`) *before* validating, writing, or saving anything.
+     The per-segment `write_wav`/`save_manifest` calls happen in a second loop afterward. So
+     even if `batch_generate()` yielded incrementally, this wrapper would still buffer
+     everything before the first byte hits disk.
+  3. **Experiment result**: killing mid-second-batch left all 8 first-batch segments
+     `"done"` with valid WAVs (as expected), and all 8 second-batch segments `"in_progress"`
+     with **zero** WAV files written for any of them — not "all but the one in flight," all
+     eight. Batch-1's 8 WAV files also all landed within the same on-disk second (`ls -la`
+     showed identical mtimes), consistent with (1)/(2): the write loop only starts once
+     generation for the whole batch is already done, so it runs fast enough that all writes
+     land together.
+
+  **Corrected claim: a kill mid-batch loses up to `--batch-size` segments (the whole batch
+  in flight), not "at most one."** The old, incorrect test name
+  (`test_manifest_written_after_each_segment_within_a_batch_not_only_after_whole_batch`,
+  still present, unit-testing only the *order* `save_manifest` is called in with a fake
+  synthetic model, not real batch timing) is misleading in isolation; it correctly shows the
+  post-generation write loop is per-segment, but that loop is not where the risk is. See
+  `docs/research/audiobook/m4-full-chapter-results.md` §2c for the real-hardware observation
+  that first surfaced this, and the "Fix decision" below for what changed and what didn't.
 - **Audio-sanity validation: per segment, not per batch.** `_validate_generated_audio` (F6)
   is applied to each decoded row individually inside the batch loop; one implausible-length
   row raises for that segment specifically and does not mark its batch-mates invalid.
@@ -90,6 +126,47 @@ not the ~11.4 hours the batching measurement implied was possible.
   that smaller range — 4 leaves headroom before hitting whatever a several-hundred-segment
   run's actual ceiling turns out to be. `--batch-size 8` reproduces the exact measured
   configuration for anyone who wants to push to the previously-confirmed-safe depth.
+
+### 2a. Fix decision: kill-mid-batch loses up to `--batch-size` segments — documentation
+fix only, no code-behavior change (2026-08-25, Refs #114)
+
+Given the corrected fact above, the options considered:
+
+- **Fix the documentation and the misleading in-code docstring; leave the code behavior
+  unchanged.** Chosen. At the default `--batch-size 4`, a kill mid-batch loses at most 4
+  segments of work, not 1. On a real several-hundred-to-thousand-segment book chapter run
+  (10-40 hours), a handful of lost segments after a crash is a few minutes of regenerated
+  audio, re-run automatically on the next resume (the existing resume logic already treats
+  any non-`"done"` segment, `"in_progress"` or `"pending"`, as needing regeneration — no
+  change needed there either). That is a materially different number from "lose 8 of
+  1000ish segments" being framed as a serious defect: it is not. What was actually wrong was
+  the *promise* — "at most one segment" implied a per-segment durability guarantee that
+  `mlx_audio`'s batch_generate() cannot provide (it is a lockstep, non-streaming batch API;
+  there is no upstream hook to make it yield mid-decode), and restating that promise
+  accurately costs nothing and prevents someone planning a longer, larger-batch run around
+  a false guarantee.
+- **Write the manifest more often mid-batch.** Rejected: not possible without changing what
+  `mlx_audio.batch_generate()` itself yields. There is no partial state to write — the
+  entire batch's decode loop is one opaque call from `_generate_batch_group`'s point of
+  view; nothing is available to persist until the call returns control (via its final
+  yield loop) all at once.
+- **Lower the default `--batch-size` from 4 to shrink the exposure.** Rejected: this
+  trades throughput for a marginal safety improvement that is not needed at the current
+  scale (a few lost segments per crash on a run with hundreds of segments is noise), and
+  the measured speedup (3.40x-3.69x at batch=8) is the entire point of #114. Batch size is
+  already an explicit, documented `--batch-size` flag an operator can lower themselves if
+  their risk tolerance differs (e.g. flaky hardware, very expensive per-segment audio).
+- **Do nothing, including to the docs.** Rejected: the original claim is a factually wrong
+  promise about crash-recovery cost on a workflow whose whole justification is
+  multi-hour/multi-day unattended runs; leaving it uncorrected is exactly the kind of
+  documentation-vs-behavior mismatch this project's rules exist to prevent.
+
+**Net effect:** no code behavior changed by this fix — `_generate_batch_group` and
+`generate_segments` are unchanged except for the corrected docstring. Only the documented
+claim changed, from "loses at most one segment" to "loses at most `--batch-size` segments
+(the whole batch in flight)." The synthetic kill-mid-batch experiment behind this correction
+is in `docs/research/audiobook/m4-full-chapter-results.md` §2c, which is also updated to
+mark this discrepancy resolved rather than open.
 
 ## 3. Unit tests (synthetic, no GPU) — `TestBatchGenerationIntegration`
 

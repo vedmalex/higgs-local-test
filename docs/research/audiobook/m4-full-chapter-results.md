@@ -145,7 +145,25 @@ mistaken for an accidental failure being reported as a recovery success.
 **Verdict: the crash-recovery design worked exactly as documented for the unbatched
 path.** No corruption, no false "done" status, a clean restart point.
 
-### 2c. A real discrepancy found in the batching integration's kill-safety claim
+### 2c. A real discrepancy found in the batching integration's kill-safety claim — RESOLVED 2026-08-25 (Refs #114)
+
+**Resolved.** A direct kill-during-batch experiment (16 synthetic segments, `--batch-size
+8`, `kill -9` mid-second-batch) confirmed the "not a re-run of the PR's synthetic test"
+suspicion below was correct, and settles it as a real bug in the documentation (not the
+code): `mlx_audio`'s `HiggsAudioV3.batch_generate()` decodes the whole batch in lockstep
+and only yields results in a loop that runs *after* that decode loop exits — nothing is
+yielded progressively — and `_generate_batch_group` additionally drains the entire
+generator into a dict before writing or saving anything. The kill left the in-flight
+batch's 8 segments **all** `"in_progress"` with **zero** WAV files for any of them; the
+completed first batch's 8 WAV files all landed within the same on-disk second, matching
+this run's mtime observation below. **The corrected claim is "loses at most
+`--batch-size` segments," not "at most one."** Full analysis, the corrected in-code
+docstring, and the fix decision (documentation-only; no code-behavior change — see that
+doc for why) are in `docs/research/audiobook/m4-batching-integration-results.md` §2/§2a.
+The original write-up of the discrepancy as first observed on this run is kept below
+unedited for provenance.
+
+
 
 `docs/research/audiobook/m4-batching-integration-results.md` (PR #123) states: "a kill
 mid-batch can therefore lose at most the segment(s) not yet yielded/validated/written, not
