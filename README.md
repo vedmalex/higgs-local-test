@@ -148,7 +148,7 @@ upstream references, and status: [`docs/research/mojo-max/m3-t4-blocked-results.
 ## Voice Cloning & Audiobook Production Guides
 
 - **Voice Cloning Guide & Reference Texts**: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) — rules for recording clean 7–12s audio samples, phonetically balanced text templates, and voice profile export.
-- **Audiobook Production Guide**: [`docs/guides/audiobook_guide.md`](docs/guides/audiobook_guide.md) — multi-character dialogue switching, screenplay JSON format, natural pause insertion, and complete chapter audio stitching.
+- **Audiobook Production Guide**: [`docs/guides/audiobook_guide.md`](docs/guides/audiobook_guide.md) — the `[{"speaker": ..., "text": ...}]` screenplay JSON DSL, run through `src/audiobook.py --screenplay-file ...` (the same sentence-splitting/chunking/tag-reopening/resumable-manifest engine used for plain text, not a separate pipeline), incremental per-line regeneration via a speaker+text content hash, pause insertion, and chapter stitching. Multi-voice `speaker` is accepted and threaded through the manifest but **not wired to voice cloning yet** — every line still renders in the model's one default voice (see the guide's sec. 3a for why, including the RTF 7.73 vs. 6.56 cloning-is-slower measurement).
 
 ## Status
 

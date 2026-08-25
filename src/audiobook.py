@@ -73,6 +73,40 @@ works and what does not:
          non-`done` segments and report them, instead of refusing all-or-nothing.
   F14 -- `generate_segments` clears the MLX cache every `clear_cache_every` segments and
          records best-effort memory metrics per segment.
+
+Screenplay format (2026-08, Refs #57): `docs/guides/audiobook_guide.md` sec. 3 already
+documented a JSON "script" format (a list of ``{"speaker": ..., "text": ...}`` lines) as the
+intended authoring format for a chapter, but nothing in this file ever read it -- the guide's
+own example pipeline (sec. 4) called `model.generate()` directly, once per line, with none of
+the sentence-splitting/chunking/tag-continuity/manifest/resume machinery above, so a long
+reply would silently lose an emotion tag after its first chunk-worth of text (see
+docs/research/audiobook/m4-chapter-results.md sec 2) and a one-line edit would force
+regenerating the whole chapter. `parse_screenplay` + `chunk_screenplay` below read that same
+JSON format into the existing `Chunk`/manifest pipeline instead of adding a second, parallel
+generation path:
+  - `parse_screenplay` validates each line (non-blank `speaker`/`text`, valid control tags)
+    and drops any other JSON key a line might carry (notes, ids, ...) -- those cannot affect
+    the generated audio, so they must not affect resume/regeneration either.
+  - `chunk_screenplay` runs each line through the same `split_sentences`/`chunk_sentences` as
+    plain text, so a long reply is still chunked and its tags still reopened across chunk
+    boundaries exactly as for a plain chapter. Control-tag/emotion state is reset at every
+    new speaker line (a character's leftover emotional state has no textual basis once a
+    different speaker starts talking).
+  - Segment identity (`_segment_hash_input`) is now `speaker + text`, not just `text`: two
+    lines with identical wording said by different speakers must not collide onto the same
+    cached segment once per-speaker voices exist, and a speaker rename with the same wording
+    is a real change to what should be synthesized.
+  - `speaker` is threaded into every manifest segment and `assemble_chapter` can use a
+    different pause length across a speaker change (`speaker_change_silence_ms`) than within
+    one speaker's own sentences, matching the guide's pause table (sec. 5). What is
+    deliberately NOT done: no code path here selects, loads, or synthesizes a per-speaker
+    voice -- `generate_segments` still calls `model.generate(text=...)` with the model's one
+    default voice for every segment regardless of `speaker`. Per-character voice cloning has
+    never been verified for a multi-voice book in this project, and the one cloning
+    measurement that exists (RTF 7.73 vs. 6.56 for plain generation, see
+    docs/research/audiobook/) shows it is *slower*, not just unimplemented; `chunk_screenplay`
+    raises a `UserWarning` naming every distinct speaker whenever a screenplay uses more than
+    one, so this is never silently mistaken for "it just works."
 """
 from __future__ import annotations
 
@@ -335,12 +369,20 @@ def validate_control_tags(text: str) -> None:
             )
 
 
+DEFAULT_SPEAKER = "narrator"
+
+
 @dataclass
 class Chunk:
     index: int
     sentences: list[str]
     reopened_tags: dict[str, str]
     text: str
+    # Screenplay support (Refs #57): who speaks this chunk. Plain-text chunking (chunk_sentences
+    # called directly, as from --text/--text-file) never sets this explicitly, so every such
+    # chunk gets the same DEFAULT_SPEAKER -- segment hashes for plain-text runs are therefore
+    # shifted by a constant, not made speaker-dependent in any way that matters for them.
+    speaker: str = DEFAULT_SPEAKER
 
 
 def _sentence_own_tags(sentence: str) -> list[tuple[str, str]]:
@@ -526,6 +568,107 @@ def chunk_sentences(
 
 
 # ---------------------------------------------------------------------------
+# Screenplay format (docs/guides/audiobook_guide.md sec. 3) -- reads the
+# `[{"speaker": ..., "text": ...}, ...]` DSL into the same Chunk pipeline as plain text.
+# ---------------------------------------------------------------------------
+
+
+def parse_screenplay(data: object) -> list[dict]:
+    """Validate and normalize a parsed screenplay JSON document into a plain list of
+    ``{"speaker": str, "text": str}`` dicts.
+
+    Deliberately keeps ONLY `speaker` and `text` from each line -- any other key a line
+    happens to carry (an editor's note, a stable id, a source-page reference, ...) is
+    dropped here, before chunking/hashing ever sees it, so editing such a field can never
+    change a segment's content hash and trigger a needless regeneration (see
+    `_segment_hash_input`).
+
+    Raises ``ValueError`` (never silently drops/guesses) on:
+      - the document not being a JSON array,
+      - an empty array,
+      - a line that is not an object,
+      - a missing/blank/non-string `speaker` or `text`,
+      - any control-tag-shaped span in `text` that is not one of the known-valid tags
+        (delegates to `validate_control_tags`, same as plain-text mode).
+    """
+    if not isinstance(data, list):
+        raise ValueError(
+            "screenplay must be a JSON array of {'speaker': ..., 'text': ...} objects, got "
+            f"{type(data).__name__}"
+        )
+    if not data:
+        raise ValueError("screenplay is empty -- no lines to generate")
+
+    lines: list[dict] = []
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"screenplay line {i}: expected an object with 'speaker'/'text', got "
+                f"{type(entry).__name__}"
+            )
+        speaker = entry.get("speaker")
+        text = entry.get("text")
+        if not isinstance(speaker, str) or not speaker.strip():
+            raise ValueError(f"screenplay line {i}: missing or blank 'speaker'")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"screenplay line {i}: missing or blank 'text'")
+        validate_control_tags(text)
+        lines.append({"speaker": speaker.strip(), "text": text})
+    return lines
+
+
+def chunk_screenplay(
+    lines: list[dict],
+    max_chars: int = 500,
+    tag_scope: str = "sentence",
+) -> list[Chunk]:
+    """Turn a parsed screenplay (`parse_screenplay`'s output) into a flat list of `Chunk`s
+    using the exact same `split_sentences`/`chunk_sentences` machinery as plain text -- a
+    long reply is still chunked under `max_chars` and its tags still reopened across chunk
+    boundaries (F1-F11 all apply per line, unchanged).
+
+    Each screenplay LINE is chunked independently: active emotion/prosody/style state is
+    reset to "none active" at the start of every line, since a character's leftover
+    emotional state carrying over onto a different speaker's first sentence has no basis in
+    PROMPTING.md (tags are documented as attached to the speech they're written into, not to
+    the chapter as a whole). A line that is itself long may still produce more than one
+    `Chunk` (chunk_sentences' normal budget-splitting) -- those internal chunks keep that
+    same line's tag-continuity as usual; only the FIRST chunk of each line is a genuine
+    speaker-boundary chunk.
+
+    Warns once (naming every distinct speaker) if the screenplay uses more than one speaker,
+    since no code path downstream selects a per-speaker voice -- see this module's top
+    docstring and docs/guides/audiobook_guide.md sec. 3a.
+    """
+    chunks: list[Chunk] = []
+    speakers_seen: list[str] = []
+    for line in lines:
+        speaker = line["speaker"]
+        if speaker not in speakers_seen:
+            speakers_seen.append(speaker)
+        sentences = split_sentences(line["text"])
+        line_chunks = chunk_sentences(sentences, max_chars=max_chars, tag_scope=tag_scope)
+        for lc in line_chunks:
+            lc.speaker = speaker
+            lc.index = len(chunks)
+            chunks.append(lc)
+
+    if len(speakers_seen) > 1:
+        warnings.warn(
+            f"screenplay has {len(speakers_seen)} distinct speakers {speakers_seen} but "
+            "per-speaker voice cloning is NOT wired into generate_segments -- every line "
+            "will be synthesized with the model's single default voice regardless of "
+            "'speaker'. Per-character voice cloning has never been verified for a "
+            "multi-voice book in this project; the one measurement that exists found "
+            "cloned generation SLOWER than plain generation (RTF 7.73 vs. 6.56), not merely "
+            "unimplemented. Wiring an actual per-speaker voice into generation is tracked "
+            "as separate follow-up work -- see docs/guides/audiobook_guide.md sec. 3a.",
+            stacklevel=2,
+        )
+    return chunks
+
+
+# ---------------------------------------------------------------------------
 # WAV I/O (stdlib + numpy only -- no mlx_audio dependency for read/assemble)
 # ---------------------------------------------------------------------------
 
@@ -576,11 +719,28 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _segment_hash_input(chunk: "Chunk") -> str:
+    """Everything about `chunk` that can change the audio it generates: who speaks it
+    (`speaker` -- selects the voice, once per-speaker voices exist) and its final text
+    (already includes any reopened emotion/prosody/style tag prefix). Nothing else --
+    `chunk.index`, or any field a screenplay line originally carried besides speaker/text
+    (`parse_screenplay` already dropped those) -- is allowed to affect this, so an edit to
+    an unrelated field, or a chunk simply shifting position in the chapter, never forces a
+    needless regeneration of an otherwise-unchanged line (F7's per-segment content hash,
+    extended to cover `speaker`).
+
+    Uses a \\x1f (unit separator, cannot occur in the input text) join so that e.g.
+    speaker="ab" + text="cd" cannot collide with speaker="a" + text="bcd".
+    """
+    return f"{chunk.speaker}\x1f{chunk.text}"
+
+
 def _new_segment_entry(chunk: "Chunk") -> dict:
-    text_hash = _text_hash(chunk.text)
+    text_hash = _text_hash(_segment_hash_input(chunk))
     return {
         "index": chunk.index,
         "text_hash": text_hash,
+        "speaker": chunk.speaker,
         "sentences": chunk.sentences,
         "text": chunk.text,
         "reopened_tags": chunk.reopened_tags,
@@ -675,11 +835,12 @@ def load_or_create_manifest(
         }
         new_segments = []
         for c in chunks:
-            text_hash = _text_hash(c.text)
+            text_hash = _text_hash(_segment_hash_input(c))
             prior = existing_by_hash.get(text_hash)
             if prior is not None:
                 seg = dict(prior)
                 seg["index"] = c.index
+                seg["speaker"] = c.speaker
                 seg["sentences"] = c.sentences
                 seg["reopened_tags"] = c.reopened_tags
                 seg["output_path"] = f"segment_{text_hash}.wav"
@@ -912,6 +1073,7 @@ def assemble_chapter(
     silence_ms: int = 200,
     allow_gaps: bool = False,
     gap_silence_ms: int = 1000,
+    speaker_change_silence_ms: Optional[int] = None,
 ) -> dict:
     """Stream-assemble the chapter from per-segment WAVs (F3, F13).
 
@@ -925,6 +1087,14 @@ def assemble_chapter(
     each non-`done` segment is replaced with `gap_silence_ms` of silence and reported in
     `gaps`, once the sample rate is known from a real segment; a run of gaps before the
     first real segment cannot be sample-rate-stamped and is reported but not written.
+
+    `speaker_change_silence_ms` (screenplay format, Refs #57): when given, the join silence
+    before a segment uses this duration instead of `silence_ms` if its manifest entry's
+    `speaker` differs from the previous non-gap segment's `speaker` -- matching
+    docs/guides/audiobook_guide.md sec. 5's pause table, which recommends a longer pause on a
+    speaker change than between sentences of the same speaker. A manifest entry with no
+    `speaker` key (plain-text runs predating this feature) is treated as unchanged from
+    whatever the previous entry's speaker was, so `silence_ms` alone still governs those.
     """
     segments = manifest["segments"]
     if not segments:
@@ -948,6 +1118,7 @@ def assemble_chapter(
     total_samples = 0
     prev_tail: Optional[np.ndarray] = None
     prev_index: Optional[int] = None
+    prev_speaker: Optional[str] = None
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(output_path), "wb") as out:
@@ -973,6 +1144,7 @@ def assemble_chapter(
                 )
                 prev_tail = None  # no meaningful edge to join across a gap
                 prev_index = entry["index"]
+                prev_speaker = None  # speaker on the far side of a gap is unknown here
                 continue
 
             audio, sr = read_wav(base_dir / entry["output_path"])
@@ -1022,8 +1194,17 @@ def assemble_chapter(
                         "direct_join_sample_jump": direct_join_jump,
                     }
                 )
-                if silence_ms > 0:
-                    silence_samples = int(silence_ms / 1000 * sample_rate)
+                this_speaker = entry.get("speaker")
+                effective_silence_ms = silence_ms
+                if (
+                    speaker_change_silence_ms is not None
+                    and prev_speaker is not None
+                    and this_speaker is not None
+                    and this_speaker != prev_speaker
+                ):
+                    effective_silence_ms = speaker_change_silence_ms
+                if effective_silence_ms > 0:
+                    silence_samples = int(effective_silence_ms / 1000 * sample_rate)
                     out.writeframes(np.zeros(silence_samples, dtype=np.int16).tobytes())
                     total_samples += silence_samples
 
@@ -1034,6 +1215,7 @@ def assemble_chapter(
 
             prev_tail = audio[-edge_n:] if len(audio) >= edge_n else audio
             prev_index = entry["index"]
+            prev_speaker = entry.get("speaker")
             del audio, clipped, pcm  # release this segment's memory before the next one
 
         if sample_rate is None:
@@ -1049,6 +1231,7 @@ def assemble_chapter(
         "num_segments_assembled": len(segments) - len(gap_reports),
         "gaps": gap_reports,
         "silence_ms_between_segments": silence_ms,
+        "speaker_change_silence_ms": speaker_change_silence_ms,
         "total_duration_seconds": total_samples / sample_rate if sample_rate else None,
         "join_reports": join_reports,
     }
@@ -1063,6 +1246,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--text-file", type=Path, default=None)
     parser.add_argument("--text", type=str, default=None)
+    parser.add_argument(
+        "--screenplay-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON screenplay file: a list of {'speaker': ..., 'text': ...} lines "
+            "(docs/guides/audiobook_guide.md sec. 3). Mutually exclusive with "
+            "--text/--text-file. Per-speaker voice cloning is NOT wired in yet -- every "
+            "line is synthesized with the model's single default voice; see chunk_screenplay."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-chars", type=int, default=500)
     parser.add_argument("--tag-scope", choices=("chunk", "sentence"), default="sentence")
@@ -1077,27 +1271,56 @@ def main() -> None:
     parser.add_argument("--allow-gaps", action="store_true")
     parser.add_argument("--silence-ms", type=int, default=200)
     parser.add_argument("--gap-silence-ms", type=int, default=1000)
+    parser.add_argument(
+        "--speaker-change-silence-ms",
+        type=int,
+        default=None,
+        help=(
+            "Pause length to use between segments whose 'speaker' differs (screenplay "
+            "format only); defaults to --silence-ms for every join when unset."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    if args.text is not None:
-        text = args.text
-    elif args.text_file is not None:
-        text = args.text_file.read_text(encoding="utf-8").strip()
-    else:
-        parser.error("one of --text or --text-file is required")
+    given = [
+        name
+        for name, val in (
+            ("--text", args.text),
+            ("--text-file", args.text_file),
+            ("--screenplay-file", args.screenplay_file),
+        )
+        if val is not None
+    ]
+    if len(given) != 1:
+        parser.error(
+            "exactly one of --text, --text-file, --screenplay-file is required "
+            f"(got: {given or 'none'})"
+        )
         return
 
-    validate_control_tags(text)
-
-    sentences = split_sentences(text)
-    chunks = chunk_sentences(sentences, max_chars=args.max_chars, tag_scope=args.tag_scope)
+    if args.screenplay_file is not None:
+        data = json.loads(args.screenplay_file.read_text(encoding="utf-8"))
+        lines = parse_screenplay(data)
+        chunks = chunk_screenplay(lines, max_chars=args.max_chars, tag_scope=args.tag_scope)
+    else:
+        text = args.text if args.text is not None else args.text_file.read_text(
+            encoding="utf-8"
+        ).strip()
+        validate_control_tags(text)
+        sentences = split_sentences(text)
+        chunks = chunk_sentences(sentences, max_chars=args.max_chars, tag_scope=args.tag_scope)
 
     if args.dry_run:
         for c in chunks:
             print(
                 json.dumps(
-                    {"index": c.index, "reopened_tags": c.reopened_tags, "text": c.text},
+                    {
+                        "index": c.index,
+                        "speaker": c.speaker,
+                        "reopened_tags": c.reopened_tags,
+                        "text": c.text,
+                    },
                     ensure_ascii=False,
                 )
             )
@@ -1138,6 +1361,7 @@ def main() -> None:
             silence_ms=args.silence_ms,
             allow_gaps=args.allow_gaps,
             gap_silence_ms=args.gap_silence_ms,
+            speaker_change_silence_ms=args.speaker_change_silence_ms,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
