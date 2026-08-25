@@ -408,6 +408,18 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   *Devices:* M1.
   *Tier:* **sonnet**, size **S** (measurement, not development).
 
+  **Follow-up (2026-08-25), DONE — [`m4-batching-stage-profile-results.md`](m4-batching-stage-profile-results.md):**
+  two things this measurement left open were checked. (a) **Vocoder share under batching**: grew
+  2.01% (batch=1) → 7.85% (batch=8), a 3.9x increase, but stayed under the plan's 15% threshold —
+  AR-loop speedup measured at 3.23x, short of the ≥4x `../mojo-max/m4-conclusion.md` §4 condition B
+  needs to reopen the Mojo/MAX vocoder track. (b) **Paragraph-length replies** (3-6 sentences, the
+  real audiobook segment unit, vs. the short sentences above): speedup held — 3.69x at batch=8,
+  slightly better than the short-sentence 3.40x — and `peak_footprint` still showed no batch-depth
+  ceiling within 1/2/4/8 (11.6-12.2 GiB, batch=1 the highest, not the lowest). One caveat did
+  surface on long material: the OS swap ceiling itself grew more under batching pressure than on
+  short material, though no run crashed or thrashed. Batch sizes above 8 on paragraph-length
+  material remain untested.
+
 - [ ] **M4-T3 (conditional on T2). Convert to 8-bit and verify the result is actually usable.**
   **First step, blocking, before anything else in this task**: after conversion, explicitly check
   that `HiggsAudioTokenizer.from_higgs_tts_checkpoint(...)` finds nonzero codec tensors in the
