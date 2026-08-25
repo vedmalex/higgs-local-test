@@ -1,0 +1,106 @@
+{
+  "id": "final_intonation",
+  "title": "Завершающая интонация: пунктуация и незаконченная мысль",
+  "priority": 3,
+  "description": "output/m4_tags/05_final_intonation/ — 5 клипов, проверяющих, передаёт ли Higgs интонацией конец фразы: точка/вопрос/восклицание и законченная/продолжающаяся мысль.",
+  "tasks": [
+    {
+      "id": "final-punct-period",
+      "type": "single_rating",
+      "question": "Как звучит конец этой фразы по интонации?",
+      "options": [
+        "Утверждение (точка)",
+        "Вопрос",
+        "Восклицание",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/05_final_intonation/punct_1_period.wav"
+      },
+      "hidden": {
+        "A": {
+          "marker": "punct:period"
+        },
+        "correct_answer": "Утверждение (точка)"
+      }
+    },
+    {
+      "id": "final-punct-question",
+      "type": "single_rating",
+      "question": "Как звучит конец этой фразы по интонации?",
+      "options": [
+        "Утверждение (точка)",
+        "Вопрос",
+        "Восклицание",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/05_final_intonation/punct_2_question.wav"
+      },
+      "hidden": {
+        "A": {
+          "marker": "punct:question"
+        },
+        "correct_answer": "Вопрос"
+      }
+    },
+    {
+      "id": "final-punct-exclaim",
+      "type": "single_rating",
+      "question": "Как звучит конец этой фразы по интонации?",
+      "options": [
+        "Утверждение (точка)",
+        "Вопрос",
+        "Восклицание",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/05_final_intonation/punct_3_exclaim.wav"
+      },
+      "hidden": {
+        "A": {
+          "marker": "punct:exclaim"
+        },
+        "correct_answer": "Восклицание"
+      }
+    },
+    {
+      "id": "final-boundary-complete",
+      "type": "single_rating",
+      "question": "Судя по интонации в конце клипа, мысль завершена или будет продолжение?",
+      "options": [
+        "Мысль завершена",
+        "Мысль не завершена, будет продолжение",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/05_final_intonation/boundary_1_complete_thought.wav"
+      },
+      "hidden": {
+        "A": {
+          "marker": "boundary:complete_thought"
+        },
+        "correct_answer": "Мысль завершена"
+      }
+    },
+    {
+      "id": "final-boundary-continuing",
+      "type": "single_rating",
+      "question": "Судя по интонации в конце клипа, мысль завершена или будет продолжение?",
+      "options": [
+        "Мысль завершена",
+        "Мысль не завершена, будет продолжение",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/05_final_intonation/boundary_2_continuing_thought.wav"
+      },
+      "hidden": {
+        "A": {
+          "marker": "boundary:continuing_thought"
+        },
+        "correct_answer": "Мысль не завершена, будет продолжение"
+      }
+    }
+  ]
+}

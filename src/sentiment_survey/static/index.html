@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Higgs — слепая проверка сентимента</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Higgs — слепая проверка тегов (issue #57)</h1>
+  <button id="home-btn" class="link-btn" hidden>← Все наборы</button>
+</header>
+
+<main id="app">
+  <section id="view-sets">
+    <p class="hint">Выберите набор заданий. Наборы отсортированы по приоритету: сначала непроверенное,
+      затем спорное по метрикам, затем всё остальное.</p>
+    <div id="sets-list" class="sets-list"><p>Загрузка…</p></div>
+  </section>
+
+  <section id="view-task" hidden>
+    <div class="progress"><span id="progress-text"></span>
+      <div class="progress-bar"><div id="progress-fill"></div></div>
+    </div>
+
+    <div id="task-card" class="card">
+      <p id="task-question" class="question"></p>
+      <div id="task-slots" class="slots"></div>
+      <p id="prior-hint" class="prior-hint" hidden>
+        По этому заданию уже есть более ранний вердикт владельца — можно ответить заново
+        или пропустить (последний вариант ответа).
+      </p>
+      <div id="task-options" class="options"></div>
+    </div>
+
+    <div id="reveal-card" class="card reveal" hidden>
+      <h3>Раскрыто после ответа</h3>
+      <div id="reveal-body"></div>
+      <button id="next-btn" class="primary">Далее →</button>
+    </div>
+  </section>
+
+  <section id="view-done" hidden>
+    <div class="card">
+      <h2>Набор пройден</h2>
+      <div id="summary-body"></div>
+      <button id="back-to-sets-btn" class="primary">К списку наборов</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Результаты пишутся в <code>output/sentiment_survey_results/&lt;набор&gt;/</code>
+     (не в Git). Клавиши: 1-9 — выбрать вариант ответа, R — переслушать первый клип, Enter — далее.</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
