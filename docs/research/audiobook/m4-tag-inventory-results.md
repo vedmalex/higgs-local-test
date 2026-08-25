@@ -1,4 +1,4 @@
-# M4-T5 — Full 34-tag inventory, terminal intonation, and stress-mark notation: results
+# M4-T5 — 34-of-43-tag inventory, terminal intonation, and stress-mark notation: results
 
 Date: 2026-08-25. Refs #57. Hardware: Apple M1, 16 GB unified memory, macOS, native arm64,
 `.venv-tts` (MLX-Audio, `bosonai/higgs-tts-3-4b`). Scope: `docs/research/audiobook/m4-plan.md`
@@ -6,14 +6,29 @@ M4-T5, plus three owner additions made mid-task: (1) terminal/falling intonation
 end and whether our own segmentation preserves it, (2) Russian stress-mark notation on Higgs
 (never tested before this document), (3) a full sample dump for the owner's own listening.
 
-**Before this document, only 4 of the 34 control tags had ever been checked at all**
-(`docs/research/audiobook/m4-sentiment-results.md`), and one of those four
+**Correction (2026-08-25, later same-day pass, issue #57 sfx tag fix):** at the time this
+document was written, the checkpoint's control-tag inventory was itself believed to be 34 tags
+(21 emotion + 10 prosody + 3 style) — the `<|sfx:*|>` category (9 tags: `cough`, `laughter`,
+`crying`, `screaming`, `burping`, `humming`, `sigh`, `sniff`, `sneeze`; ids 151707-151715,
+documented in the checkpoint's `PROMPTING.md` "Full tag catalog (43)") was missed entirely, both
+in this document and in `src/audiobook.py`'s `VALID_TAGS` (which rejected all 9 as "unknown"
+until the fix). **This document's "full inventory" claim below is therefore false as originally
+written: this is a triage of 34 of the checkpoint's real 43 control tags, not all of them.** The
+9 `sfx:*` tags remain completely unchecked by this document or any other — no generation, no
+metrics, no listening pass. That is separate, still-open work; see §6.
+
+**Before this document, only 4 of the (as later corrected) 43 control tags had ever been
+checked at all** (`docs/research/audiobook/m4-sentiment-results.md`), and one of those four
 (`<|style:whispering|>`) turned out to be a near-total no-op on inspection. **This document is
-the first pass over all 34.**
+the first pass over the 34 emotion/prosody/style tags — not, as originally claimed, over the
+full inventory; the 9 `sfx:*` tags were not covered.**
 
 ## 0. Honesty summary (read this first)
 
-- **All 34 tags were generated and measured.** Nothing was skipped for time.
+- **All 34 emotion/prosody/style tags were generated and measured.** Nothing was skipped for
+  time. **The 9 `sfx:*` tags were not part of this run at all** — they were not yet known to be
+  part of the checkpoint's real 43-tag inventory when this document was written (see the
+  correction above). This is separate, unfinished work.
 - **The final judgment on every tag is NOT made here.** Per the owner's brief, this document
   produces an objective triage (groups A/B/C, real numbers) and a prioritized listening list;
   whether a clip actually sounds like "anger" or "shame" is a human judgment this document
@@ -248,7 +263,10 @@ in the overwhelming majority of cases; `+` shows the same failure class Qwen had
 stress actually moves is unverified pending listening; the `04_stress/` folder and `LISTEN.md`
 are built specifically to make that judgment fast.
 
-## 4. The 34-tag inventory: groups A/B/C
+## 4. The 34-of-43-tag inventory: groups A/B/C
+
+(Covers only the 21 emotion + 10 prosody + 3 style tags. The 9 `sfx:*` tags are not in this
+table and have no group assignment — see the correction note above and §6.)
 
 Delta columns are `clip - neutral_baseline` (neutral: F0 std 60.3 Hz, mean energy -24.5 dB,
 2.23 words/sec, 1 pause / 540ms total, F0 median 134.1 Hz, duration 8.52s). Per the owner's
@@ -336,6 +354,17 @@ nothing here is committed). The 8 highest-priority items, condensed:
 
 ## 6. What was NOT verified (honesty)
 
+- **The 9 `sfx:*` tags (`cough`, `laughter`, `crying`, `screaming`, `burping`, `humming`,
+  `sigh`, `sniff`, `sneeze`) were not generated, measured, or listened to at all, in this
+  document or anywhere else in this project.** This document's original title/framing claimed
+  a "full" tag inventory, but the `sfx:*` category was not even known to belong to the
+  checkpoint's inventory at the time (see the correction note at the top). This is separate,
+  currently unclosed work — issue #57 tracks it. Before shipping `sfx` tags in a real audiobook
+  chapter: (1) confirm each of the 9 is audibly the effect its name promises (not, e.g., a
+  no-op like `style:whispering` turned out to be for whispering), (2) confirm the inline,
+  one-shot placement semantics from `PROMPTING.md` (`<|sfx:tag|>onomatopoeia, then the line`,
+  no reopening across a chunk boundary) actually match what the model produces at a real chunk
+  boundary, not just what `src/audiobook.py`'s `chunk_sentences()` was coded to do.
 - **No tag's emotional/stylistic identity was confirmed by ear in this document.** Groups A/B/C
   are an objective triage only, exactly as scoped by the owner.
 - **Terminal-contour F0 slope is a noisy proxy** (§2.4); the segmentation-boundary question

@@ -238,9 +238,11 @@ materially stronger pass of the M4-T0 gate (§3: "can sadness and elation be tol
 than "distinguishable" alone would have been — the gate is **PASSED on substance, not just on
 form**. Note what the owner did *not* say: no claim of "excellent" or "production quality" was
 made, no claim about `elation` sounding correctly joyful (only that it is distinguishable from
-`sadness`). Do not upgrade this verdict beyond what was said. Only 4 of the 34 tags in the
-checkpoint (§0 above) have been checked at all; `sadness`/`elation`/`whispering`/`speed_slow` are
-the extent of the evidence — this verdict says nothing about the other 30 tags.
+`sadness`). Do not upgrade this verdict beyond what was said. Only 4 of the 43 tags in the
+checkpoint (21 emotion + 10 prosody + 3 style + 9 sfx; §0 above) have been checked at all;
+`sadness`/`elation`/`whispering`/`speed_slow` are the extent of the evidence — this verdict says
+nothing about the other 39 tags, including all 9 `sfx:*` tags, which have not been checked at
+all (issue #57, sfx tag inventory fix).
 
 **(b) `<|style:whispering|>` does not produce whispering — it produces quieter speech.** The
 owner's description ("шепот звучит как тихий звук" — "the whisper sounds like a quiet sound")
