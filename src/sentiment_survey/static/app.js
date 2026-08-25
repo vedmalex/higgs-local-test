@@ -2,9 +2,12 @@
 
 const state = {
   currentSetId: null,
-  currentTask: null,
-  listenMs: {},       // clip_url -> accumulated ms
-  playStart: {},       // clip_url -> timestamp when play started
+  taskList: [],        // [{index, id, question, answered, is_correction, answered_after_reveal, matches_expected, skipped_prior}]
+  currentIndex: -1,
+  currentDetail: null,  // last /task/<id> response
+  editMode: false,      // true = show the answer form again for an already-answered task
+  listenMs: {},          // clip_url -> accumulated ms
+  playStart: {},         // clip_url -> timestamp when play started
   audioEls: [],
 };
 
@@ -26,6 +29,12 @@ async function api(path, opts) {
   return res.json();
 }
 
+function escapeHtml(str) {
+  const d = document.createElement("div");
+  d.textContent = str == null ? "" : str;
+  return d.innerHTML;
+}
+
 // ---------------------------------------------------------------- sets list
 
 async function loadSets() {
@@ -45,37 +54,78 @@ async function loadSets() {
     card.innerHTML = `
       <h3>${escapeHtml(s.title)}</h3>
       <p>${escapeHtml(s.description || "")}</p>
-      <p class="set-progress">${s.answered} / ${s.total} (${pct}%)${s.answered >= s.total ? " — пройдено, можно переслушать" : ""}</p>
+      <p class="set-progress">${s.answered} / ${s.total} (${pct}%)${s.answered >= s.total ? " — пройдено, можно переслушать и исправить" : ""}</p>
     `;
     card.addEventListener("click", () => openSet(s.id));
     list.appendChild(card);
   }
 }
 
-function escapeHtml(str) {
-  const d = document.createElement("div");
-  d.textContent = str;
-  return d.innerHTML;
-}
-
 // ---------------------------------------------------------------- task flow
 
 async function openSet(setId) {
   state.currentSetId = setId;
+  state.editMode = false;
   show("view-task");
-  await loadNextTask();
+  await refreshTaskList();
+  if (!state.taskList.length) return;
+  const firstUnanswered = state.taskList.findIndex((t) => !t.answered);
+  await goToIndex(firstUnanswered >= 0 ? firstUnanswered : 0);
 }
 
-async function loadNextTask() {
-  el("reveal-card").hidden = true;
-  el("task-card").hidden = false;
-  const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/next`);
+async function refreshTaskList() {
+  const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/tasks`);
+  state.taskList = data.tasks;
   updateProgress(data.answered, data.total);
-  if (data.done) {
-    await showSummary();
-    return;
-  }
-  renderTask(data.task);
+  renderSidebar();
+  return data;
+}
+
+function renderSidebar() {
+  const box = el("task-sidebar-list");
+  box.innerHTML = "";
+  state.taskList.forEach((t, idx) => {
+    const row = document.createElement("div");
+    let cls = "sidebar-row";
+    if (idx === state.currentIndex) cls += " current";
+    if (t.skipped_prior) cls += " skipped";
+    else if (t.answered_after_reveal) cls += " non-blind";
+    else if (t.is_correction) cls += " corrected";
+    else if (t.answered) cls += " answered";
+    row.className = cls;
+    const mark = t.skipped_prior ? "–" : t.answered ? "✓" : "·";
+    row.innerHTML = `<span class="row-mark">${mark}</span><span class="row-idx">${idx + 1}.</span>`
+      + `<span class="row-q">${escapeHtml(truncate(t.question, 60))}</span>`;
+    row.title = t.answered
+      ? (t.is_correction ? "Отвечено (исправлено) — нажмите, чтобы открыть" : "Отвечено — нажмите, чтобы открыть")
+      : "Не отвечено — нажмите, чтобы открыть";
+    row.addEventListener("click", () => goToIndex(idx));
+    box.appendChild(row);
+  });
+}
+
+function truncate(str, n) {
+  if (!str) return "";
+  return str.length > n ? str.slice(0, n - 1) + "…" : str;
+}
+
+async function goToIndex(idx) {
+  if (idx < 0 || idx >= state.taskList.length) return;
+  state.currentIndex = idx;
+  state.editMode = false;
+  const taskId = state.taskList[idx].id;
+  const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/task/${encodeURIComponent(taskId)}`);
+  state.currentDetail = data;
+  renderSidebar();
+  renderNavBar();
+  renderCurrentTask();
+}
+
+function renderNavBar() {
+  const d = state.currentDetail;
+  el("nav-position").textContent = `${d.index + 1} / ${d.total}`;
+  el("prev-task-btn").disabled = d.prev_id == null;
+  el("next-task-btn").disabled = d.next_id == null;
 }
 
 function updateProgress(answered, total) {
@@ -83,14 +133,62 @@ function updateProgress(answered, total) {
   el("progress-fill").style.width = total ? `${(100 * answered) / total}%` : "0%";
 }
 
-function renderTask(task) {
-  state.currentTask = task;
+function renderCurrentTask() {
+  const d = state.currentDetail;
+  el("reveal-card").hidden = true;
+  if (d.previous_answer && !state.editMode) {
+    el("task-card").hidden = true;
+    renderAnswered(d);
+  } else {
+    el("answered-card").hidden = true;
+    renderTaskForm(d.task);
+  }
+}
+
+function renderAnswered(d) {
+  const card = el("answered-card");
+  card.hidden = false;
+  const rec = d.previous_answer;
+  const flag = el("answered-flag");
+  if (rec.answered_after_reveal) {
+    flag.textContent = "Этот ответ дан ПОСЛЕ раскрытия меток (исправление) — не считается слепым в итогах.";
+    flag.className = "answered-flag non-blind";
+  } else if (rec.skipped_prior) {
+    flag.textContent = "Пропущено — уже был более ранний вердикт.";
+    flag.className = "answered-flag";
+  } else {
+    flag.textContent = "Отвечено вслепую.";
+    flag.className = "answered-flag";
+  }
+  let html = `<p><strong>Вопрос:</strong> ${escapeHtml(d.task.question)}</p>`;
+  html += `<p><strong>Ваш ответ:</strong> ${escapeHtml(rec.answer_label)}</p>`;
+  if (rec.correct_answer != null) {
+    html += `<p><strong>Ожидалось:</strong> ${escapeHtml(rec.correct_answer)} — `
+      + (rec.matches_expected ? `<span class="match-ok">совпало</span>` : `<span class="match-bad">не совпало</span>`) + `</p>`;
+  }
+  if (d.reveal && d.reveal.prior_verdict) {
+    html += `<div class="prior-verdict"><strong>Более ранний вердикт:</strong> ${escapeHtml(d.reveal.prior_verdict)}</div>`;
+  }
+  if (d.reveal) {
+    html += "<dl>";
+    for (const [role, meta] of Object.entries(d.reveal.hidden || {})) {
+      if (role === "correct_answer") continue;
+      html += `<dt>${escapeHtml(role)}</dt><dd>${escapeHtml(JSON.stringify(meta))}</dd>`;
+    }
+    html += "</dl>";
+  }
+  el("answered-body").innerHTML = html;
+}
+
+function renderTaskForm(task) {
+  const card = el("task-card");
+  card.hidden = false;
   state.listenMs = {};
   state.playStart = {};
   state.audioEls = [];
 
   el("task-question").textContent = task.question;
-  el("prior-hint").hidden = !task.has_prior_verdict;
+  el("prior-hint").hidden = !task.has_prior_verdict || state.editMode;
 
   const slotsEl = el("task-slots");
   slotsEl.innerHTML = "";
@@ -166,11 +264,14 @@ async function submitAnswer(task, optionLabel) {
     body: JSON.stringify(body),
   });
   updateProgress(result.answered, result.total);
-  renderReveal(result.reveal, result.matches_expected, isSkip);
+  const isLastTask = state.currentDetail.next_id == null;
+  await refreshTaskList();
+  renderReveal(result.reveal, result.matches_expected, isSkip, isLastTask);
 }
 
-function renderReveal(reveal, matches, wasSkip) {
+function renderReveal(reveal, matches, wasSkip, isLastTask) {
   el("task-card").hidden = true;
+  el("answered-card").hidden = true;
   const revealCard = el("reveal-card");
   revealCard.hidden = false;
   const body = el("reveal-body");
@@ -189,6 +290,21 @@ function renderReveal(reveal, matches, wasSkip) {
     html += `<div class="prior-verdict"><strong>Более ранний вердикт:</strong> ${escapeHtml(reveal.prior_verdict)}</div>`;
   }
   body.innerHTML = html;
+  el("next-btn").textContent = isLastTask ? "Итоги набора →" : "Далее →";
+  el("next-btn").onclick = () => (isLastTask ? showSummary() : advanceAfterReveal());
+}
+
+async function advanceAfterReveal() {
+  // Move forward by position (next_id from the task detail we already have)
+  // rather than re-deriving "next unanswered" — this also works cleanly
+  // right after a correction to an earlier task.
+  const nextId = state.currentDetail.next_id;
+  if (nextId == null) {
+    await showSummary();
+    return;
+  }
+  const nextIdx = state.taskList.findIndex((t) => t.id === nextId);
+  await goToIndex(nextIdx >= 0 ? nextIdx : state.currentIndex);
 }
 
 // ---------------------------------------------------------------- summary
@@ -200,6 +316,9 @@ async function showSummary() {
   let html = `<p>${data.answered} из ${data.total} заданий отвечено`;
   if (data.skipped_prior) html += `, из них ${data.skipped_prior} пропущено как уже известное`;
   html += `.</p>`;
+  if (data.answered_after_reveal) {
+    html += `<p class="hint">Из них ${data.answered_after_reveal} — исправления, данные уже после раскрытия меток; в статистику слепых ответов ниже они не входят.</p>`;
+  }
   if (data.differ_pairs_total) {
     html += `<p><strong>Различил / не различил (для гейта сентимента):</strong> ${data.differ_pairs_distinguished} из ${data.differ_pairs_total} пар опознаны как различающиеся.</p>`;
     html += `<p class="hint">${escapeHtml(data.gate_threshold_note)}</p>`;
@@ -217,19 +336,38 @@ el("home-btn").addEventListener("click", () => {
   loadSets();
 });
 el("back-to-sets-btn").addEventListener("click", () => loadSets());
-el("next-btn").addEventListener("click", () => loadNextTask());
+// next-btn's click handler is (re)assigned per-reveal in renderReveal(),
+// since it toggles between "advance" and "show summary" depending on
+// whether the just-answered task was the last one.
+el("prev-task-btn").addEventListener("click", () => goToIndex(state.currentIndex - 1));
+el("next-task-btn").addEventListener("click", () => goToIndex(state.currentIndex + 1));
+el("edit-answer-btn").addEventListener("click", () => {
+  state.editMode = true;
+  renderCurrentTask();
+});
+el("sidebar-toggle").addEventListener("click", () => {
+  const sidebar = el("task-sidebar");
+  const collapsed = sidebar.classList.toggle("collapsed");
+  el("sidebar-toggle").textContent = collapsed ? "Показать" : "Скрыть";
+});
 
 document.addEventListener("keydown", (e) => {
-  if (!el("view-task").hidden) {
-    if (!el("reveal-card").hidden) {
-      if (e.key === "Enter") { e.preventDefault(); loadNextTask(); }
-      return;
-    }
-    if (e.key.toLowerCase() === "r" && state.audioEls.length) {
-      state.audioEls[0].currentTime = 0;
-      state.audioEls[0].play();
-      return;
-    }
+  if (el("view-task").hidden) return;
+  const tag = (e.target && e.target.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+  if (!el("reveal-card").hidden) {
+    if (e.key === "Enter") { e.preventDefault(); el("next-btn").click(); }
+    return;
+  }
+  if (e.key === "ArrowLeft") { e.preventDefault(); goToIndex(state.currentIndex - 1); return; }
+  if (e.key === "ArrowRight") { e.preventDefault(); goToIndex(state.currentIndex + 1); return; }
+  if (e.key.toLowerCase() === "r" && state.audioEls.length) {
+    state.audioEls[0].currentTime = 0;
+    state.audioEls[0].play();
+    return;
+  }
+  if (!el("task-card").hidden) {
     const n = parseInt(e.key, 10);
     if (!Number.isNaN(n)) {
       const buttons = el("task-options").querySelectorAll("button");
