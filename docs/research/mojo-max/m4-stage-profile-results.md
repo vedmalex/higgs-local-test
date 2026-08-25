@@ -1,5 +1,19 @@
 # M4 stage profile — Higgs TTS 3 (MLX) time breakdown: Amdahl hypothesis CONFIRMED
 
+**Independent audit (2026-08-25, issue #57):** the methodology was checked line by line — `mx.eval()`
+sits at every stage boundary, no work leaks between stages, the decoder's share is not
+undercounted, and the arithmetic holds together. **Verdict: the methodology is clean and the
+"vocoder ~4%, track closed" conclusion is confirmed, not overturned.** The audit did find three
+real, narrower defects, fixed below: (1) the previously published `ar_glue_sampling_embedding`
+row for the short case ("0.000 s — 0.00%") was a clamping artifact, not a genuine measurement —
+see the corrected table and note; (2) the 4.26-vs-6.56 RTF discrepancy has a named leading
+explanation (cold start / one-time compile overhead) that was measured but not previously
+connected to this discrepancy — see the updated section below; (3) the closure conclusion needed
+an explicit condition under which it reopens if the AR loop itself gets much faster — see
+[`m4-conclusion.md`](m4-conclusion.md) §4. None of this changes the underlying measured numbers or
+the bottom line; it corrects how a few of them are presented and adds an explicit reopening
+condition that was previously only implicit.
+
 Date: 2026-08-25. Run: `docs/research/mojo-max/m4_stage_profile.py`, native Apple M1 (16 GB),
 `.venv-tts`, MLX 0.32.1 / mlx-audio 0.5.0, model `bosonai/higgs-tts-3-4b`. Blocking measurement
 for issue #57's M4 planning: decide where a Mojo/MAX rewrite would actually move the needle.
@@ -88,9 +102,9 @@ recorded 6.56 — see the discrepancy note below.
 | `prompt_prep` (tokenize + build embeddings) | 0.239 s — 1.18% | 0.317 s — 0.38% |
 | `ar_prefill` (one backbone pass over the whole prompt) | 0.311 s — 1.54% | 2.735 s — 3.30% |
 | `ar_backbone_steps` (one backbone pass per audio frame, 130 / 492 frames) | 19.035 s — **93.96%** | 75.415 s — **91.01%** |
-| `ar_glue_sampling_embedding` (sampling + code embedding + loop control, by difference) | 0.000 s — 0.00% | 0.661 s — 0.80% |
+| `ar_glue_sampling_embedding` (sampling + code embedding + loop control, by difference) | see note ¹ below — not a genuine 0.00% | ≥ 0.661 s — ≥ 0.80% (undercounted, see note ¹) |
 | `codec_decode` (the single vocoder call) | 0.360 s — **1.78%** | 3.119 s — **3.76%** |
-| `postprocess_and_write` (fades + WAV write) | 0.479 s — 2.36% | 0.618 s — 0.75% |
+| `postprocess_and_write` (fades + WAV write; **spans the `wall_total` boundary**, see note ¹) | 0.479 s — 2.36% | 0.618 s — 0.75% |
 | **wall_total** | **20.259 s** | **82.865 s** |
 | RTF (wall / audio duration, project convention) | 4.084 | 4.263 |
 | AR frames | 130 | 492 |
@@ -98,6 +112,38 @@ recorded 6.56 — see the discrepancy note below.
 
 Model load: 16.881 s (separate stage, not included in RTF, matches project convention).
 Warm-up generation (discarded): 39.094 s.
+
+**¹ Note (audit fix, 2026-08-25): the `ar_glue` row was an accounting artifact for the short case,
+and undercounted for the long case — same underlying numbers, corrected representation only.**
+`m4_stage_profile.py`'s original `run_case()` measured `wall_total` at `model.generate()`'s return
+(line ~145), then separately timed the WAV write **after** that point, and folded the write time
+into `postprocess` before subtracting it (with the rest of `postprocess`) from `wall_total` to get
+`ar_glue` by difference. Because the WAV write happens strictly after `wall_total`'s clock already
+stopped, this is double-counted against a total that had already excluded it:
+
+- **Short case:** summing the five other published stages (`prompt_prep` + `ar_prefill` +
+  `ar_backbone_steps` + `codec_decode` + `postprocess_and_write` = 0.239 + 0.311 + 19.035 + 0.360 +
+  0.479 = 20.424 s) exceeds `wall_total` (20.259 s) by **0.165 s** — the write time bled across the
+  boundary and made "accounted" time exceed the wall clock. The unclamped remainder was therefore
+  **-0.165 s**, not zero. The published "0.000 s — 0.00%" was `max(0.0, -0.165)`, a clamp that
+  displayed a negative bookkeeping error as an innocuous, and misleading, exact zero.
+- **Long case:** the sum balances exactly to `wall_total` (82.865 s) here because the remainder
+  stayed positive and was never clamped, but the *same* write-time contamination still deflates the
+  published 0.661 s: the true, uncontaminated AR-glue share is `0.661 s + write_seconds`, i.e. at
+  least 0.661 s and, once the WAV-write time is excluded, modestly higher.
+
+The exact fade-processing-only vs. WAV-write-only split cannot be recovered from the committed
+record for these two already-completed runs — the original script only ever logged their sum, and
+the raw run log (`logs/m4_stage_profile.log`) is gitignored and was not preserved separately. **No
+number in the table above was recomputed or re-measured to produce this note** — `wall_total`,
+`ar_prefill`, `ar_backbone_steps`, `codec_decode`, `prompt_prep`, and the combined
+`postprocess_and_write` figure are exactly what the original run produced; only how the (now
+retired) `ar_glue`/`postprocess` split was computed from them is corrected. `m4_stage_profile.py`
+now reports `write_seconds` as its own field, entirely outside `wall_total` and every stage
+percentage, and no longer clamps a negative `ar_glue` remainder — a future run prints a warning
+instead, so this ambiguity cannot recur silently. This correction does not change the main
+finding: `ar_glue` was and remains a sub-1%-to-low-single-digit-percent bucket either way, orders
+of magnitude smaller than the AR loop's >90% share.
 
 Memory, kept as two separate claims per `AGENTS.md` (whole-script `/usr/bin/time -l`, covering
 load + warm-up + both cases):
@@ -131,11 +177,71 @@ Higgs's wall-clock time needs to target the AR loop itself** (e.g., batching/par
 strategies, quantizing/accelerating the backbone's per-step forward pass, or KV-cache/attention
 optimizations) — not further vocoder kernel work.
 
+### This closure is conditional on the current AR/vocoder cost ratio, not permanent
+
+**Audit finding (2026-08-25):** at `codec_decode`'s currently-measured fixed cost (3.119 s, long
+case), the vocoder only *stays* under the plan's own pre-declared 15%-of-wall closure threshold
+(`m4-plan.md` §2) as long as the AR loop remains roughly as slow as measured here. Solve for the
+wall time at which a fixed 3.119 s decode equals 15% of wall: `wall ≈ 3.119 / 0.15 ≈ 20.8 s` for the
+19.44 s-audio long case, i.e. **RTF ≈ 1.07** — the AR loop would have to get roughly **4-6x** faster
+than its current ~78 s (`ar_prefill` + `ar_backbone_steps`) for that to happen. That is not a
+hypothetical: **it is exactly what M4's other tracks (batching, quantization) are aiming for.** If
+those tracks deliver a combined AR-loop speedup in that range, the vocoder's share crosses back
+above 15% and this closure needs to be revisited.
+
+**Reopening condition, stated explicitly (previously only implicit):** this vocoder track reopens
+if **either**:
+
+1. A real cross-platform requirement returns **and** the upstream MAX defects are fixed and
+   released (the two conditions already recorded in [`m4-conclusion.md`](m4-conclusion.md) §4); **or**
+2. **The AR loop is sped up by ≥4x relative to this profile's measured cost** — at that point the
+   vocoder's share of wall time exceeds the plan's own declared 15% threshold, and the question of
+   whether to port/accelerate the vocoder must be reopened on its own (independent) merits.
+
+Condition 2 does not require condition 1. A batching/quantization win alone, with no change to the
+cross-platform or upstream-MAX situation, is sufficient to reopen this track. See
+[`m4-conclusion.md`](m4-conclusion.md) §4 for the authoritative statement of both conditions.
+
 ## Discrepancy with the previously recorded RTF 6.56
 
 The measured long-case RTF here is **4.26**, noticeably lower than the `logs/tts_basic.log`
 figure of **6.56** for what is nominally the same fixture text. Both runs are on the same M1
-machine and same model. Plausible, not fully disambiguated, contributors:
+machine and same model.
+
+**Leading explanation (audit finding, 2026-08-25): cold start.** `src/tts_test.py:52-54` measures
+generation the same way this profiler does (`list(model.generate(...))`, wall-clock around it), but
+`src/tts_test.py` has **no warm-up call at all** — `logs/tts_basic.log` was produced on the very
+first `model.generate()` call in that process. `m4_stage_profile.py`, by contrast, deliberately runs
+and **discards** a warm-up generation (`WARMUP_TEXT = "Привет."`, §"Method" above) before either
+measured case, specifically to keep one-time MLX graph-construction/compile cost out of the
+short/long numbers. That discarded warm-up cost **39.094 s** for a ~26-frame phrase whose steady-
+state cost (by the long case's ~153 ms/frame) should be roughly 3-4 s — i.e. **on the order of
+35 s of one-time compile/kernel-build overhead** that `tts_basic.log`'s single, cold, un-warmed-up
+call paid in full and this profiler's short/long numbers do not pay at all. That is large enough by
+itself to plausibly account for most or all of the RTF gap on a ~19-20 s-audio case, without
+needing any of the other contributing factors below to do the explanatory work.
+
+**Methodological consequence:** measuring with a discarded warm-up, as this profiler does, is the
+*correct* choice for the question M4 needs answered — "is it worth porting the vocoder" — because
+that decision has to be made on Higgs's **steady-state** cost. A one-time ~35 s compile overhead is
+irrelevant to a 10-hour-audiobook budget (it amortizes to effectively zero over hundreds or
+thousands of generation calls), whereas `tts_basic.log`'s un-warmed RTF of 6.56 conflates a
+per-process fixed cost with the per-frame cost that actually scales with book length. Using the
+un-warmed number here would have overstated the true steady-state cost, which matters for this
+track's conclusion in a specific, checkable direction — spelled out next.
+
+**The sign of the discrepancy reinforces, not undermines, the vocoder-track closure.** `codec_decode`
+is (to a first approximation) a fixed ~3.1 s cost per generation call, independent of RTF. If the
+*true* steady-state RTF for this machine/model turns out to sit closer to 6.56 than to 4.26 (i.e.
+if the AR loop is in practice somewhat more expensive per frame than this particular run measured —
+recall §"Caveat: machine was not fully idle" above), then the vocoder's percentage-of-wall share
+gets **smaller**, not larger, than the 3.76% reported here for the long case, because the same fixed
+decode cost is being divided by a larger wall time. In other words: whichever of the two RTF values
+is closer to the true steady state, the vocoder-is-not-the-bottleneck conclusion does not flip — at
+worst it becomes even more true.
+
+Other plausible, secondary, not-fully-disambiguated contributors to the residual gap (none as large
+as the cold-start effect, and none needed to explain most of the ~2.3 RTF-point difference):
 
 - Different background load at measurement time (this run: load average 5.94 with Docker/IDE
   processes active; the original log's contemporaneous load was not recorded).
@@ -151,10 +257,40 @@ machine and same model. Plausible, not fully disambiguated, contributors:
   randomness in the AR loop (`temperature=1.0`, no fixed seed in either script) producing a
   different number of frames, not a measurement error.
 
+**Consequence for the M4 plan:** `docs/research/audiobook/m4-plan.md`'s M4-T1b ("re-run M4-T1's
+profile on an idle machine [because] the 4.26-vs-6.56 discrepancy is not cosmetic") was written to
+*resolve* this gap. It is now explained, so that framing of M4-T1b is retired — see the updated
+entry there. A clean-machine re-run is still useful as a **stability check** (confirming the
+short/long numbers hold under less background load), but it is no longer a blocking open question,
+and no downstream M4 decision was waiting on it.
+
 This is flagged honestly rather than adjusted to match: **the absolute RTF is not tightly
 reproduced**, but the qualitative structural finding (AR loop dominates, vocoder is a small
 single-digit-percent share) does not depend on which of these RTF values is more representative —
 it would hold under either.
+
+## Script defects found by the audit and fixed (do not affect the numbers above)
+
+- **Non-restorable instrumentation (P4).** `run_case()` called `instrument(model, stats)` for each
+  case, and `main()` called it again beforehand for the warm-up, without ever undoing the previous
+  call's monkey-patches. `model.backbone`, `model._decode_audio`, and the rest got wrapped in a new
+  layer on top of the previous layer every time — three layers deep by the long case. Audited: on
+  the numbers published above, this was harmless — the outermost wrapper always writes into the
+  live `stats` dict and correctly encloses (and still times) the inner layers, and the added
+  Python-call overhead per layer is on the order of single-digit milliseconds, far below this
+  script's own timing noise. It was nonetheless a fragile pattern for any future run that adds more
+  cases or re-uses a model instance. Fixed: `instrument()` now returns the original attributes, and
+  a new `deinstrument()` restores them after each case/warm-up, so wrapper layers no longer
+  accumulate. **This does not change any number reported above.**
+- **Warm-up stage breakdown was collected and discarded (P5).** `main()` instrumented the model for
+  the warm-up generation and populated `warmup_stats` with a full stage breakdown, but never printed
+  it — only the aggregate `warmup_seconds` (39.094 s) was reported. That per-stage breakdown is
+  exactly the evidence needed to separate "one-time compile overhead" from "ordinary per-frame AR
+  cost" in the cold-start discussion above. Fixed: the script now prints the warm-up's stage
+  breakdown (`warmup_stage_seconds`) and its average per-frame backbone cost
+  (`warmup_avg_backbone_step_ms`) alongside `warmup_seconds`. This is a script fix for future runs;
+  it does not retroactively produce numbers for the already-completed 2026-08-25 run, whose raw log
+  was not preserved (gitignored).
 
 ## What this does not resolve
 
