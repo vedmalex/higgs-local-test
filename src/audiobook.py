@@ -381,6 +381,68 @@ def validate_control_tags(text: str) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Stress-mark notation (owner-verified by ear, Refs #57, docs/research/audiobook/
+# m4-tag-inventory-results.md sec. 3): an apostrophe placed directly after the
+# stressed vowel (e.g. "за'мок") is the one notation the owner confirmed gives
+# Higgs a stress cue without being read aloud or corrupting the transcript.
+#
+# `split_sentences`/`chunk_sentences`/`validate_control_tags` already treat a bare
+# apostrophe (U+0027) as ordinary text -- it is not in PAIR_OPEN_TO_CLOSE (only the
+# curly single quote pair '‘'/'’' is tracked there), it contains no
+# SENTENCE_END_CHARS, and it does not match _TAG_SHAPE_RE -- so the notation already
+# passes through the whole pipeline untouched (see tests below). What the pipeline
+# does NOT do on its own is tell a stress-mark apostrophe apart from the *same*
+# character used legitimately in a transliterated name ("д'Артаньян", "О'Генри"):
+# both are just "'" to every function above.
+#
+# Disambiguation used here (documented compromise, not a proven rule -- see
+# docs/guides/audiobook_guide.md "Расстановка ударений"): a "'" counts as a stress
+# mark only when it sits strictly INSIDE one lowercase word -- immediately preceded
+# by a lowercase Russian vowel AND immediately followed by a lowercase Russian
+# letter continuing the same word. Both of the name examples above fail this test:
+# "д'Артаньян" has a consonant before the apostrophe and an uppercase letter after
+# it; "О'Генри" has a vowel before it but an uppercase letter after it. This rule is
+# a heuristic on the two examples this project actually has, not a linguistic proof
+# -- a name that happened to be lowercase on both sides of the apostrophe (none
+# found in the sample text) would still be misread as a stress mark.
+RUSSIAN_VOWELS_LOWER = "аеёиоуыэюя"
+RUSSIAN_LETTERS_LOWER = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+
+
+def is_stress_apostrophe(text: str, pos: int) -> bool:
+    """True if the "'" at `text[pos]` looks like a stress mark, not a name apostrophe.
+
+    See the module-level comment above `RUSSIAN_VOWELS_LOWER` for the exact rule and
+    its known blind spot.
+    """
+    if text[pos] != "'":
+        return False
+    if pos == 0 or pos + 1 >= len(text):
+        return False
+    return text[pos - 1] in RUSSIAN_VOWELS_LOWER and text[pos + 1] in RUSSIAN_LETTERS_LOWER
+
+
+def count_stress_marks(text: str) -> int:
+    """Count apostrophes in `text` that match the stress-mark heuristic."""
+    return sum(1 for i, ch in enumerate(text) if ch == "'" and is_stress_apostrophe(text, i))
+
+
+def count_ambiguous_apostrophes(text: str) -> int:
+    """Count apostrophes in `text` that do NOT match the stress-mark heuristic.
+
+    Informational only (e.g. surfaced in the manifest) -- these are apostrophes
+    `is_stress_apostrophe` treats as ordinary text (most likely a name like
+    "д'Артаньян"), so a large count next to a small `count_stress_marks` count can
+    hint that stress notation did not make it into a chapter as intended, or vice
+    versa. Never raises and never blocks generation -- the heuristic has a known
+    blind spot (see above) and must not be treated as ground truth.
+    """
+    return sum(
+        1 for i, ch in enumerate(text) if ch == "'" and not is_stress_apostrophe(text, i)
+    )
+
+
 DEFAULT_SPEAKER = "narrator"
 
 
@@ -774,11 +836,21 @@ def _new_segment_entry(chunk: "Chunk") -> dict:
 
 
 def build_manifest(chunks: list[Chunk], max_chars: int, tag_scope: str) -> dict:
+    # Auto-detected, not author-set (Refs #57): the author of a screenplay/chapter has no
+    # other way to tell a later reader/tool whether stress marks were already placed in the
+    # text. Recording the counts here -- rather than requiring a manual flag the author could
+    # forget to pass -- means the manifest itself answers "was this text stress-marked?" for
+    # anyone inspecting it later (e.g. before spending an evening hand-marking a chapter
+    # that already has marks, or before assuming an unmarked chapter is done). Counts, not a
+    # single bool, so a mostly-marked chapter with a few misses is visible as such.
+    full_text = "\n".join(c.text for c in chunks)
     return {
         "model": MODEL_ID,
         "max_chars": max_chars,
         "tag_scope": tag_scope,
         "created": time.time(),
+        "stress_marks_detected": count_stress_marks(full_text),
+        "ambiguous_apostrophes_detected": count_ambiguous_apostrophes(full_text),
         "segments": [_new_segment_entry(c) for c in chunks],
     }
 
@@ -864,6 +936,13 @@ def load_or_create_manifest(
                 seg = _new_segment_entry(c)
             new_segments.append(seg)
         manifest["segments"] = new_segments
+        # Refresh on every resume, not just at first creation, so an edit that adds/removes
+        # stress marks in an already-in-progress chapter is reflected here too (only the
+        # touched segment's text_hash changes and gets regenerated -- these counts are purely
+        # informational and never gate resume).
+        full_text = "\n".join(c.text for c in chunks)
+        manifest["stress_marks_detected"] = count_stress_marks(full_text)
+        manifest["ambiguous_apostrophes_detected"] = count_ambiguous_apostrophes(full_text)
         save_manifest(manifest, manifest_path)
         return manifest
 
