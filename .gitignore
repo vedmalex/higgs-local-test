@@ -26,7 +26,12 @@ __pycache__/
 # (см. корень репозитория) командой `npx skills experimental_install` — лок-файл
 # коммитится, а .agents/.claude/skills — нет, по аналогии с node_modules.
 .agents/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+# issue #114: audiobook-markup is this project's own authored skill (the DSL spec),
+# not vendored via npx skills add -- it is committed, unlike the rest of .claude/skills.
+!.claude/skills/audiobook-markup/
 # Scratch clones of vllm-omni/modular used for M1 fact-extraction research —
 # large, reproducible from their pinned refs, never committed.
 .research-scratch/
