@@ -113,25 +113,29 @@ OK
 (72 pre-existing + 6 new; all pre-existing tests pass unchanged, confirming `--batch-size 1`
 did not disturb any prior behavior.)
 
-## 4. Real hardware before/after measurement — STATUS: PENDING, blocked on GPU
+## 4. Real hardware before/after measurement — STATUS: deferred, will ride the real chapter run
 
-At the time this integration was implemented, a separate full-chapter run
-(`/private/tmp/higgs-wt-114-full-chapter`, ~70 segments, `--batch-size` not yet available on
-that worktree's checkout) was in progress on the only available M1 GPU, specifically to
-produce a real, comparable, non-batched baseline chapter for other M4 work. Per the task's
-own instruction ("НЕ ЗАПУСКАЙ ГЕНЕРАЦИЮ пока идёт прогон главы — испортишь чужой замер") and
-the owner's explicit follow-up ("замер... можно отложить... не простаивай в ожидании
-железа"), the code and test work above was completed first and is not blocked on hardware;
-the empirical before/after measurement below is queued to run as soon as the machine frees
-up, and this document will be updated in place with the results before the PR is merged.
+**Decision (2026-08-25, owner call):** do not hold this PR on a separate synthetic
+before/after benchmark. `_segment_hash_input` (`speaker + "\x1f" + text`) does not depend on
+`batch_size` in any way, and `batch_size` is deliberately **not** part of the manifest header
+(`build_manifest` only stores `model`/`max_chars`/`tag_scope`) or the resume mismatch check
+in `load_or_create_manifest` — confirmed by reading both functions and by a direct
+reproduction: a manifest fully generated at `--batch-size 1`, reloaded and re-run at
+`--batch-size 8`, raises no mismatch and re-validates every segment as already `"done"`
+without recontacting the model. This means the in-progress full-chapter baseline run
+(`/private/tmp/higgs-wt-114-full-chapter`, `output/chapter-114-e0/manifest.json`, unbatched,
+29/70 segments done at the time this decision was made) can simply be resumed with
+`--batch-size 8` in the same `--output-dir` once this PR lands there: the 29 already-done
+segments are reused from the manifest untouched, and the remaining ~41 are generated through
+the batched path — producing, in one real run, both the unbatched baseline (the first 29,
+already measured) and the batched behavior (the rest, on the real chapter's actual segment
+lengths and count) on directly comparable material, which is more informative than a
+separate synthetic 20-segment run would have been. That re-run is tracked as follow-up work
+outside this PR (it runs against the full-chapter worktree, not this one).
 
-**Planned measurement** (recorded here so it is reproducible by anyone, including a
-different agent/session, without re-deriving the method): a fixture of 20 independent short
-Russian sentences,
-[`m4_batching_integration_segments_ru.txt`](m4_batching_integration_segments_ru.txt) (within
-the requested 16-24 segment range), run through the *actual* `src/audiobook.py` CLI (not the
-`m4_batching_bench.py` standalone script) twice, in separate `/usr/bin/time -l` processes,
-never concurrently:
+The fixture and exact commands below remain valid and are kept for anyone who wants an
+isolated, from-scratch comparison instead of (or in addition to) the resumed-chapter
+approach:
 
 ```bash
 # baseline -- exact pre-#114 behavior
@@ -148,9 +152,10 @@ never concurrently:
 ```
 
 `--max-chars 90` was chosen (and confirmed via `--dry-run`) to produce exactly 20 chunks
-from this fixture, one per sentence.
+from [`m4_batching_integration_segments_ru.txt`](m4_batching_integration_segments_ru.txt),
+one per sentence.
 
-To report, once run: aggregate RTF (total wall / total audio duration) for each
+To report, whichever route is used: aggregate RTF (total wall / total audio duration) per
 `--batch-size`, and the three named memory quantities per this project's convention --
 `peak_mlx (GiB)` (`mx.get_peak_memory()`), `peak_footprint (GiB)` (`/usr/bin/time -l`'s
 "peak memory footprint" line), and `weights_on_disk (GiB)` (the checkpoint's on-disk size) --
