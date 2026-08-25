@@ -214,6 +214,14 @@ footer {
   padding-left: 0.6rem;
 }
 
+.pitch-warning-hint {
+  font-size: 0.85rem;
+  color: #b8860b;
+  border-left: 3px solid #b8860b;
+  padding-left: 0.6rem;
+  margin: 0.5rem 0;
+}
+
 .options {
   display: flex;
   flex-wrap: wrap;

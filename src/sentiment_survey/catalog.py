@@ -14,6 +14,7 @@ JSON-loaded and scan-generated sets identically.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from tag_reference import CATEGORY_RU, parse_tag_reference
@@ -50,6 +51,27 @@ def _rel(path: Path) -> str:
     return str(path.relative_to(REPO_ROOT))
 
 
+
+# Owner feedback (issue #57 follow-up, item 3): "не совсем понятно что значит
+# звучат ли они одинаково, голоса, я так понял совсем разные -- они похоже не
+# будут звучать же". The old wording ("Отличаются ли эти два клипа по
+# звучанию (интонация, тон голоса, манера)?") invited exactly this reading --
+# mentioning "тон голоса" made it sound like a voice-IDENTITY question, and
+# the voices ARE always different (Higgs pins no seed/reference across
+# calls -- see pitch.py's docstring). Voice identity is a question numbers
+# already answer (measured F0), never something worth asking the ear. The
+# question below asks only about the DELIVERY -- intonation/character/pace --
+# and says so explicitly, so "of course the voices sound different" stops
+# being a valid reason to distrust the question.
+DIFFER_QUESTION = (
+    "Отличается ли ПОДАЧА речи в этих двух клипах — интонация, эмоциональная "
+    "окраска, темп? (Сами голоса почти наверняка будут разными — это не "
+    "проверяется на слух, это отдельно измерено по высоте тона; вопрос только "
+    "про характер речи.)"
+)
+DIFFER_OPTIONS = ["Да, подача отличается", "Нет, подача такая же", "Не уверен(а)"]
+
+
 def _differ_task(task_id: str, tagged_path: Path, baseline_path: Path, tag_key: str,
                   tag_facts: dict, prior_verdict: str | None = None) -> dict:
     category = tag_key.split(":", 1)[0]
@@ -58,13 +80,13 @@ def _differ_task(task_id: str, tagged_path: Path, baseline_path: Path, tag_key: 
         "id": task_id,
         "type": "pair_compare",
         "answer_kind": "differ",
-        "question": f"Отличаются ли эти два клипа по звучанию (интонация, тон голоса, манера)?",
-        "options": ["Да, отличаются", "Нет, звучат одинаково", "Не уверен(а)"],
+        "question": DIFFER_QUESTION,
+        "options": list(DIFFER_OPTIONS),
         "clips": {"A": _rel(tagged_path), "B": _rel(baseline_path)},
         "hidden": {
             "A": {"tag": tag_key, "category": category_ru},
             "B": {"tag": "neutral (baseline)"},
-            "correct_answer": "Да, отличаются",
+            "correct_answer": DIFFER_OPTIONS[0],
         },
     }
     if tag_facts:
@@ -308,14 +330,16 @@ def build_boundary_check_set() -> dict | None:
         "question": (
             "Оба клипа — второй фрагмент (chunk) одного и того же текста, разбитого на части. "
             "В одном тег эмоции на границе куска переоткрывается, в другом — нет. "
-            "Отличаются ли эти два клипа по звучанию?"
+            "Отличается ли подача речи (интонация, эмоциональная окраска) между ними? "
+            "(Сами голоса могут отличаться и сами по себе — это отдельно измерено по высоте "
+            "тона, вопрос только про характер речи.)"
         ),
-        "options": ["Да, отличаются", "Нет, звучат одинаково", "Не уверен(а)"],
+        "options": list(DIFFER_OPTIONS),
         "clips": {"A": _rel(reopen), "B": _rel(noreopen)},
         "hidden": {
             "A": {"variant": "tag reopened at chunk boundary"},
             "B": {"variant": "tag NOT reopened at chunk boundary"},
-            "correct_answer": "Да, отличаются",
+            "correct_answer": DIFFER_OPTIONS[0],
         },
     }
     return {
@@ -330,9 +354,97 @@ def build_boundary_check_set() -> dict | None:
     }
 
 
+def build_emotion_matched_text_set() -> dict | None:
+    """output/m4_emotion_matched_text/manifest.json — owner feedback #2
+    (issue #57 follow-up): "текст идет нейтральный и можно различить только
+    нотки в голосе, но помогало бы разобраться само выражение". The existing
+    tag-vs-neutral-baseline comparison (build_catalog_sets()) keeps text
+    FIXED (neutral) and varies only the tag, so a "yes it differs" answer is
+    attributable to the tag alone. Changing the text AND keeping the tag
+    fixed would confound two variables in the opposite pair, so this builder
+    keeps the SAME (emotion-matched) text fixed across its own pair and
+    varies only the tag -- "does the tag add anything ON TOP OF what the
+    matching text already conveys" -- rather than comparing across two
+    different texts, which would be unattributable.
+
+    Not run automatically: no audio has been generated for this set yet (see
+    docs/research/audiobook/m4-emotion-matched-texts.md for the curated
+    per-emotion text, ready for a future generation pass). Returns None,
+    same as every other builder here, when its output/ directory or manifest
+    is absent -- this function exists so the set is picked up automatically
+    the moment someone runs that generation, with zero code changes.
+
+    manifest.json schema (list of objects), one per emotion:
+      {"emotion": "sadness",                     # matches an emotion:* tag
+       "text": "...",                             # the emotion-matched text used
+       "source": "chapter-e0-narration.txt §3"     # or "[СОЧИНЕНО]" if composed
+                 or "[СОЧИНЕНО]",
+       "tagged_clip": "output/m4_emotion_matched_text/sadness_tagged.wav",
+       "plain_clip": "output/m4_emotion_matched_text/sadness_plain.wav"}
+    `tagged_clip` = matched text + <|emotion:sadness|>; `plain_clip` = the
+    SAME matched text, no tag. The comparison isolates the tag's marginal
+    effect on top of content that already carries the emotion.
+    """
+    d = REPO_ROOT / "output" / "m4_emotion_matched_text"
+    manifest_path = d / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+    tasks = []
+    for entry in entries:
+        emotion = entry.get("emotion")
+        tagged = d / Path(entry.get("tagged_clip", "")).name if entry.get("tagged_clip") else None
+        plain = d / Path(entry.get("plain_clip", "")).name if entry.get("plain_clip") else None
+        if not emotion or not tagged or not plain or not tagged.is_file() or not plain.is_file():
+            continue
+        composed = entry.get("source") == "[СОЧИНЕНО]"
+        task = {
+            "id": f"emo-matched-{emotion}",
+            "type": "pair_compare",
+            "answer_kind": "differ",
+            "question": (
+                f"Текст этого клипа подобран под эмоцию «{emotion}» (не нейтральный). "
+                "Отличается ли подача — интонация, эмоциональная окраска — между вариантом "
+                "с тегом эмоции и без него на ОДНОМ И ТОМ ЖЕ тексте? (Сами голоса могут "
+                "отличаться сами по себе — это не проверяется на слух.)"
+            ),
+            "options": list(DIFFER_OPTIONS),
+            "clips": {"A": _rel(tagged), "B": _rel(plain)},
+            "hidden": {
+                "A": {"tag": f"emotion:{emotion}", "text_variant": "matched+tag"},
+                "B": {"tag": "matched text, no emotion tag", "text_variant": "matched, plain"},
+                "matched_text": entry.get("text", ""),
+                "text_source": entry.get("source", ""),
+                "text_composed": composed,
+                "correct_answer": DIFFER_OPTIONS[0],
+            },
+        }
+        tasks.append(task)
+    if not tasks:
+        return None
+    return {
+        "id": "emotion_matched_text",
+        "title": "Эмоция на подходящем тексте (а не на нейтральном)",
+        "priority": 4,
+        "description": (
+            "output/m4_emotion_matched_text/ — та же эмоция, но на тексте, чьё СОДЕРЖАНИЕ "
+            "уже окрашено под неё (не нейтральный текст), с тегом и без. Измеряет, добавляет "
+            "ли тег что-то СВЕРХ того, что уже несёт сам текст — это ДРУГОЕ измерение, чем "
+            "тег-против-нейтрали на нейтральном тексте (docs/guides/sentiment_survey_guide.md, "
+            "«Текст под эмоцию»); результаты этих двух наборов не взаимозаменяемы."
+        ),
+        "tasks": tasks,
+    }
+
+
 def build_all_dynamic_sets() -> list[dict]:
     sets = list(build_catalog_sets())
-    for builder in (build_m4_tags_second_run_set, build_m4t0_set, build_boundary_check_set):
+    for builder in (build_m4_tags_second_run_set, build_m4t0_set, build_boundary_check_set,
+                     build_emotion_matched_text_set):
         doc = builder()
         if doc:
             sets.append(doc)

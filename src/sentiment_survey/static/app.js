@@ -162,6 +162,9 @@ function renderAnswered(d) {
     flag.className = "answered-flag";
   }
   let html = `<p><strong>Вопрос:</strong> ${escapeHtml(d.task.question)}</p>`;
+  if (rec.pitch_warning) {
+    html += `<p class="pitch-warning-hint">⚠ ${escapeHtml(rec.pitch_warning.reason)}</p>`;
+  }
   html += `<p><strong>Ваш ответ:</strong> ${escapeHtml(rec.answer_label)}</p>`;
   if (rec.correct_answer != null) {
     html += `<p><strong>Ожидалось:</strong> ${escapeHtml(rec.correct_answer)} — `
@@ -215,6 +218,13 @@ function renderTaskForm(task) {
 
   el("task-question").textContent = task.question;
   el("prior-hint").hidden = !task.has_prior_verdict || state.editMode;
+  const pitchHint = el("pitch-warning-hint");
+  if (task.pitch_warning) {
+    pitchHint.hidden = false;
+    pitchHint.textContent = "⚠ " + task.pitch_warning.reason;
+  } else {
+    pitchHint.hidden = true;
+  }
   // Carry the previous note forward into the answer-form textarea so
   // correcting the answer doesn't silently drop what was already written.
   const priorNote = (state.currentDetail.previous_answer && state.currentDetail.previous_answer.note) || "";

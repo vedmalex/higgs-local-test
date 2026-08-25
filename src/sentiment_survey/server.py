@@ -44,6 +44,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import catalog  # noqa: E402  (needs sys.path tweak above; same-directory module)
+import pitch  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK_SETS_DIR = Path(__file__).resolve().parent / "task_sets"
@@ -115,19 +116,49 @@ class TaskSet:
         return self._slot_order[task_id]
 
 
+def _annotate_pitch_warnings_safely(docs: list[dict]) -> None:
+    """Best-effort pitch-pairing annotation (issue #57 follow-up, owner
+    feedback #1): mutates `docs` in place via pitch.annotate_pitch_warnings().
+    Reuses docs/research/audiobook/m4_prosody_metrics.py, which needs numpy
+    -- present in .venv-tts (what `make sentiment-survey` prefers) but not
+    guaranteed for a bare `python3` fallback run. Missing numpy (or any
+    other measurement failure) must never take the whole survey app down:
+    log a warning and leave every task's pitch_warning unset, same as
+    before this feature existed."""
+    try:
+        report = pitch.annotate_pitch_warnings(docs)
+        print(
+            f"Pitch-pairing threshold: {report.get('threshold_hz')} Hz "
+            f"({report.get('method')}, n={report.get('n')})",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # ImportError (no numpy), bad wav, etc.
+        print(f"warning: pitch-pairing analysis skipped ({exc})", file=sys.stderr)
+
+
 def load_task_sets() -> dict[str, TaskSet]:
     """Hand-written JSON sets (task_sets/*.json) plus auto-discovered sets
     scanned live from output/ (catalog.build_all_dynamic_sets()). A dynamic
     set with the same id as a JSON one is skipped with a warning — JSON wins,
     since it means someone deliberately curated that set by hand."""
-    sets: dict[str, TaskSet] = {}
+    json_docs = []
     for path in sorted(TASK_SETS_DIR.glob("*.json")):
         with path.open(encoding="utf-8") as fh:
-            doc = json.load(fh)
+            json_docs.append((path, json.load(fh)))
+    dynamic_docs = catalog.build_all_dynamic_sets()
+
+    # Pitch-pair every comparison task across ALL loaded sets in one pass,
+    # before constructing TaskSet objects, so JSON-curated sets (e.g.
+    # emotion_vs_emotion.json) get the same treatment as auto-discovered
+    # ones, and the corpus-wide threshold is computed once from everything.
+    _annotate_pitch_warnings_safely([doc for _, doc in json_docs] + dynamic_docs)
+
+    sets: dict[str, TaskSet] = {}
+    for path, doc in json_docs:
         ts = TaskSet(doc, path)
         sets[ts.id] = ts
 
-    for doc in catalog.build_all_dynamic_sets():
+    for doc in dynamic_docs:
         if doc["id"] in sets:
             print(f"warning: dynamic set {doc['id']!r} shadowed by task_sets/*.json, skipping", file=sys.stderr)
             continue
@@ -294,10 +325,16 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
             f"прежние варианты сохранены в `answers.jsonl` (не теряются)."
         )
         lines.append("")
-    differed, not_differed, correct, incorrect, skipped = 0, 0, 0, 0, 0
+    differed, not_differed, correct, incorrect, skipped, pitch_unreliable = 0, 0, 0, 0, 0, 0
     for rec in answers.values():
         if rec.get("skipped_prior"):
             skipped += 1
+            continue
+        if rec.get("pitch_warning"):
+            # Voices not close enough in pitch (issue #57 follow-up, owner
+            # feedback #1) -- kept out of the pass/fail tallies below, same
+            # as a "already known" skip, but for a different reason.
+            pitch_unreliable += 1
             continue
         exp = rec.get("correct_answer")
         if exp is not None:
@@ -311,10 +348,16 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
             elif exp is not None:
                 not_differed += 1
     if correct or incorrect:
-        lines.append(f"**Совпало с ожиданием (свежие ответы, без пропущенных): {correct} из {correct + incorrect}.**")
+        lines.append(f"**Совпало с ожиданием (свежие ответы, без пропущенных и недостоверных по высоте голоса): {correct} из {correct + incorrect}.**")
         lines.append("")
     if skipped:
         lines.append(f"**Пропущено как уже подтверждённое ранее: {skipped}.**")
+        lines.append("")
+    if pitch_unreliable:
+        lines.append(
+            f"**Недостоверно по высоте голоса (пара не прошла порог pitch-pairing, "
+            f"см. `docs/guides/sentiment_survey_guide.md`): {pitch_unreliable}.**"
+        )
         lines.append("")
     lines.append("| Задание | Тип | Ответ | Ожидалось | Совпало | Время прослушивания | Отметка времени |")
     lines.append("|---|---|---|---|---|---|---|")
@@ -322,6 +365,8 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
         exp = rec.get("correct_answer") or ""
         if rec.get("skipped_prior"):
             match = "пропущено"
+        elif rec.get("pitch_warning"):
+            match = "недостоверно (высота голоса)"
         else:
             match = "" if exp == "" else ("да" if rec.get("matches_expected") else "нет")
         answer_display = rec.get('answer_label', rec.get('answer', ''))
@@ -378,6 +423,12 @@ def build_task_view(ts: TaskSet, task: dict) -> dict:
         "question": task["question"],
         "slots": slots,
         "has_prior_verdict": has_prior,
+        # Voices are never pinned across generations, so a pitch mismatch is
+        # not tag identity -- safe to reveal before answering, unlike
+        # `hidden` (issue #57 follow-up, owner feedback #1). None when the
+        # task's clips are close enough in pitch, or pitch analysis wasn't
+        # available for this run (see _annotate_pitch_warnings_safely()).
+        "pitch_warning": task.get("pitch_warning"),
     }
     answer_kind = task.get("answer_kind")
     if answer_kind == "differ":
@@ -692,6 +743,10 @@ class Handler(BaseHTTPRequestHandler):
             "correct_answer": expected_display,
             "matches_expected": matches,
             "skipped_prior": skipped_prior,
+            # Baked in at answer time (like hidden/correct_answer) so the
+            # historical record reflects what was actually known then, even
+            # if a later pitch-cache refresh changes the live task view.
+            "pitch_warning": task.get("pitch_warning"),
         }
         answers = append_answer(set_id, record)
 
@@ -718,10 +773,18 @@ class Handler(BaseHTTPRequestHandler):
         # count them separately, not silently fold them into the blind tally.
         blind = [r for r in fresh if not r.get("answered_after_reveal")]
         non_blind = [r for r in fresh if r.get("answered_after_reveal")]
-        graded = [r for r in blind if r.get("correct_answer") is not None]
+        # Pitch-mismatched pairs (owner feedback #1, issue #57 follow-up):
+        # the two clips being compared are not close enough in pitch for an
+        # emotion/tag verdict to be trustworthy (voice register alone can
+        # dominate the perceived difference). Never dropped from the answer
+        # list, but excluded from the graded/differ_pairs pass-fail gate,
+        # same treatment as answered_after_reveal.
+        pitch_unreliable = [r for r in blind if r.get("pitch_warning")]
+        reliable = [r for r in blind if not r.get("pitch_warning")]
+        graded = [r for r in reliable if r.get("correct_answer") is not None]
         correct = sum(1 for r in graded if r.get("matches_expected"))
         differ_pairs = [
-            r for r in blind
+            r for r in reliable
             if r.get("type") == "pair_compare" and r.get("answer_kind") == "differ"
         ]
         differed = sum(1 for r in differ_pairs if r.get("matches_expected"))
@@ -732,11 +795,12 @@ class Handler(BaseHTTPRequestHandler):
             "answered": len(answers),
             "skipped_prior": skipped,
             "answered_after_reveal": len(non_blind),
+            "pitch_unreliable_total": len(pitch_unreliable),
             "graded_total": len(graded),
             "graded_correct": correct,
             "differ_pairs_total": len(differ_pairs),
             "differ_pairs_distinguished": differed,
-            "gate_threshold_note": "M4-план требует >= 8 слепых пар и провал при >6 неразличённых из 8 (docs/research/audiobook/m4-plan.md, §2). Ответы, данные после раскрытия меток (исправления), в эту статистику не входят.",
+            "gate_threshold_note": "M4-план требует >= 8 слепых пар и провал при >6 неразличённых из 8 (docs/research/audiobook/m4-plan.md, §2). Ответы, данные после раскрытия меток (исправления) или на парах с несовпадающей высотой голоса, в эту статистику не входят.",
             "answers": list(answers.values()),
         })
 
