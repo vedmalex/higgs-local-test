@@ -58,7 +58,13 @@ GitHub Issues are the canonical surface for task state and development history. 
   identity is hidden from the browser (opaque per-clip ids, revealed only after an answer is
   submitted) and every answer is written to `output/sentiment_survey_results/` immediately via
   atomic temp-file + `os.replace`, so an interrupted session is resumable and never corrupts the
-  results file. Run via `make sentiment-survey`; see `docs/guides/sentiment_survey_guide.md`.
+  results file. `pitch.py` measures each clip's median F0 (reusing `docs/research/audiobook/
+  m4_prosody_metrics.py`'s autocorrelation estimator, not a second one) and flags comparison
+  pairs whose voices land on opposite sides of a data-derived (Otsu) pitch-cluster threshold as
+  `pitch_warning` — visible before answering, excluded from the graded/gate statistics, never
+  silently dropped; needs numpy (present via `.venv-tts`, which `make sentiment-survey` prefers)
+  and degrades to "no pitch analysis" rather than crashing when numpy is absent, keeping the rest
+  of the app stdlib-only. Run via `make sentiment-survey`; see `docs/guides/sentiment_survey_guide.md`.
 - `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
 
 Keep TTS and STT environments and processes isolated. Do not introduce a shared daemon or module that holds both models in memory.

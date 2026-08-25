@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
+import struct
 import sys
 import tempfile
 import threading
 import unittest
+import wave
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -21,8 +24,31 @@ sys.path.insert(0, str(SURVEY_DIR))
 import tag_reference  # noqa: E402
 import catalog  # noqa: E402
 import server  # noqa: E402
+import pitch  # noqa: E402
 
 OUTPUT_PRESENT = (REPO_ROOT / "output" / "m4_tag_catalog" / "neutral_baseline.wav").is_file()
+
+try:
+    import numpy  # noqa: F401
+    NUMPY_PRESENT = True
+except ImportError:
+    NUMPY_PRESENT = False
+
+
+def _write_tone_wav(path: Path, freq_hz: float, dur_s: float = 1.0, sr: int = 16000) -> None:
+    """A pure sine tone WAV -- synthetic stand-in for "a clip whose median F0
+    is (approximately) freq_hz", so pitch.py's tests don't depend on real
+    generated speech."""
+    n = int(dur_s * sr)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        frames = bytearray()
+        for i in range(n):
+            val = int(16000 * math.sin(2 * math.pi * freq_hz * i / sr))
+            frames += struct.pack("<h", val)
+        w.writeframes(bytes(frames))
 
 
 class TestTagReferenceParser(unittest.TestCase):
@@ -476,6 +502,285 @@ class TestNavigationOverHTTP(unittest.TestCase):
         graded_task_ids = {r["task_id"] for r in summary["answers"]
                             if r["task_id"] == task_id and not r.get("answered_after_reveal")}
         self.assertEqual(graded_task_ids, {task_id})
+
+
+class TestDifferQuestionReformulated(unittest.TestCase):
+    """Owner feedback #3 (issue #57 follow-up): "не совсем понятно что значит
+    звучат ли они одинаково, голоса, я так понял совсем разные" -- the old
+    differ-task wording mentioned "тон голоса" and offered "звучат
+    одинаково" as an option, inviting exactly that (unanswerable, since
+    voices are never pinned) reading. The new wording must not repeat it,
+    and must stay internally consistent (options include the literal
+    correct_answer string)."""
+
+    def test_differ_question_does_not_mention_voice_tone_identity(self):
+        self.assertNotIn("тон голоса", catalog.DIFFER_QUESTION)
+        self.assertNotIn("звучат одинаково", catalog.DIFFER_QUESTION)
+        for opt in catalog.DIFFER_OPTIONS:
+            self.assertNotIn("звучат одинаково", opt)
+
+    def test_differ_question_is_about_delivery_not_voice_identity(self):
+        self.assertIn("одач", catalog.DIFFER_QUESTION.lower())  # "подача" (delivery)
+
+    def test_differ_task_correct_answer_is_one_of_its_own_options(self):
+        task = catalog._differ_task(
+            "t1", REPO_ROOT / "output/m4t0_sadness.wav", REPO_ROOT / "output/m4t0_neutral.wav",
+            "emotion:sadness", {},
+        )
+        self.assertIn(task["hidden"]["correct_answer"], task["options"])
+
+    @unittest.skipUnless(OUTPUT_PRESENT, "output/m4_boundary_check/ audio not present in this checkout")
+    def test_boundary_check_task_correct_answer_is_one_of_its_own_options(self):
+        doc = catalog.build_boundary_check_set()
+        if doc is None:
+            self.skipTest("output/m4_boundary_check/ clips not present")
+        task = doc["tasks"][0]
+        self.assertIn(task["hidden"]["correct_answer"], task["options"])
+        self.assertNotIn("тон голоса", task["question"])
+
+
+class TestEmotionMatchedTextBuilder(unittest.TestCase):
+    """Requirement 2 (issue #57 follow-up, owner feedback #2): the
+    emotion-matched-text set is scaffolding only -- no audio has been
+    generated for it yet (see docs/research/audiobook/
+    m4-emotion-matched-texts.md), so this test proves the schema/build logic
+    against a synthetic fixture (tiny tone WAVs, not real speech) rather than
+    against real generated audio that doesn't exist."""
+
+    MANIFEST_DIR = REPO_ROOT / "output" / "m4_emotion_matched_text"
+
+    def tearDown(self):
+        # Clean up the real (gitignored) output/ directory this test creates.
+        if self.MANIFEST_DIR.is_dir():
+            for f in self.MANIFEST_DIR.glob("*"):
+                f.unlink()
+            self.MANIFEST_DIR.rmdir()
+
+    def test_returns_none_when_directory_absent(self):
+        self.assertFalse(self.MANIFEST_DIR.is_dir())
+        self.assertIsNone(catalog.build_emotion_matched_text_set())
+
+    def test_returns_none_when_manifest_missing(self):
+        self.MANIFEST_DIR.mkdir(parents=True)
+        self.assertIsNone(catalog.build_emotion_matched_text_set())
+
+    def test_builds_tasks_from_synthetic_fixture_and_marks_composed_text(self):
+        self.MANIFEST_DIR.mkdir(parents=True)
+        tagged = self.MANIFEST_DIR / "sadness_tagged.wav"
+        plain = self.MANIFEST_DIR / "sadness_plain.wav"
+        _write_tone_wav(tagged, 120, dur_s=0.2)
+        _write_tone_wav(plain, 120, dur_s=0.2)
+        manifest = [{
+            "emotion": "sadness",
+            "text": "Поэтому он был очень опечален.",
+            "source": "chapter-e0-narration.txt §3 (sb-1-19)",
+            "tagged_clip": "output/m4_emotion_matched_text/sadness_tagged.wav",
+            "plain_clip": "output/m4_emotion_matched_text/sadness_plain.wav",
+        }, {
+            "emotion": "surprise",
+            "text": "Он замер на месте — такого поворота событий никто не ожидал.",
+            "source": "[СОЧИНЕНО]",
+            "tagged_clip": "output/m4_emotion_matched_text/sadness_tagged.wav",  # reuse fixture file
+            "plain_clip": "output/m4_emotion_matched_text/sadness_plain.wav",
+        }]
+        (self.MANIFEST_DIR / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+        doc = catalog.build_emotion_matched_text_set()
+        self.assertIsNotNone(doc)
+        self.assertEqual(doc["id"], "emotion_matched_text")
+        self.assertEqual(len(doc["tasks"]), 2)
+        by_id = {t["id"]: t for t in doc["tasks"]}
+
+        sadness_task = by_id["emo-matched-sadness"]
+        self.assertFalse(sadness_task["hidden"]["text_composed"])
+        self.assertIn("sb-1-19", sadness_task["hidden"]["text_source"])
+        self.assertEqual(sadness_task["hidden"]["matched_text"], "Поэтому он был очень опечален.")
+
+        surprise_task = by_id["emo-matched-surprise"]
+        self.assertTrue(surprise_task["hidden"]["text_composed"])
+        self.assertEqual(surprise_task["hidden"]["text_source"], "[СОЧИНЕНО]")
+
+        # Correct_answer must be a real option (same contract as the other
+        # differ-style tasks -- compute_matches_expected() relies on this).
+        for task in doc["tasks"]:
+            self.assertIn(task["hidden"]["correct_answer"], task["options"])
+
+    def test_entries_with_missing_clip_files_are_skipped_not_crashed(self):
+        self.MANIFEST_DIR.mkdir(parents=True)
+        manifest = [{
+            "emotion": "fear", "text": "...", "source": "[СОЧИНЕНО]",
+            "tagged_clip": "output/m4_emotion_matched_text/does_not_exist_tagged.wav",
+            "plain_clip": "output/m4_emotion_matched_text/does_not_exist_plain.wav",
+        }]
+        (self.MANIFEST_DIR / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        self.assertIsNone(catalog.build_emotion_matched_text_set())
+
+
+@unittest.skipUnless(NUMPY_PRESENT, "numpy not available in this interpreter (pitch.py needs it via "
+                                      "docs/research/audiobook/m4_prosody_metrics.py)")
+class TestPitchModule(unittest.TestCase):
+    """Requirement 1 (issue #57 follow-up, owner feedback #1): pitch-aware
+    pairing. Uses synthetic pure-tone WAVs (known F0 by construction) so
+    these tests don't depend on real generated speech."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp_dir = Path(tempfile.mkdtemp())
+        cls.low1 = cls.tmp_dir / "low1.wav"
+        cls.low2 = cls.tmp_dir / "low2.wav"
+        cls.high1 = cls.tmp_dir / "high1.wav"
+        cls.high2 = cls.tmp_dir / "high2.wav"
+        _write_tone_wav(cls.low1, 110)
+        _write_tone_wav(cls.low2, 120)
+        _write_tone_wav(cls.high1, 220)
+        _write_tone_wav(cls.high2, 230)
+
+    def test_median_f0_hz_recovers_synthetic_tone_frequency(self):
+        f0 = pitch.median_f0_hz(self.low1)
+        self.assertIsNotNone(f0)
+        self.assertAlmostEqual(f0, 110, delta=5)
+
+    def test_semitone_diff_is_symmetric_and_zero_for_equal_pitch(self):
+        self.assertEqual(pitch.semitone_diff(150.0, 150.0), 0.0)
+        self.assertAlmostEqual(pitch.semitone_diff(110, 220), 12.0, delta=0.5)  # one octave
+        self.assertAlmostEqual(pitch.semitone_diff(220, 110), pitch.semitone_diff(110, 220))
+
+    def test_otsu_threshold_none_for_fewer_than_two_distinct_values(self):
+        self.assertIsNone(pitch.otsu_threshold([]))
+        self.assertIsNone(pitch.otsu_threshold([140.0]))
+        self.assertIsNone(pitch.otsu_threshold([140.0, 140.0]))
+
+    def test_otsu_threshold_splits_two_synthetic_clusters(self):
+        values = [111.9, 122.1, 222.2, 231.9]  # measured medians, see below
+        th = pitch.otsu_threshold(values)
+        self.assertGreater(th, 122.1)
+        self.assertLess(th, 222.2)
+
+    def test_build_threshold_report_falls_back_for_tiny_corpus(self):
+        report = pitch.build_threshold_report([140.0, 145.0])
+        self.assertEqual(report["method"].startswith("fallback"), True)
+        self.assertEqual(report["threshold_hz"], pitch._FALLBACK_THRESHOLD_HZ)
+
+    def test_build_threshold_report_otsu_for_real_corpus(self):
+        index = pitch.build_f0_index([self.low1, self.low2, self.high1, self.high2])
+        report = pitch.build_threshold_report(list(index.values()))
+        self.assertEqual(report["n"], 4)
+        self.assertTrue(report["method"].startswith("otsu"))
+        self.assertEqual(report["low_cluster_n"], 2)
+        self.assertEqual(report["high_cluster_n"], 2)
+
+    def test_pitch_gate_same_cluster_true_cross_cluster_false(self):
+        f0_low1 = pitch.median_f0_hz(self.low1)
+        f0_low2 = pitch.median_f0_hz(self.low2)
+        f0_high1 = pitch.median_f0_hz(self.high1)
+        threshold = 170.0  # between the low (~110-120) and high (~220-230) clusters
+        self.assertTrue(pitch.pitch_gate(f0_low1, f0_low2, threshold))
+        self.assertFalse(pitch.pitch_gate(f0_low1, f0_high1, threshold))
+
+    def test_pitch_gate_unknown_pitch_is_never_comparable(self):
+        self.assertFalse(pitch.pitch_gate(None, 150.0, 170.0))
+        self.assertFalse(pitch.pitch_gate(150.0, None, 170.0))
+        self.assertFalse(pitch.pitch_gate(None, None, 170.0))
+
+    def test_annotate_pitch_warnings_flags_cross_cluster_pair_not_same_cluster(self):
+        close_task = {
+            "id": "close", "type": "pair_compare", "answer_kind": "which",
+            "clips": {"A": str(self.low1), "B": str(self.low2)},
+        }
+        far_task = {
+            "id": "far", "type": "pair_compare", "answer_kind": "which",
+            "clips": {"A": str(self.low1), "B": str(self.high1)},
+        }
+        single_task = {  # not a comparison type -- must be left untouched
+            "id": "solo", "type": "single_rating", "clips": {"A": str(self.low1)},
+        }
+        docs = [{"id": "synthetic", "tasks": [close_task, far_task, single_task]}]
+        pitch.annotate_pitch_warnings(docs)
+        self.assertIsNone(close_task["pitch_warning"])
+        self.assertIsNotNone(far_task["pitch_warning"])
+        self.assertEqual(far_task["pitch_warning"]["pairs"][0]["a"], "A")
+        self.assertEqual(far_task["pitch_warning"]["pairs"][0]["b"], "B")
+        self.assertNotIn("pitch_warning", single_task)
+
+
+@unittest.skipUnless(OUTPUT_PRESENT and NUMPY_PRESENT,
+                      "needs both real output/ audio fixtures and numpy")
+class TestPitchWarningSummaryIntegration(unittest.TestCase):
+    """A pitch-mismatched pair must stay visible/answerable but be excluded
+    from the graded/differ_pairs pass-fail gate in the summary (owner
+    feedback #1) -- mirrors how answered_after_reveal is already excluded.
+    Forces pitch_warning on a real (already-loaded) task rather than relying
+    on which real clips happen to be far apart in pitch, so this test does
+    not get flaky if the underlying audio or threshold changes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._orig_results_dir = server.RESULTS_DIR
+        cls.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = cls.tmp_dir
+        cls.httpd = server.ThreadingHTTPServer((server.HOST, 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.set_id = "final_intonation"
+        assert cls.set_id in server.TASK_SETS
+        cls.task_id = "final-boundary-continuing"
+        task = server.TASK_SETS[cls.set_id].task(cls.task_id)
+        assert task is not None
+        task["pitch_warning"] = {
+            "reason": "test-forced mismatch", "threshold_hz": 165.0,
+            "pairs": [{"a": "A", "b": "B", "f0_a_hz": 90.0, "f0_b_hz": 210.0, "semitone_diff": 14.7}],
+        }
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        server.RESULTS_DIR = cls._orig_results_dir
+        task = server.TASK_SETS[cls.set_id].task(cls.task_id)
+        if task is not None:
+            task["pitch_warning"] = None
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def _post_json(self, path, obj):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            data = json.dumps(obj).encode("utf-8")
+            conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def test_task_view_exposes_pitch_warning_before_answering(self):
+        status, detail = self._get(f"/api/sets/{self.set_id}/task/{self.task_id}")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(detail["task"]["pitch_warning"])
+
+    def test_pitch_mismatched_answer_excluded_from_graded_and_differ_buckets(self):
+        status, ans = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": self.task_id, "answer_label": "Утверждение (точка)", "listen_ms": 100,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(server.load_answers(self.set_id)[self.task_id]["pitch_warning"]["threshold_hz"], 165.0)
+
+        status, summary = self._get(f"/api/sets/{self.set_id}/summary")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(summary["pitch_unreliable_total"], 1)
+        graded_ids = {r["task_id"] for r in summary["answers"]
+                      if r["task_id"] == self.task_id and not r.get("pitch_warning")
+                      and r.get("correct_answer") is not None}
+        self.assertEqual(graded_ids, set(), "a pitch-mismatched task must not count toward graded_total")
 
 
 if __name__ == "__main__":
