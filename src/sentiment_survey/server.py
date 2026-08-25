@@ -16,7 +16,11 @@ Stdlib-only (http.server + json), no framework. Serves a small single-page UI th
   - honestly flags a resubmitted answer as `answered_after_reveal: true`, since the
     first answer's reveal already showed the hidden metadata — it can't be blind
     the second time, and the M4 gate counts it separately rather than pretending
-    otherwise.
+    otherwise,
+  - lets the owner attach an optional free-text note to any task (what they heard
+    that no answer option captured), editable the same way as a correction (a new
+    append-only revision) but without affecting is_correction/answered_after_reveal
+    when only the note changes and the answer itself didn't -- see _answer_value().
 
 Run: `python3 src/sentiment_survey/server.py` (see `make sentiment-survey`).
 Results: `output/sentiment_survey_results/<set_id>/answers.jsonl` (machine-readable,
@@ -204,32 +208,60 @@ def atomic_write(path: Path, content: str) -> None:
     os.replace(tmp, path)
 
 
+def _answer_value(rec: dict) -> tuple:
+    """The part of a record that constitutes "the actual decision" — used to
+    tell a genuine correction (owner picked a different option) apart from a
+    same-answer resubmission (owner only added or edited a free-text note).
+    Deliberately excludes `note`: writing down an observation about what was
+    heard doesn't change what was answered, so it must not affect blindness
+    bookkeeping (issue #57 follow-up, "заметка слепоту не ломает")."""
+    return (rec.get("answer_label"), rec.get("answer_role"))
+
+
 def append_answer(set_id: str, record: dict) -> dict[str, dict]:
     """Append one answer to the permanent history and return the up-to-date
     "latest answer per task" map.
 
     History is never rewritten or dropped: if the owner already answered this
-    task_id, `record` is stamped as a correction (revision > 1) that
-    `replaces_revision`, but the earlier revision(s) stay in the JSONL file.
+    task_id, `record` is a new line, but it is only stamped as a correction
+    (revision > 1, `is_correction: true`) if the actual answer (option/role)
+    differs from the immediately preceding revision — see `_answer_value()`.
     This is deliberate (issue #57 follow-up) — a changed mind is itself a
     signal worth keeping, not noise to overwrite. Grading and the resumable
     "next task" flow both use `load_answers()`, which always resolves to the
     latest revision per task, so a correction is what counts for the gate.
 
-    A revision > 1 also always means `answered_after_reveal = True`: the
-    first answer's reveal (see `reveal_for_task`) already showed this task's
-    hidden metadata, so any resubmission cannot be blind anymore. Recorded
+    A genuine correction (`is_correction`) also always means
+    `answered_after_reveal = True`: the first answer's reveal (see
+    `reveal_for_task`) already showed this task's hidden metadata, so
+    changing the answer afterwards cannot be blind anymore. Recorded
     explicitly and honestly rather than silently re-blinding the UI, so the
     M4 gate can (and does, see `_handle_summary`) treat post-reveal answers
-    as a separate, non-blind bucket.
+    as a separate, non-blind bucket. Resubmitting the *same* answer just to
+    add or edit a free-text `note`, by contrast, does not touch this
+    bookkeeping at all: the underlying decision was never revisited, only
+    described in more detail, so it keeps the blind/non-blind status of
+    whichever revision the answer itself last actually changed at.
     """
     jsonl_path, md_path = results_paths(set_id)
     history = load_answer_history(set_id)
-    prior_count = sum(1 for r in history if r["task_id"] == record["task_id"])
-    record["revision"] = prior_count + 1
-    record["is_correction"] = prior_count > 0
-    record["answered_after_reveal"] = prior_count > 0
-    record["replaces_revision"] = prior_count if prior_count > 0 else None
+    prior_for_task = [r for r in history if r["task_id"] == record["task_id"]]
+    prior_count = len(prior_for_task)
+    if prior_count == 0:
+        record["revision"] = 1
+        record["is_correction"] = False
+        record["answered_after_reveal"] = False
+        record["replaces_revision"] = None
+    else:
+        prev = prior_for_task[-1]
+        answer_changed = _answer_value(record) != _answer_value(prev)
+        record["revision"] = prior_count + 1
+        record["is_correction"] = answer_changed
+        # A note-only resubmission inherits the blind status the answer
+        # already had (it didn't change), rather than being force-flipped
+        # to non-blind just for arriving in a later revision.
+        record["answered_after_reveal"] = answer_changed or bool(prev.get("answered_after_reveal"))
+        record["replaces_revision"] = prior_count
     history.append(record)
 
     # Rewrite the whole JSONL from the in-memory history list: small files
@@ -308,6 +340,12 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
         lines.append(f"- Вопрос: {rec.get('question', '')}")
         lines.append(f"- Ответ владельца: **{rec.get('answer_label', rec.get('answer', ''))}**")
         lines.append(f"- Скрытые метаданные: `{json.dumps(rec.get('hidden', {}), ensure_ascii=False)}`")
+        note = (rec.get("note") or "").strip()
+        if note:
+            lines.append("- Заметка владельца:")
+            lines.append("")
+            for note_line in note.splitlines() or [note]:
+                lines.append(f"  > {note_line}")
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -553,6 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                 "answered_after_reveal": bool(rec.get("answered_after_reveal")) if rec else False,
                 "matches_expected": rec.get("matches_expected") if rec else None,
                 "skipped_prior": bool(rec.get("skipped_prior")) if rec else False,
+                "has_note": bool((rec.get("note") or "").strip()) if rec else False,
             })
         self._send_json({
             "set_id": set_id,
@@ -625,6 +664,10 @@ class Handler(BaseHTTPRequestHandler):
         chosen_label = body.get("answer_label", "")
         chosen_role = body.get("answer_role")  # only meaningful for choose_clip mode
         listen_ms = int(body.get("listen_ms", 0) or 0)
+        # Free-text observation, optional. Never required to submit an
+        # answer, and adding/editing it alone does not touch is_correction /
+        # answered_after_reveal — see _answer_value()/append_answer().
+        note = str(body.get("note") or "").strip()
         skipped_prior = chosen_label == SKIP_LABEL
 
         if skipped_prior:
@@ -642,6 +685,7 @@ class Handler(BaseHTTPRequestHandler):
             "question": task["question"],
             "answer_label": chosen_label,
             "answer_role": chosen_role,
+            "note": note,
             "listen_ms": listen_ms,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "hidden": task.get("hidden", {}),

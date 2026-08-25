@@ -48,11 +48,20 @@
             или пропустить (последний вариант ответа).
           </p>
           <div id="task-options" class="options"></div>
+          <div class="note-field">
+            <label for="task-note">Заметка (необязательно) — что слышно, чего нет в вариантах:</label>
+            <textarea id="task-note" rows="2" placeholder="например: «фон гуляет», «голос между фрагментами разный»…"></textarea>
+          </div>
         </div>
 
         <div id="answered-card" class="card answered" hidden>
           <p class="answered-flag" id="answered-flag"></p>
           <div id="answered-body"></div>
+          <div class="note-field">
+            <label for="answered-note">Заметка (можно дописать/изменить, ответ при этом не меняется):</label>
+            <textarea id="answered-note" rows="2" placeholder="например: «фон гуляет», «голос между фрагментами разный»…"></textarea>
+            <button id="save-note-btn" class="secondary">Сохранить заметку</button>
+          </div>
           <button id="edit-answer-btn" class="primary">Исправить ответ</button>
         </div>
 
