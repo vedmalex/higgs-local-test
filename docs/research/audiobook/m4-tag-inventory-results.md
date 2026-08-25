@@ -525,3 +525,15 @@ nothing here is committed). The 8 highest-priority items, condensed:
   GPU access was serialized (confirmed via polling before starting), but the "before" load
   average (13.74) reflects residual system load from that task's immediately-preceding run, not
   a clean-machine baseline — recorded here rather than smoothed over.
+- **Open question, not investigated at all: `<|env:music|>`, `<|env:noise|>`, and a standalone
+  `<|chatml|>`.** The checkpoint's `tokenizer.json` `added_tokens` carries these three beyond
+  the 43 documented control tags (ids 151702, 151703, 151724), but `PROMPTING.md` never
+  mentions any of them — no syntax, no example, no description. They are deliberately excluded
+  from `src/audiobook.py`'s `VALID_TAGS` (Refs #57) rather than guessed at: they may be internal
+  training-time scaffolding for labeling background audio (music/noise beds) rather than a
+  usable prompt-time control, or `<|chatml|>` may be leftover from a shared tokenizer base with
+  no role in TTS at all — but that is speculation, not a verified fact. No one has tried
+  inserting them into a generation call to see what happens. If audiobook work ever needs
+  background music/noise cues, a controlled probe of `env:music`/`env:noise` (does it change
+  anything audible, does it error, is it silently ignored) is the first step, done in isolation
+  before trusting it in a real chapter.
