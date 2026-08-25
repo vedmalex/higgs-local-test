@@ -290,6 +290,24 @@ button.secondary:hover { border-color: var(--accent); }
   color: var(--muted);
   margin: 0 0 0.75rem;
 }
+.measured-features {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 1rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 0 0 0.85rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--card-bg);
+  border-radius: 8px;
+}
+.measured-features dt { color: var(--muted); }
+.measured-features dd { margin: 0; color: var(--fg); }
+.cast-roster {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0.4rem 0 0;
+}
 .cast-field {
   border: none;
   padding: 0;
