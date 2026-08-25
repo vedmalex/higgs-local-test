@@ -417,6 +417,18 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   *Devices:* M1.
   *Tier:* **sonnet**, size **S** (measurement, not development).
 
+  **Gap found and closed (2026-08, Refs #114):** this measurement was of
+  `m4_batching_bench.py` only -- `generate_segments` in `src/audiobook.py` still called
+  `model.generate()` one segment at a time, so none of the above ever reached a real chapter
+  run; a 10-hour book still cost ~40-60 machine-hours at the unbatched baseline, not the ~11.4
+  hours this section describes. `generate_segments` now accepts `batch_size` (CLI
+  `--batch-size`, default 4) and calls `model.batch_generate()` for segments that still need
+  generating, preserving every audit fix (F4-F6, F14) at per-segment granularity inside a
+  batch -- see [`m4-batching-integration-results.md`](m4-batching-integration-results.md) for
+  what changed and the before/after measurement on the real pipeline, and
+  `docs/guides/audiobook_guide.md` sec. 4a for the user-facing contract. `--batch-size 1` is
+  kept as the exact original code path, unchanged, for comparison/rollback.
+
   **Follow-up (2026-08-25), DONE — [`m4-batching-stage-profile-results.md`](m4-batching-stage-profile-results.md):**
   two things this measurement left open were checked. (a) **Vocoder share under batching**: grew
   2.01% (batch=1) → 7.85% (batch=8), a 3.9x increase, but stayed under the plan's 15% threshold —
@@ -543,7 +555,15 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   where the MLX-allocator-vs-process-vs-disk distinction matters most, and where batching's real
   payoff (more segments per batch, not fewer GB) should be visible.
 
-- [ ] **M4-T9. Resume support + a practical hours-per-book number + `make audiobook`.**
+- [x] **M4-T9. Resume support + a practical hours-per-book number + `make audiobook`.**
+  Resume support: DONE, predates this entry (F4/F6/F7 in `src/audiobook.py`'s per-segment,
+  content-hash-keyed manifest). Practical hours-per-book number: superseded by wiring
+  batching into the production path (Refs #114, see the M4-T2 gap note above and
+  [`m4-batching-integration-results.md`](m4-batching-integration-results.md)) rather than
+  computed as a standalone estimate. `make audiobook`: not added -- `src/audiobook.py`'s CLI
+  (`--screenplay-file`/`--text-file`, `--batch-size`, `--assemble`, `--continue-on-error`) is
+  the documented entry point (`docs/guides/audiobook_guide.md` sec. 4/4a); a `Makefile` target
+  would only wrap it, not add capability, and remains open if a wrapper is wanted later.
 
 - [ ] **M4-T10. Rename the ambiguous `peak_memory_bytes` key.** `src/tts_test.py:66` stores
   `resource.getrusage(RUSAGE_SELF).ru_maxrss` under the misleading name `peak_memory_bytes` — this
