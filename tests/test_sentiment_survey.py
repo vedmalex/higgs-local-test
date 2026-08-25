@@ -871,6 +871,22 @@ class TestVoiceCastingBuilder(unittest.TestCase):
         ids = [t["id"] for t in doc["tasks"]]
         self.assertEqual(len(ids), len(set(ids)), "duplicate task ids")
 
+    def test_suggest_roles_returns_none_when_manifest_absent(self):
+        orig_root = catalog.REPO_ROOT
+        catalog.REPO_ROOT = Path(tempfile.mkdtemp())
+        try:
+            self.assertEqual(catalog.suggest_roles_from_chapter114e0(), [])
+        finally:
+            catalog.REPO_ROOT = orig_root
+
+    @unittest.skipUnless(CHAPTER114E0_PRESENT, "output/chapter-114-e0/manifest.json not present in this checkout")
+    def test_suggest_roles_from_real_manifest_speaker_field(self):
+        # issue #57/#118 follow-up: suggestions come from the manifest's
+        # own structured `speaker` field, not from mining segment prose.
+        suggestions = catalog.suggest_roles_from_chapter114e0()
+        self.assertIsInstance(suggestions, list)
+        self.assertIn("Рассказчик", suggestions)  # this chapter is narrator-only
+
 
 class TestVoiceCastingBackwardCompat(unittest.TestCase):
     """Owner: "нужно не потерять то что уже помелили" -- the owner already
@@ -940,11 +956,33 @@ class TestVoiceCastingBackwardCompat(unittest.TestCase):
         task_history = [r for r in history if r["task_id"] == "voice-cast-02"]
         self.assertEqual(len(task_history), 2, "the original old-shaped answer must survive on disk")
 
+    def test_legacy_named_voice_becomes_a_role_via_record_role_fallback(self):
+        """Issue #57/#118 follow-up (roles): "чтец" (voice-cast-02, the
+        owner's one pre-existing named voice) must become the role's first
+        candidate WITHOUT any rewrite of answers.jsonl -- server._record_role()
+        reads old name+selected records as their own role name."""
+        server.append_answer("voice_casting_chapter114e0",
+                              self._old_shaped_record(task_id="voice-cast-02", name="чтец", selected=True))
+        rec = server.load_answers("voice_casting_chapter114e0")["voice-cast-02"]
+        self.assertEqual(server._record_role(rec), "чтец")
+
+        # roles.json is seeded from this on first access, no answers.jsonl write.
+        roles = server.load_roles("voice_casting_chapter114e0")
+        self.assertIn("чтец", [r["name"] for r in roles])
+        history_before = len(server.load_answer_history("voice_casting_chapter114e0"))
+        server.load_roles("voice_casting_chapter114e0")  # second read, must not append anything
+        self.assertEqual(len(server.load_answer_history("voice_casting_chapter114e0")), history_before)
+
+        roster = server.roles_with_counts("voice_casting_chapter114e0")
+        chtets = next(r for r in roster if r["name"] == "чтец")
+        self.assertEqual(chtets["candidate_count"], 1)
+        self.assertIn("voice-cast-02", chtets["candidate_task_ids"])
+
 
 @unittest.skipUnless(CHAPTER114E0_PRESENT and NUMPY_PRESENT,
                       "needs both output/chapter-114-e0/ and numpy")
 class TestVoiceCastingOverHTTP(unittest.TestCase):
-    """End-to-end: casting a segment round-trips gender/age/name/selected,
+    """End-to-end: casting a segment round-trips gender/age/role/role_chosen,
     is excluded from every blind-gate statistic, and a real HTTP client
     sees the transcript and measured F0 up front (not blind)."""
 
@@ -999,33 +1037,37 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
         })
         self.assertEqual(status, 400)
 
-    def test_empty_name_is_valid_and_means_not_selected(self):
-        # Issue #57/#118 follow-up: no separate "selected" checkbox anymore
-        # -- a blank name is a perfectly valid answer, it just isn't a cast
-        # decision. Must NOT be rejected.
+    def test_empty_role_is_valid_and_means_no_candidate(self):
+        # Issue #57/#118 follow-up (roles): no separate "selected" checkbox
+        # -- a blank role is a perfectly valid answer, it just isn't a
+        # casting decision. Must NOT be rejected.
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-01", "gender": "male", "age_bucket": "middle",
-            "name": "", "listen_ms": 0,
+            "role": "", "listen_ms": 0,
         })
         self.assertEqual(status, 200)
         rec = server.load_answers(self.set_id)["voice-cast-01"]
         self.assertFalse(rec["selected"])
+        self.assertIsNone(rec["role"])
         self.assertIsNone(rec["name"])
 
-    def test_typed_name_alone_implies_selected_no_checkbox_needed(self):
+    def test_new_role_name_creates_the_role_and_assigns_the_segment(self):
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-04", "gender": "male", "age_bucket": "young",
-            "name": "arjuna", "listen_ms": 0,
+            "role": "arjuna", "listen_ms": 0,
         })
         self.assertEqual(status, 200)
         rec = server.load_answers(self.set_id)["voice-cast-04"]
         self.assertTrue(rec["selected"])
-        self.assertEqual(rec["name"], "arjuna")
+        self.assertEqual(rec["role"], "arjuna")
+        self.assertEqual(rec["name"], "arjuna")  # backward-compat mirror
+        roles = server.load_roles(self.set_id)
+        self.assertIn("arjuna", [r["name"] for r in roles])
 
     def test_pleasantness_and_room_feel_are_optional(self):
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-05", "gender": "female", "age_bucket": "old",
-            "name": "", "listen_ms": 0,
+            "role": "", "listen_ms": 0,
         })
         self.assertEqual(status, 200)
         rec = server.load_answers(self.set_id)["voice-cast-05"]
@@ -1035,21 +1077,21 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
     def test_invalid_pleasantness_rejected(self):
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-06", "gender": "male", "age_bucket": "young",
-            "name": "", "pleasantness": "11", "listen_ms": 0,
+            "role": "", "pleasantness": "11", "listen_ms": 0,
         })
         self.assertEqual(status, 400)
 
     def test_invalid_room_feel_rejected(self):
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-07", "gender": "male", "age_bucket": "young",
-            "name": "", "room_feel": "cathedral", "listen_ms": 0,
+            "role": "", "room_feel": "cathedral", "listen_ms": 0,
         })
         self.assertEqual(status, 400)
 
     def test_pleasantness_scale_round_trips_and_is_shown_in_answer_label(self):
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-08", "gender": "female", "age_bucket": "middle",
-            "name": "", "pleasantness": "5", "room_feel": "dry", "listen_ms": 0,
+            "role": "", "pleasantness": "5", "room_feel": "dry", "listen_ms": 0,
         })
         self.assertEqual(status, 200)
         rec = server.load_answers(self.set_id)["voice-cast-08"]
@@ -1059,20 +1101,20 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
 
     def test_adding_pleasantness_to_an_already_cast_segment_does_not_require_redoing_it(self):
         """Owner: "нужно не потерять то что уже помелили" -- filling in
-        gender/age/name once, then coming back later to add ONLY the new
+        gender/age/role once, then coming back later to add ONLY the new
         pleasantness field, must work without resupplying anything else."""
         task_id = "voice-cast-09"
         self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": task_id, "gender": "male", "age_bucket": "old",
-            "name": "narrator2", "listen_ms": 0,
+            "role": "narrator2", "listen_ms": 0,
         })
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": task_id, "gender": "male", "age_bucket": "old",
-            "name": "narrator2", "pleasantness": "4", "listen_ms": 0,
+            "role": "narrator2", "pleasantness": "4", "listen_ms": 0,
         })
         self.assertEqual(status, 200)
         rec = server.load_answers(self.set_id)[task_id]
-        self.assertEqual(rec["name"], "narrator2")  # unchanged, not lost
+        self.assertEqual(rec["role"], "narrator2")  # unchanged, not lost
         self.assertEqual(rec["pleasantness"], "4")  # newly added
 
     def test_measured_features_are_exposed_in_task_view_and_baked_into_the_record(self):
@@ -1085,25 +1127,26 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
 
         self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-10", "gender": "male", "age_bucket": "middle",
-            "name": "", "listen_ms": 0,
+            "role": "", "listen_ms": 0,
         })
         rec = server.load_answers(self.set_id)["voice-cast-10"]
         self.assertIsNotNone(rec["measured_features"])
 
-    def test_cast_roster_lists_named_voices_in_task_list(self):
+    def test_task_list_shows_the_assigned_role(self):
         self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-11", "gender": "female", "age_bucket": "young",
-            "name": "sita2", "listen_ms": 0,
+            "role": "sita2", "listen_ms": 0,
         })
         status, tasks = self._get(f"/api/sets/{self.set_id}/tasks")
         self.assertEqual(status, 200)
         row = next(t for t in tasks["tasks"] if t["id"] == "voice-cast-11")
+        self.assertEqual(row["role"], "sita2")
         self.assertEqual(row["name"], "sita2")
 
-    def test_cast_and_name_round_trips_and_is_machine_readable(self):
+    def test_cast_and_role_round_trips_and_is_machine_readable(self):
         status, ans = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-02", "gender": "female", "age_bucket": "young",
-            "selected": True, "name": "sita", "note": "звонкий, чёткий", "listen_ms": 5000,
+            "role": "sita", "role_chosen": True, "note": "звонкий, чёткий", "listen_ms": 5000,
         })
         self.assertEqual(status, 200)
 
@@ -1111,7 +1154,8 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
         self.assertEqual(rec["gender"], "female")
         self.assertEqual(rec["age_bucket"], "young")
         self.assertTrue(rec["selected"])
-        self.assertEqual(rec["name"], "sita")
+        self.assertEqual(rec["role"], "sita")
+        self.assertTrue(rec["role_chosen"])
         self.assertEqual(rec["note"], "звонкий, чёткий")
         # This IS the casting result the engine reads -- output_path/segment_text
         # must be present and machine-usable as register_voice() inputs.
@@ -1122,18 +1166,18 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
 
         status, detail = self._get(f"/api/sets/{self.set_id}/task/voice-cast-02")
         self.assertEqual(status, 200)
-        self.assertEqual(detail["previous_answer"]["name"], "sita")
+        self.assertEqual(detail["previous_answer"]["role"], "sita")
 
     def test_recast_does_not_pollute_blind_gate_stats(self):
         task_id = "voice-cast-03"
         self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": task_id, "gender": "male", "age_bucket": "old",
-            "selected": False, "listen_ms": 0,
+            "role": "", "listen_ms": 0,
         })
         # Owner changes their mind on a re-listen.
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": task_id, "gender": "male", "age_bucket": "middle",
-            "selected": True, "name": "narrator", "listen_ms": 0,
+            "role": "narrator3", "listen_ms": 0,
         })
         self.assertEqual(status, 200)
 
@@ -1152,6 +1196,125 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
         # not folded into the blind "answered_after_reveal" bucket meaning.
         latest = server.load_answers(self.set_id)[task_id]
         self.assertTrue(latest["is_correction"])
+
+
+@unittest.skipUnless(CHAPTER114E0_PRESENT and NUMPY_PRESENT,
+                      "needs both output/chapter-114-e0/ and numpy")
+class TestVoiceRolesOverHTTP(unittest.TestCase):
+    """Issue #57/#118 follow-up (roles): "давай для выбора роли будем
+    давать возможность создавать новый и выбирать из существующих, пусть
+    будет несколько голосов на роль, чтобы можно было понять куда можно
+    добавить голос"."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._orig_results_dir = server.RESULTS_DIR
+        cls.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = cls.tmp_dir
+        cls.httpd = server.ThreadingHTTPServer((server.HOST, 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.set_id = "voice_casting_chapter114e0"
+        assert cls.set_id in server.TASK_SETS
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        server.RESULTS_DIR = cls._orig_results_dir
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def _post_json(self, path, obj):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            data = json.dumps(obj).encode("utf-8")
+            conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def test_create_empty_role_is_visible_with_zero_candidates(self):
+        """The core of the owner's ask: "видно, куда ещё можно добавить
+        голос" -- a role must be listable and visible BEFORE any candidate
+        exists for it."""
+        status, resp = self._post_json(f"/api/sets/{self.set_id}/roles", {"name": "мудрецы"})
+        self.assertEqual(status, 200)
+        status, listing = self._get(f"/api/sets/{self.set_id}/roles")
+        self.assertEqual(status, 200)
+        role = next(r for r in listing["roles"] if r["name"] == "мудрецы")
+        self.assertEqual(role["candidate_count"], 0)
+        self.assertIsNone(role["chosen_task_id"])
+
+    def test_create_role_is_idempotent(self):
+        self._post_json(f"/api/sets/{self.set_id}/roles", {"name": "царь"})
+        status, resp = self._post_json(f"/api/sets/{self.set_id}/roles", {"name": "царь"})
+        self.assertEqual(status, 200)
+        names = [r["name"] for r in resp["roles"]]
+        self.assertEqual(names.count("царь"), 1)
+
+    def test_empty_role_name_rejected(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/roles", {"name": "  "})
+        self.assertEqual(status, 400)
+
+    def test_multiple_candidates_can_be_assigned_to_the_same_role(self):
+        """Owner: "пусть будет несколько голосов на роль" -- not an error."""
+        for task_id in ("voice-cast-20", "voice-cast-21", "voice-cast-22"):
+            status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+                "task_id": task_id, "gender": "male", "age_bucket": "middle",
+                "role": "царь-парикшит", "listen_ms": 0,
+            })
+            self.assertEqual(status, 200)
+        status, listing = self._get(f"/api/sets/{self.set_id}/roles")
+        self.assertEqual(status, 200)
+        role = next(r for r in listing["roles"] if r["name"] == "царь-парикшит")
+        self.assertEqual(role["candidate_count"], 3)
+        self.assertEqual(set(role["candidate_task_ids"]), {"voice-cast-20", "voice-cast-21", "voice-cast-22"})
+
+    def test_role_chosen_marks_the_final_candidate_without_touching_siblings(self):
+        for task_id in ("voice-cast-23", "voice-cast-24"):
+            self._post_json(f"/api/sets/{self.set_id}/answer", {
+                "task_id": task_id, "gender": "female", "age_bucket": "middle",
+                "role": "богиня-земля", "listen_ms": 0,
+            })
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-23", "gender": "female", "age_bucket": "middle",
+            "role": "богиня-земля", "role_chosen": True, "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        status, listing = self._get(f"/api/sets/{self.set_id}/roles")
+        role = next(r for r in listing["roles"] if r["name"] == "богиня-земля")
+        self.assertEqual(role["chosen_task_id"], "voice-cast-23")
+        # The sibling candidate must still exist, untouched, unchosen -- no
+        # server-side exclusivity enforcement across records (see PR
+        # description: kept deliberately simple, one POST = one record).
+        rec_24 = server.load_answers(self.set_id)["voice-cast-24"]
+        self.assertEqual(rec_24["role"], "богиня-земля")
+        self.assertFalse(rec_24["role_chosen"])
+
+    def test_role_chosen_ignored_when_role_is_empty(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-25", "gender": "male", "age_bucket": "young",
+            "role": "", "role_chosen": True, "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        rec = server.load_answers(self.set_id)["voice-cast-25"]
+        self.assertFalse(rec["role_chosen"])
+
+    def test_suggested_roles_come_from_chapter_manifest_speaker(self):
+        status, listing = self._get(f"/api/sets/{self.set_id}/roles")
+        self.assertEqual(status, 200)
+        self.assertIn("suggested", listing)
+        self.assertIsInstance(listing["suggested"], list)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ const state = {
   listenMs: {},          // clip_url -> accumulated ms
   playStart: {},         // clip_url -> timestamp when play started
   audioEls: [],
+  roles: [],             // voice-casting roles for the current set (see loadRoles())
+  suggestedRoles: [],
 };
 
 const el = (id) => document.getElementById(id);
@@ -105,9 +107,13 @@ function renderSidebar() {
     const noteMark = t.has_note ? '<span class="row-note" title="Есть заметка">📝</span>' : "";
     row.innerHTML = `<span class="row-mark">${mark}</span><span class="row-idx">${idx + 1}.</span>`
       + `<span class="row-q">${escapeHtml(truncate(t.question, 60))}</span>${noteMark}`;
-    row.title = t.answered
-      ? (t.is_correction ? "Отвечено (исправлено) — нажмите, чтобы открыть" : "Отвечено — нажмите, чтобы открыть")
-      : "Не отвечено — нажмите, чтобы открыть";
+    if (t.type === "voice_casting") {
+      row.title = t.role ? `Роль: ${t.role} — нажмите, чтобы открыть` : "Роль не назначена — нажмите, чтобы открыть";
+    } else {
+      row.title = t.answered
+        ? (t.is_correction ? "Отвечено (исправлено) — нажмите, чтобы открыть" : "Отвечено — нажмите, чтобы открыть")
+        : "Не отвечено — нажмите, чтобы открыть";
+    }
     row.addEventListener("click", () => goToIndex(idx));
     box.appendChild(row);
   });
@@ -145,6 +151,18 @@ function updateProgress(answered, total) {
 function renderCurrentTask() {
   const d = state.currentDetail;
   el("reveal-card").hidden = true;
+  // Voice casting (issue #57/#118 follow-up, owner: "нужно чтобы было
+  // проще навигация для изменения... не нужно будет нажимать изменить
+  // ответ") is never blind -- there is no reveal step to protect, so the
+  // "report card + Исправить ответ" gate that exists for blind tasks (a
+  // re-answer there is a deliberate, marked event -- see renderAnswered())
+  // does not apply here at all. The form is always live, pre-filled with
+  // whatever was answered before; saving again just overwrites in place.
+  if (d.task.response_mode === "voice_cast") {
+    el("answered-card").hidden = true;
+    renderTaskForm(d.task);
+    return;
+  }
   if (d.previous_answer && !state.editMode) {
     el("task-card").hidden = true;
     renderAnswered(d);
@@ -155,14 +173,15 @@ function renderCurrentTask() {
 }
 
 function renderAnswered(d) {
+  // Blind tasks only -- voice casting never reaches this view (see
+  // renderCurrentTask()); the report-card + "Исправить ответ" gate exists
+  // specifically to make a post-reveal re-answer a deliberate, marked
+  // event, which only matters where blindness is a thing to protect.
   const card = el("answered-card");
   card.hidden = false;
   const rec = d.previous_answer;
   const flag = el("answered-flag");
-  if (rec.type === "voice_casting") {
-    flag.textContent = "Отбор голоса — не слепая проверка, метки не скрывались.";
-    flag.className = "answered-flag";
-  } else if (rec.answered_after_reveal) {
+  if (rec.answered_after_reveal) {
     flag.textContent = "Этот ответ дан ПОСЛЕ раскрытия меток (исправление) — не считается слепым в итогах.";
     flag.className = "answered-flag non-blind";
   } else if (rec.skipped_prior) {
@@ -311,21 +330,106 @@ function renderMeasuredFeatures(task) {
   }
 }
 
-function renderCastRoster() {
-  const named = state.taskList.filter((t) => t.type === "voice_casting" && t.name);
-  const box = el("vc-roster");
-  if (!named.length) {
-    box.textContent = "Пока ни один голос не назван.";
-    return;
-  }
-  box.textContent = "Уже названы: " + named.map((t) => t.name).join(", ");
+// ---- roles (issue #57/#118 follow-up: "роль — самостоятельная сущность,
+// а голоса к ней кандидаты, и кандидатов может быть несколько") ----
+
+async function loadRoles() {
+  const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/roles`);
+  state.roles = data.roles || [];
+  state.suggestedRoles = data.suggested || [];
+  return data;
 }
 
-function renderVoiceCastForm(task) {
+function populateRoleSelect(selectedRole) {
+  const select = el("vc-role-select");
+  select.innerHTML = '<option value="">— не назначено —</option>';
+  for (const role of state.roles) {
+    const opt = document.createElement("option");
+    opt.value = role.name;
+    opt.textContent = `${role.name} (${role.candidate_count})`;
+    select.appendChild(opt);
+  }
+  const newOpt = document.createElement("option");
+  newOpt.value = "__new__";
+  newOpt.textContent = "+ Новая роль…";
+  select.appendChild(newOpt);
+
+  const knownNames = state.roles.map((r) => r.name);
+  if (selectedRole && knownNames.includes(selectedRole)) {
+    select.value = selectedRole;
+    el("vc-role-new").hidden = true;
+  } else if (selectedRole) {
+    // A role assigned earlier but since renamed/removed from roles.json by
+    // hand -- still show it via the "new role" text box rather than
+    // silently dropping it.
+    select.value = "__new__";
+    el("vc-role-new").hidden = false;
+    el("vc-role-new").value = selectedRole;
+  } else {
+    select.value = "";
+    el("vc-role-new").hidden = true;
+    el("vc-role-new").value = "";
+  }
+}
+
+function renderRolesPanel() {
+  const box = el("vc-roles-panel");
+  let html = "";
+  if (!state.roles.length) {
+    html += "<p>Пока нет ни одной роли.</p>";
+  } else {
+    html += "<p><strong>Роли и кандидаты (куда ещё можно добавить голос):</strong></p><ul>";
+    for (const role of state.roles) {
+      const empty = role.candidate_count === 0 ? " — пусто, кандидат ещё не найден" : "";
+      const chosen = role.chosen_task_id ? " ✓ выбран" : "";
+      html += `<li><button class="link-btn role-assign-btn" data-role="${escapeHtml(role.name)}">`
+        + `${escapeHtml(role.name)}</button> — ${role.candidate_count} кандидат(ов)${empty}${chosen}</li>`;
+    }
+    html += "</ul>";
+  }
+  if (state.suggestedRoles.length) {
+    html += "<p><strong>Подсказки из главы:</strong> ";
+    html += state.suggestedRoles.map((s) =>
+      `<button class="link-btn role-assign-btn" data-role="${escapeHtml(s)}">${escapeHtml(s)}</button>`
+    ).join(", ");
+    html += "</p>";
+  }
+  box.innerHTML = html;
+  box.querySelectorAll(".role-assign-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      populateRoleSelect(btn.dataset.role);
+    });
+  });
+}
+
+el("vc-role-select").addEventListener("change", () => {
+  el("vc-role-new").hidden = el("vc-role-select").value !== "__new__";
+});
+
+el("vc-create-role-btn").addEventListener("click", async () => {
+  const name = el("vc-new-empty-role").value.trim();
+  if (!name) return;
+  await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  el("vc-new-empty-role").value = "";
+  await loadRoles();
+  renderRolesPanel();
+  populateRoleSelect(el("vc-role-select").value === "__new__" ? el("vc-role-new").value : el("vc-role-select").value);
+});
+
+function currentRoleFromForm() {
+  const val = el("vc-role-select").value;
+  if (val === "__new__") return el("vc-role-new").value.trim();
+  return val;
+}
+
+async function renderVoiceCastForm(task) {
   el("voice-cast-form").hidden = false;
   el("voice-cast-transcript").textContent = task.transcript || "";
   renderMeasuredFeatures(task);
-  renderCastRoster();
 
   const prior = state.currentDetail.previous_answer;
   document.querySelectorAll('input[name="vc-gender"]').forEach((r) => {
@@ -340,7 +444,11 @@ function renderVoiceCastForm(task) {
   document.querySelectorAll('input[name="vc-room"]').forEach((r) => {
     r.checked = !!prior && r.value === prior.room_feel;
   });
-  el("vc-name").value = (prior && prior.name) || "";
+  el("vc-role-chosen").checked = !!prior && !!prior.role_chosen;
+
+  await loadRoles();
+  renderRolesPanel();
+  populateRoleSelect(prior && prior.role);
 }
 
 el("vc-submit-btn").addEventListener("click", () => submitVoiceCast(state.currentDetail.task));
@@ -353,17 +461,15 @@ async function submitVoiceCast(task) {
     alert("Выберите пол и примерный возраст.");
     return;
   }
-  // A typed name IS "select this voice" -- no separate checkbox (issue
-  // #57/#118 follow-up: the old checkbox-then-name flow got 1 name out of
-  // 70 segments cast; one action is easier to actually use).
-  const name = el("vc-name").value.trim();
+  const role = currentRoleFromForm();
   const pleasantnessEl = document.querySelector('input[name="vc-pleasantness"]:checked');
   const roomEl = document.querySelector('input[name="vc-room"]:checked');
   const body = {
     task_id: task.id,
     gender: genderEl.value,
     age_bucket: ageEl.value,
-    name,
+    role,
+    role_chosen: el("vc-role-chosen").checked,
     pleasantness: pleasantnessEl ? pleasantnessEl.value : null,
     room_feel: roomEl ? roomEl.value : null,
     note: el("task-note").value,
@@ -375,17 +481,11 @@ async function submitVoiceCast(task) {
     body: JSON.stringify(body),
   });
   updateProgress(result.answered, result.total);
-  // Not blind -- nothing to reveal, just move on (or refresh in place if
-  // this was an edit of an already-cast segment).
+  // Not blind -- nothing to reveal, no "Исправить ответ" gate either (issue
+  // #57/#118 follow-up), so saving always just moves straight on to the
+  // next segment, same as finishing a blind task's reveal step.
   await refreshTaskList();
-  if (state.editMode) {
-    state.editMode = false;
-    const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/task/${encodeURIComponent(task.id)}`);
-    state.currentDetail = data;
-    renderCurrentTask();
-  } else {
-    await advanceAfterReveal();
-  }
+  await advanceAfterReveal();
 }
 
 function trackListening(audio, key) {
