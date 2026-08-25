@@ -97,9 +97,10 @@
       },
       "hidden": {
         "A": {
-          "marker": "boundary:continuing_thought"
+          "marker": "boundary:continuing_thought",
+          "note": "Issue #57 follow-up: this clip's text (BOUNDARY_CONTINUING, docs/research/audiobook/m4_tag_inventory_bench.py) is a grammatically COMPLETE sentence ending in a period -- only its narrative continuation is a 'cliffhanger'. Asking whether the intonation signals 'мысль завершена/не завершена' has no honest correct answer on a sentence that ends with a full stop: hearing it as finished is the CORRECT reading of the punctuation, not a miss. correct_answer is deliberately null (see m4-tag-inventory-results.md sec. 5 item 6 and the honest-scoring fix in server.py's grading, which treats a null current correct_answer as 'no gradable expectation' regardless of what an older answer record baked in)."
         },
-        "correct_answer": "Мысль не завершена, будет продолжение"
+        "correct_answer": null
       }
     }
   ]

@@ -352,7 +352,8 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
             pitch_unreliable += 1
             continue
         exp = rec.get("correct_answer")
-        if exp is not None:
+        gradable = record_is_still_gradable(ts, rec)
+        if gradable:
             if rec.get("matches_expected"):
                 correct += 1
             else:
@@ -360,7 +361,7 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
         if rec.get("type") == "pair_compare" and rec.get("answer_kind") == "differ":
             if rec.get("matches_expected"):
                 differed += 1
-            elif exp is not None:
+            elif gradable:
                 not_differed += 1
     if correct or incorrect:
         lines.append(f"**Совпало с ожиданием (свежие ответы, без пропущенных и недостоверных по высоте голоса): {correct} из {correct + incorrect}.**")
@@ -378,10 +379,19 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
     lines.append("|---|---|---|---|---|---|---|")
     for tid, rec in answers.items():
         exp = rec.get("correct_answer") or ""
+        gradable = record_is_still_gradable(ts, rec)
         if rec.get("skipped_prior"):
             match = "пропущено"
         elif rec.get("pitch_warning"):
             match = "недостоверно (высота голоса)"
+        elif exp and not gradable:
+            # The task_sets definition no longer claims a (or the same)
+            # correct_answer for this task_id -- e.g. issue #57's
+            # final-boundary-continuing, whose question turned out to have
+            # no gradable correct answer. The historical record and its
+            # own matches_expected are left exactly as answered; only the
+            # display/tally treats it as retracted.
+            match = "снято (не оценивается)"
         else:
             match = "" if exp == "" else ("да" if rec.get("matches_expected") else "нет")
         answer_display = rec.get('answer_label', rec.get('answer', ''))
@@ -469,6 +479,45 @@ def build_task_view(ts: TaskSet, task: dict) -> dict:
     if has_prior:
         view["options"] = view["options"] + [SKIP_LABEL]
     return view
+
+
+def live_correct_answer(ts: "TaskSet | None", task_id: str) -> object:
+    """The CURRENT expected answer for `task_id` per task_sets/*.json (or
+    the dynamically-built catalog), as opposed to whatever a historical
+    answers.jsonl record baked into its own `correct_answer` field at
+    answer time.
+
+    Grading (render_markdown(), _handle_summary()) uses this instead of a
+    record's baked value, and only trusts the record's own
+    `matches_expected` verdict when the record's baked correct_answer still
+    agrees with the live one (`record_is_still_gradable()` below). This is
+    the honest fix for issue #57's `final-boundary-continuing`: that task's
+    expected answer turned out to be unanswerable (a grammatically complete
+    sentence has no correct "is the thought finished?" verdict -- see
+    m4-tag-inventory-results.md sec. 5 item 6), so its task_sets JSON entry
+    now carries `correct_answer: null`. The owner's already-recorded answer
+    in answers.jsonl is append-only history and is deliberately left
+    untouched (it was the CORRECT listening call); this function is what
+    keeps that historical record from being counted as a miss in any
+    future summary, without rewriting or deleting anything in the JSONL.
+    """
+    if ts is None:
+        return None
+    task = ts.task(task_id)
+    if task is None:
+        return None
+    return (task.get("hidden") or {}).get("correct_answer")
+
+
+def record_is_still_gradable(ts: "TaskSet | None", rec: dict) -> bool:
+    """True if `rec` should count toward the correct/incorrect tally: the
+    task_sets definition still claims a correct_answer for this task_id,
+    AND it is the same expectation the record was judged against when it
+    was answered (so an expectation that has since changed value, not just
+    been retracted to null, is also treated as ungradable rather than
+    silently re-scored against a different answer than the owner saw)."""
+    live = live_correct_answer(ts, rec.get("task_id"))
+    return live is not None and rec.get("correct_answer") == live
 
 
 def reveal_for_task(task: dict) -> dict:
@@ -879,7 +928,13 @@ class Handler(BaseHTTPRequestHandler):
         # same treatment as answered_after_reveal.
         pitch_unreliable = [r for r in blind if r.get("pitch_warning")]
         reliable = [r for r in blind if not r.get("pitch_warning")]
-        graded = [r for r in reliable if r.get("correct_answer") is not None]
+        # Uses the LIVE task_sets definition (record_is_still_gradable()),
+        # not just the record's own baked correct_answer -- so a task whose
+        # expected answer has since been retracted (issue #57's
+        # final-boundary-continuing turned out unanswerable, see
+        # m4-tag-inventory-results.md sec. 5 item 6) stops counting toward
+        # the gate without editing or dropping its historical record.
+        graded = [r for r in reliable if record_is_still_gradable(ts, r)]
         correct = sum(1 for r in graded if r.get("matches_expected"))
         differ_pairs = [
             r for r in reliable
