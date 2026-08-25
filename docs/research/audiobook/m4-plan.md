@@ -23,8 +23,11 @@ Stage profile (M4-T1)   MEASURED, PR #95. AR loop (prefill + per-frame backbone)
                         wall time; codec.decode (one call) = 1.78-3.76%. See §3, M4-T1.
 Decoder                 already MLX, already on GPU. MLX-probe run: 10/10 PASSED (correctness
                         only — no performance or sentiment claim, see §8).
-Sentiment tags          34 added_tokens exist in the tokenizer, all special/non-normalized,
-                        NOBODY has verified Higgs audibly obeys them. See §0.4.
+Sentiment tags          34 added_tokens exist in the tokenizer, all special/non-normalized. T0
+                        PASSED (2026-08-25, owner verdict, SUBJECTIVE): `emotion` tags are
+                        audibly distinguishable. `style:whispering` confirmed NOT usable for
+                        whispering (sounds quieter, not whispered). Only 4/34 tags checked. See
+                        §0.4, §3 M4-T0.
 Batching                already implemented (`continuous_batching.py`), never benchmarked.
 Quantization            infrastructure complete (`python -m mlx_audio.convert`), never run on
                         this checkpoint. Codec fate under conversion is UNVERIFIED and risky —
@@ -82,6 +85,21 @@ whether the emotion/prosody actually changed. There is a direct precedent for ta
 `README.md:245` records the model literally speaking a stress-mark annotation aloud instead of
 using it prosodically. This gap — tags reach the model, nobody has confirmed they are heard — is
 the reason T0 is a blocking first task (§3).
+
+**T0 result and its practical consequence for tag choice (2026-08-25, see §3/M4-T0 and
+`m4-sentiment-results.md` §6):** the owner's blind verdict (SUBJECTIVE) confirms `emotion` tags
+are audibly distinguishable (`sadness` vs. `elation`) — for audiobook work, `emotion` and
+`prosody` are the tags to rely on. `<|style:whispering|>` is confirmed **not** usable for actual
+whispering — the owner reports it "sounds like a quiet sound," matching the objective metrics
+(only ~3 dB quieter than neutral, F0 median unchanged from neutral). Where a script calls for
+whispered narration, do not reach for `style:whispering`; use an `emotion`/`prosody` combination
+(e.g. slower tempo + a low-arousal emotion) or handle it as a separate audio-processing step
+instead. **This generalizes to a caution for the rest of the 34-tag inventory (only 4 have been
+checked by ear so far, per T0): a tag can measurably change generation output (energy, pausing)
+without producing the semantic effect its name promises.** M4-T5's tag dump/chunk-boundary check
+must evaluate each remaining tag against what it is supposed to *mean*, not merely whether some
+metric moves when it is applied — a moved metric is necessary evidence, not sufficient proof, per
+this exact `style:whispering` precedent.
 
 **0.5 The bottleneck is the AR loop, and this is now a MEASURED fact, not an inference from code
 structure.** M4-T1 (§3, DONE, PR #95) measured: the autoregressive Talker loop (prefill +
@@ -224,8 +242,12 @@ T1's number is in hand — it is not gated by anything else in this plan.
 ## 2. Pre-declared thresholds
 
 ```text
-sentiment baseline (T0)     can sadness and elation be told apart blind? NO -> escalate to the
-                            owner immediately, before any further TTS work.
+sentiment baseline (T0)     can sadness and elation be told apart blind? PASSED ON SUBSTANCE,
+                            2026-08-25 — owner's verdict (SUBJECTIVE): «по звуку, он различим, и
+                            эмоции тоже, только шепот звучит как тихий звук», sharpened by «сэднесс
+                            и эталон различимы, и грусть действительно грустная» — sadness sounds
+                            genuinely sad, not just differently-voiced. See m4-sentiment-
+                            results.md §6.
 vocoder relevance           < 15% of wall time -> do not touch the vocoder.
                             MEASURED (M4-T1): 1.78-3.76%. Threshold triggered; vocoder is closed
                             (see §5).
@@ -251,10 +273,29 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 
 ## 3. Track T
 
-- [ ] **M4-T0 (BLOCKING). Sentiment baseline, blind, 15 minutes.** Generate `sadness` vs
-  `elation` on the same short text; the owner listens blind and says whether they're
-  distinguishable. NO → escalate to the owner immediately; everything downstream in this plan that
-  assumes sentiment tags work (T4, T6, Lane 2) is contingent on this passing.
+- [x] **M4-T0 (BLOCKING). Sentiment baseline, blind, 15 minutes.** **DONE — PASSED ON SUBSTANCE,
+  2026-08-25.** Generated `sadness` vs `elation` (plus `whispering` and `speed_slow` controls) on
+  the same short text; objective evidence in
+  [`m4-sentiment-results.md`](m4-sentiment-results.md) §1-5, owner's blind verdict in §6 (SUBJECTIVE,
+  the owner's own ear, not a metric), given in two statements, the second sharpening the first:
+  «по звуку, он различим, и эмоции тоже, только шепот звучит как тихий звук», then «сэднесс и
+  эталон различимы, и грусть действительно грустная» (owner's own phrasing of the tags by ear;
+  "эталон" = `elation`). Read precisely: `sadness`/`elation` are not merely distinguishable —
+  `sadness` sounds genuinely sad, i.e. semantically correct, not just a different-sounding reading
+  of the same sentence. This is the gate's literal question (§2: "can sadness and elation be told
+  apart blind?") answered at a stronger level than "different" — so **the blocking gate is PASSED
+  ON SUBSTANCE**; the optimization branch (Lane 1: batching → quantization) is now unblocked, since
+  there is a confirmed, semantically-correct sentiment baseline worth preserving under
+  quantization. Separately, and not part of the gate itself: (1) the owner also reported
+  `<|style:whispering|>` does not sound whispered, only quieter — consistent with the objective
+  metrics (§3: only ~3 dB quieter than neutral, F0 median identical to neutral to one decimal); see
+  §0.4 below for the practical consequence. (2) **Methodological finding for the M4-T4 gate's
+  objective proxy**: §3's flagged inconsistency — `sadness`'s F0 median sitting *above* neutral,
+  which looked like the wrong direction — is now understood as a misleading proxy, not a failed
+  emotion, since the owner confirms `sadness` sounds genuinely sad. F0 spread/std and pause
+  duration (which did point the expected direction) are corroborated instead; **do not use F0
+  median as a pass/fail signal in M4-T4** (see that task's updated proxy list below). Only 4 of 34
+  tags have been checked by ear; this verdict does not extend to the other 30 (see M4-T5).
   *Tier:* **opus** for the verdict framing/aggregation; the generation itself is mechanical.
 
 - [x] **M4-T1. Profile the existing MLX pipeline stage-by-stage.** **DONE — measured, PR #95
@@ -387,8 +428,13 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   SER classifier (rejected: wav2vec2-style SER models are trained on English acted-emotion
   corpora; their calibration on Russian synthetic speech is unknown and would add an unvalidated
   external dependency to judge this project's own model): **ASR round-trip + prosodic metrics**
-  (F0 range, pause duration, speaking rate) measured on pairs of `<|emotion:sadness|>` /
-  `<|emotion:elation|>` output, computed without any third-party model. Emotion smoothing, if
+  (F0 range/std, pause duration, speaking rate) measured on pairs of `<|emotion:sadness|>` /
+  `<|emotion:elation|>` output, computed without any third-party model. **Explicitly do NOT include
+  F0 median in this proxy** — M4-T0 found it misleading for this checkpoint's Russian synthesis
+  (`sadness`'s F0 median sat above neutral even though the owner confirmed `sadness` sounds
+  genuinely sad by ear, `m4-sentiment-results.md` §6c); F0 spread/std and pause duration are the
+  proxies with owner-verdict-corroborated validity and are what this gate should rely on. Emotion
+  smoothing, if
   present, must show up as a narrowed F0 range under this proxy.
   **Escalation option if no configuration clears tier <= 3 (§2's suitability tiers): a hybrid, not
   abandoning Higgs.** Route emotionally loaded scenes through Higgs (full tag fidelity) and
@@ -532,8 +578,12 @@ honesty          a partial or failing stage is written up as partial or failing.
 
 ## 8. What this plan does not claim
 
-- That Higgs audibly obeys its control tags — this is the single biggest unverified premise in the
-  whole plan, which is exactly why T0 is first and blocking.
+- That Higgs audibly obeys its control tags **in general** — T0 confirmed only that `emotion` tags
+  are distinguishable (`sadness`/`elation`, owner verdict, `m4-sentiment-results.md` §6) and that
+  `style:whispering` specifically does **not** produce whisper-quality speech (only a quieter,
+  otherwise-unchanged rendering). 4 of the 34 tags have been checked by ear; the other 30 (and
+  `prosody` tags beyond `speed_slow`) remain unverified — do not generalize the T0 pass to "all
+  tags work."
 - That batching will actually deliver >= 1.5x (T2 measures this; it is not assumed).
 - That 8-bit quantization will be sufficient, or safe for sentiment, before T4's gate runs.
 - That sentiment survives chunk boundaries — untested until T5/T7.
