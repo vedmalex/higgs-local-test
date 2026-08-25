@@ -6,9 +6,11 @@ Pure-function tests only -- no server socket, no audio playback, no GPU. Run wit
 """
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -152,6 +154,209 @@ class TestAtomicResultsRoundTrip(unittest.TestCase):
         lines = jsonl_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
         json.loads(lines[0])  # must not raise
+
+
+class TestCorrectionHistory(unittest.TestCase):
+    """Requirement 2 (issue #57 follow-up): a correction must be a new,
+    separately timestamped record, never an in-place overwrite -- and
+    grading/`load_answers()` must resolve to the latest one."""
+
+    def setUp(self):
+        self._orig_results_dir = server.RESULTS_DIR
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = self.tmp_dir
+
+    def tearDown(self):
+        server.RESULTS_DIR = self._orig_results_dir
+
+    def test_correction_appends_new_line_and_keeps_old(self):
+        rec1 = {"task_id": "t1", "answer_label": "Да", "correct_answer": "Да",
+                "matches_expected": True, "type": "single_rating", "listen_ms": 100,
+                "timestamp": "x", "hidden": {}}
+        server.append_answer("demo", dict(rec1))
+        rec2 = {"task_id": "t1", "answer_label": "Нет", "correct_answer": "Да",
+                 "matches_expected": False, "type": "single_rating", "listen_ms": 50,
+                 "timestamp": "y", "hidden": {}}
+        server.append_answer("demo", dict(rec2))
+
+        history = server.load_answer_history("demo")
+        self.assertEqual(len(history), 2, "both the original and the correction must survive on disk")
+        self.assertEqual(history[0]["answer_label"], "Да")
+        self.assertEqual(history[0]["revision"], 1)
+        self.assertFalse(history[0]["is_correction"])
+        self.assertEqual(history[1]["answer_label"], "Нет")
+        self.assertEqual(history[1]["revision"], 2)
+        self.assertTrue(history[1]["is_correction"])
+        self.assertTrue(history[1]["answered_after_reveal"])
+        self.assertEqual(history[1]["replaces_revision"], 1)
+
+    def test_load_answers_resolves_to_latest_revision(self):
+        server.append_answer("demo", {"task_id": "t1", "answer_label": "Да",
+                                        "correct_answer": "Да", "matches_expected": True,
+                                        "type": "single_rating", "listen_ms": 0,
+                                        "timestamp": "x", "hidden": {}})
+        server.append_answer("demo", {"task_id": "t1", "answer_label": "Нет",
+                                        "correct_answer": "Да", "matches_expected": False,
+                                        "type": "single_rating", "listen_ms": 0,
+                                        "timestamp": "y", "hidden": {}})
+        answers = server.load_answers("demo")
+        self.assertEqual(set(answers), {"t1"})
+        self.assertEqual(answers["t1"]["answer_label"], "Нет")
+        self.assertTrue(answers["t1"]["is_correction"])
+
+    def test_old_record_without_new_fields_reads_as_non_correction(self):
+        # Simulates an answers.jsonl written before this feature existed
+        # (e.g. the owner's real unheard_sfx_env/answers.jsonl).
+        d = self.tmp_dir / "legacy"
+        d.mkdir()
+        old_line = json.dumps({
+            "task_id": "catalog-env-noise", "set_id": "legacy", "type": "single_rating",
+            "answer_kind": None, "question": "Слышен ли фоновый шум?",
+            "answer_label": "Да, фоновый шум слышен, речь не пострадала",
+            "answer_role": None, "listen_ms": 0, "timestamp": "2026-08-25T12:25:24+0300",
+            "hidden": {"A": {"tag": "env:noise"}}, "correct_answer": None,
+            "matches_expected": None, "skipped_prior": False,
+        }, ensure_ascii=False)
+        (d / "answers.jsonl").write_text(old_line + "\n", encoding="utf-8")
+
+        history = server.load_answer_history("legacy")
+        self.assertEqual(len(history), 1)
+        self.assertNotIn("revision", history[0])
+        answers = server.load_answers("legacy")
+        self.assertEqual(set(answers), {"catalog-env-noise"})
+        self.assertFalse(answers["catalog-env-noise"].get("is_correction"))
+        self.assertFalse(answers["catalog-env-noise"].get("answered_after_reveal"))
+
+        # A correction on top of a legacy record must still work and not
+        # crash on the missing key (prior_count derived by task_id match).
+        server.append_answer("legacy", {"task_id": "catalog-env-noise",
+                                          "answer_label": "Нет", "correct_answer": None,
+                                          "matches_expected": None, "type": "single_rating",
+                                          "listen_ms": 0, "timestamp": "z", "hidden": {}})
+        answers = server.load_answers("legacy")
+        self.assertEqual(answers["catalog-env-noise"]["revision"], 2)
+        self.assertTrue(answers["catalog-env-noise"]["is_correction"])
+
+
+@unittest.skipUnless(OUTPUT_PRESENT, "output/ audio fixtures not present in this checkout (gitignored)")
+class TestNavigationOverHTTP(unittest.TestCase):
+    """End-to-end check that the actual HTTP server (issue #57 follow-up:
+    back/forward navigation, jump-to-task list, corrections) behaves as
+    documented -- not just the pure functions above."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._orig_results_dir = server.RESULTS_DIR
+        cls.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = cls.tmp_dir
+        cls.httpd = server.ThreadingHTTPServer((server.HOST, 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        # A JSON-defined set whose clip files are copied into this checkout's
+        # output/ for the test fixtures (see worktree setup).
+        cls.set_id = "final_intonation"
+        assert cls.set_id in server.TASK_SETS, "final_intonation task set failed to load"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        server.RESULTS_DIR = cls._orig_results_dir
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = json.loads(resp.read().decode("utf-8"))
+            return resp.status, body
+        finally:
+            conn.close()
+
+    def _post_json(self, path, obj):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            data = json.dumps(obj).encode("utf-8")
+            conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            body = json.loads(resp.read().decode("utf-8"))
+            return resp.status, body
+        finally:
+            conn.close()
+
+    def test_tasks_list_and_jump_to_arbitrary_task(self):
+        status, body = self._get(f"/api/sets/{self.set_id}/tasks")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["total"], len(server.TASK_SETS[self.set_id].tasks))
+        ids = [t["id"] for t in body["tasks"]]
+        self.assertIn("final-punct-question", ids)
+
+        # Jump directly to a task that is neither first nor next-unanswered.
+        status, detail = self._get(f"/api/sets/{self.set_id}/task/final-punct-question")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["task"]["id"], "final-punct-question")
+        self.assertIsNone(detail["previous_answer"])
+
+    def test_returning_to_an_answered_task_returns_the_prior_answer(self):
+        task_id = "final-punct-exclaim"
+        status, before = self._get(f"/api/sets/{self.set_id}/task/{task_id}")
+        self.assertEqual(status, 200)
+        self.assertIsNone(before["previous_answer"])
+
+        status, ans = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "answer_label": "Восклицание", "listen_ms": 1200,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(ans["ok"])
+
+        # Navigate away and back -- the server must hand back the same answer.
+        status, after = self._get(f"/api/sets/{self.set_id}/task/{task_id}")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(after["previous_answer"])
+        self.assertEqual(after["previous_answer"]["answer_label"], "Восклицание")
+        self.assertTrue(after["previous_answer"]["matches_expected"])
+        self.assertIsNotNone(after["reveal"])  # already revealed, honestly shown again
+
+    def test_correction_is_recorded_and_counted_as_non_blind_in_summary(self):
+        task_id = "final-punct-period"
+        status, ans1 = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "answer_label": "Вопрос", "listen_ms": 500,
+        })
+        self.assertEqual(status, 200)
+        self.assertFalse(server.load_answers(self.set_id)[task_id]["is_correction"])
+
+        # Owner realizes the mistake and corrects it.
+        status, ans2 = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "answer_label": "Утверждение (точка)", "listen_ms": 300,
+        })
+        self.assertEqual(status, 200)
+
+        history = server.load_answer_history(self.set_id)
+        task_history = [r for r in history if r["task_id"] == task_id]
+        self.assertEqual(len(task_history), 2, "the wrong first answer must not be discarded")
+        self.assertEqual(task_history[0]["answer_label"], "Вопрос")
+        self.assertEqual(task_history[1]["answer_label"], "Утверждение (точка)")
+
+        latest = server.load_answers(self.set_id)[task_id]
+        self.assertTrue(latest["is_correction"])
+        self.assertTrue(latest["answered_after_reveal"])
+        self.assertTrue(latest["matches_expected"], "grading must use the corrected (latest) answer")
+
+        # Task list reflects the correction.
+        status, tasks = self._get(f"/api/sets/{self.set_id}/tasks")
+        row = next(t for t in tasks["tasks"] if t["id"] == task_id)
+        self.assertTrue(row["is_correction"])
+        self.assertTrue(row["answered_after_reveal"])
+
+        # Summary: latest (correct) answer is used, but since it was given
+        # after the reveal it must NOT count in the blind graded bucket.
+        status, summary = self._get(f"/api/sets/{self.set_id}/summary")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(summary["answered_after_reveal"], 1)
+        graded_task_ids = {r["task_id"] for r in summary["answers"]
+                            if r["task_id"] == task_id and not r.get("answered_after_reveal")}
+        self.assertEqual(graded_task_ids, set(), "the corrected answer must not be double counted as blind")
 
 
 if __name__ == "__main__":

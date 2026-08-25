@@ -7,7 +7,16 @@ Stdlib-only (http.server + json), no framework. Serves a small single-page UI th
   - lets the owner answer without knowing which variant/tag they're hearing,
   - reveals the hidden metadata only after the answer is submitted,
   - writes every answer to disk immediately (atomic temp-file + os.replace), so an
-    interrupted session never corrupts the results file and can be resumed later.
+    interrupted session never corrupts the results file and can be resumed later,
+  - lets the owner navigate back/forward through already-answered tasks (or jump to
+    any task in a full list with per-task state) and resubmit a corrected answer,
+  - keeps every answer ever submitted in `answers.jsonl` (a correction is a new,
+    separately timestamped line, not an in-place overwrite) while grading and the
+    "next unanswered" flow always resolve to the *latest* answer per task,
+  - honestly flags a resubmitted answer as `answered_after_reveal: true`, since the
+    first answer's reveal already showed the hidden metadata — it can't be blind
+    the second time, and the M4 gate counts it separately rather than pretending
+    otherwise.
 
 Run: `python3 src/sentiment_survey/server.py` (see `make sentiment-survey`).
 Results: `output/sentiment_survey_results/<set_id>/answers.jsonl` (machine-readable,
@@ -27,7 +36,7 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import catalog  # noqa: E402  (needs sys.path tweak above; same-directory module)
@@ -158,17 +167,31 @@ def results_paths(set_id: str) -> tuple[Path, Path]:
     return d / "answers.jsonl", d / "answers.md"
 
 
-def load_answers(set_id: str) -> dict[str, dict]:
+def load_answer_history(set_id: str) -> list[dict]:
+    """Every answer record ever written for this set, in file (= chronological)
+    order. A task answered more than once (a correction) appears more than
+    once here — each line is kept forever, nothing is overwritten in place.
+    Old records written before the correction feature (issue #57 follow-up)
+    have no `revision`/`is_correction`/`answered_after_reveal` keys; callers
+    must use `.get()` with a default rather than assume they're present."""
     jsonl_path, _ = results_paths(set_id)
-    answers: dict[str, dict] = {}
+    history: list[dict] = []
     if jsonl_path.exists():
         with jsonl_path.open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
-                rec = json.loads(line)
-                answers[rec["task_id"]] = rec
+                history.append(json.loads(line))
+    return history
+
+
+def load_answers(set_id: str) -> dict[str, dict]:
+    """Current (latest) answer per task_id — corrections shadow the record(s)
+    they replace, but never erase them from the JSONL history."""
+    answers: dict[str, dict] = {}
+    for rec in load_answer_history(set_id):
+        answers[rec["task_id"]] = rec
     return answers
 
 
@@ -182,26 +205,63 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def append_answer(set_id: str, record: dict) -> dict[str, dict]:
-    """Record one answer atomically and return the full up-to-date answer map."""
-    jsonl_path, md_path = results_paths(set_id)
-    answers = load_answers(set_id)
-    answers[record["task_id"]] = record
+    """Append one answer to the permanent history and return the up-to-date
+    "latest answer per task" map.
 
-    # Rewrite the whole JSONL from the in-memory map: small files (tens of
-    # entries), so a full atomic rewrite per answer is simpler and safer than
-    # a bare append (which is not itself atomic against a mid-write crash).
-    lines = [json.dumps(answers[tid], ensure_ascii=False) for tid in answers]
+    History is never rewritten or dropped: if the owner already answered this
+    task_id, `record` is stamped as a correction (revision > 1) that
+    `replaces_revision`, but the earlier revision(s) stay in the JSONL file.
+    This is deliberate (issue #57 follow-up) — a changed mind is itself a
+    signal worth keeping, not noise to overwrite. Grading and the resumable
+    "next task" flow both use `load_answers()`, which always resolves to the
+    latest revision per task, so a correction is what counts for the gate.
+
+    A revision > 1 also always means `answered_after_reveal = True`: the
+    first answer's reveal (see `reveal_for_task`) already showed this task's
+    hidden metadata, so any resubmission cannot be blind anymore. Recorded
+    explicitly and honestly rather than silently re-blinding the UI, so the
+    M4 gate can (and does, see `_handle_summary`) treat post-reveal answers
+    as a separate, non-blind bucket.
+    """
+    jsonl_path, md_path = results_paths(set_id)
+    history = load_answer_history(set_id)
+    prior_count = sum(1 for r in history if r["task_id"] == record["task_id"])
+    record["revision"] = prior_count + 1
+    record["is_correction"] = prior_count > 0
+    record["answered_after_reveal"] = prior_count > 0
+    record["replaces_revision"] = prior_count if prior_count > 0 else None
+    history.append(record)
+
+    # Rewrite the whole JSONL from the in-memory history list: small files
+    # (tens to a couple hundred lines even with corrections), so a full
+    # atomic rewrite per answer is simpler and safer than a bare append
+    # (which is not itself atomic against a mid-write crash).
+    lines = [json.dumps(r, ensure_ascii=False) for r in history]
     atomic_write(jsonl_path, "\n".join(lines) + "\n" if lines else "")
 
+    answers = {}
+    for rec in history:
+        answers[rec["task_id"]] = rec
     atomic_write(md_path, render_markdown(set_id, answers))
     return answers
 
 
 def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
+    """Render the human-readable summary from the *latest* answer per task
+    (`answers`, as returned by load_answers()/append_answer()) — corrections
+    are what count here and for grading. The full history (including
+    superseded answers) always stays in answers.jsonl, never in this file."""
     ts = TASK_SETS.get(set_id)
     title = ts.title if ts else set_id
     total = len(ts.tasks) if ts else len(answers)
+    corrections = sum(1 for r in answers.values() if r.get("is_correction"))
     lines = [f"# {title}", "", f"Отвечено {len(answers)} из {total}.", ""]
+    if corrections:
+        lines.append(
+            f"Из них исправлено {corrections}: показан последний ответ, "
+            f"прежние варианты сохранены в `answers.jsonl` (не теряются)."
+        )
+        lines.append("")
     differed, not_differed, correct, incorrect, skipped = 0, 0, 0, 0, 0
     for rec in answers.values():
         if rec.get("skipped_prior"):
@@ -232,8 +292,11 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
             match = "пропущено"
         else:
             match = "" if exp == "" else ("да" if rec.get("matches_expected") else "нет")
+        answer_display = rec.get('answer_label', rec.get('answer', ''))
+        if rec.get('is_correction'):
+            answer_display += f" _(испр., см. ред. {rec.get('replaces_revision')})_"
         lines.append(
-            f"| `{tid}` | {rec.get('type', '')} | {rec.get('answer_label', rec.get('answer', ''))} "
+            f"| `{tid}` | {rec.get('type', '')} | {answer_display} "
             f"| {exp} | {match} | {rec.get('listen_ms', 0) / 1000:.1f} с | {rec.get('timestamp', '')} |"
         )
     lines.append("")
@@ -402,6 +465,13 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/sets/") and path.endswith("/summary"):
                 set_id = path[len("/api/sets/"):-len("/summary")]
                 self._handle_summary(set_id)
+            elif path.startswith("/api/sets/") and path.endswith("/tasks"):
+                set_id = path[len("/api/sets/"):-len("/tasks")]
+                self._handle_task_list(set_id)
+            elif "/task/" in path and path.startswith("/api/sets/"):
+                rest = path[len("/api/sets/"):]
+                set_id, task_id = rest.split("/task/", 1)
+                self._handle_task_detail(unquote(set_id), unquote(task_id))
             elif path.startswith("/clip/"):
                 opaque = path[len("/clip/"):]
                 self._handle_clip(opaque)
@@ -461,6 +531,70 @@ class Handler(BaseHTTPRequestHandler):
             "total": len(ts.tasks),
             "task": view,
         })
+
+    def _handle_task_list(self, set_id: str):
+        """Full ordered task inventory with per-task state, for the sidebar
+        that lets the owner see where they are across all N tasks and jump
+        to any one of them directly (issue #57 follow-up, requirement 4)."""
+        ts = TASK_SETS.get(set_id)
+        if ts is None:
+            self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown set {set_id!r}")
+            return
+        answers = load_answers(set_id)
+        items = []
+        for idx, task in enumerate(ts.tasks):
+            rec = answers.get(task["id"])
+            items.append({
+                "index": idx,
+                "id": task["id"],
+                "question": task["question"],
+                "answered": rec is not None,
+                "is_correction": bool(rec.get("is_correction")) if rec else False,
+                "answered_after_reveal": bool(rec.get("answered_after_reveal")) if rec else False,
+                "matches_expected": rec.get("matches_expected") if rec else None,
+                "skipped_prior": bool(rec.get("skipped_prior")) if rec else False,
+            })
+        self._send_json({
+            "set_id": set_id,
+            "title": ts.title,
+            "total": len(ts.tasks),
+            "answered": len(answers),
+            "tasks": items,
+        })
+
+    def _handle_task_detail(self, set_id: str, task_id: str):
+        """One task by id (not just 'the next unanswered one'), so the
+        browser can navigate back/forward and jump to any task. If the task
+        was already answered, the reveal and the previous answer are
+        returned immediately — the labels were revealed the moment the
+        first answer was submitted, so there is nothing left to hide, and
+        pretending otherwise would just be lying to the owner about their
+        own past session (issue #57 follow-up, requirements 1 and 3)."""
+        ts = TASK_SETS.get(set_id)
+        if ts is None:
+            self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown set {set_id!r}")
+            return
+        task = ts.task(task_id)
+        if task is None:
+            self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown task {task_id!r} in set {set_id!r}")
+            return
+        answers = load_answers(set_id)
+        idx = next((i for i, t in enumerate(ts.tasks) if t["id"] == task_id), None)
+        prev_id = ts.tasks[idx - 1]["id"] if idx is not None and idx > 0 else None
+        next_id = ts.tasks[idx + 1]["id"] if idx is not None and idx + 1 < len(ts.tasks) else None
+
+        view = build_task_view(ts, task)
+        prior_answer = answers.get(task_id)
+        payload = {
+            "index": idx,
+            "total": len(ts.tasks),
+            "task": view,
+            "prev_id": prev_id,
+            "next_id": next_id,
+            "previous_answer": prior_answer,
+            "reveal": reveal_for_task(task) if prior_answer is not None else None,
+        }
+        self._send_json(payload)
 
     def _handle_clip(self, opaque: str):
         path = CLIP_INDEX.get(opaque)
@@ -535,10 +669,15 @@ class Handler(BaseHTTPRequestHandler):
         total = len(ts.tasks)
         fresh = [r for r in answers.values() if not r.get("skipped_prior")]
         skipped = len(answers) - len(fresh)
-        graded = [r for r in fresh if r.get("correct_answer") is not None]
+        # Corrections resubmitted after the first answer's reveal are no
+        # longer blind (see append_answer's docstring) — the M4 gate must
+        # count them separately, not silently fold them into the blind tally.
+        blind = [r for r in fresh if not r.get("answered_after_reveal")]
+        non_blind = [r for r in fresh if r.get("answered_after_reveal")]
+        graded = [r for r in blind if r.get("correct_answer") is not None]
         correct = sum(1 for r in graded if r.get("matches_expected"))
         differ_pairs = [
-            r for r in fresh
+            r for r in blind
             if r.get("type") == "pair_compare" and r.get("answer_kind") == "differ"
         ]
         differed = sum(1 for r in differ_pairs if r.get("matches_expected"))
@@ -548,11 +687,12 @@ class Handler(BaseHTTPRequestHandler):
             "total": total,
             "answered": len(answers),
             "skipped_prior": skipped,
+            "answered_after_reveal": len(non_blind),
             "graded_total": len(graded),
             "graded_correct": correct,
             "differ_pairs_total": len(differ_pairs),
             "differ_pairs_distinguished": differed,
-            "gate_threshold_note": "M4-план требует >= 8 слепых пар и провал при >6 неразличённых из 8 (docs/research/audiobook/m4-plan.md, §2).",
+            "gate_threshold_note": "M4-план требует >= 8 слепых пар и провал при >6 неразличённых из 8 (docs/research/audiobook/m4-plan.md, §2). Ответы, данные после раскрытия меток (исправления), в эту статистику не входят.",
             "answers": list(answers.values()),
         })
 

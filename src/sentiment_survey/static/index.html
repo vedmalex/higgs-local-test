@@ -24,20 +24,44 @@
       <div class="progress-bar"><div id="progress-fill"></div></div>
     </div>
 
-    <div id="task-card" class="card">
-      <p id="task-question" class="question"></p>
-      <div id="task-slots" class="slots"></div>
-      <p id="prior-hint" class="prior-hint" hidden>
-        По этому заданию уже есть более ранний вердикт владельца — можно ответить заново
-        или пропустить (последний вариант ответа).
-      </p>
-      <div id="task-options" class="options"></div>
-    </div>
+    <div class="task-layout">
+      <aside id="task-sidebar" class="task-sidebar">
+        <div class="sidebar-header">
+          <span>Задания</span>
+          <button id="sidebar-toggle" class="link-btn">Скрыть</button>
+        </div>
+        <div id="task-sidebar-list" class="task-sidebar-list"></div>
+      </aside>
 
-    <div id="reveal-card" class="card reveal" hidden>
-      <h3>Раскрыто после ответа</h3>
-      <div id="reveal-body"></div>
-      <button id="next-btn" class="primary">Далее →</button>
+      <div class="task-main">
+        <div class="nav-bar">
+          <button id="prev-task-btn" class="nav-btn" title="Назад (←)">← Назад</button>
+          <span id="nav-position" class="nav-position"></span>
+          <button id="next-task-btn" class="nav-btn" title="Вперёд (→)">Вперёд →</button>
+        </div>
+
+        <div id="task-card" class="card">
+          <p id="task-question" class="question"></p>
+          <div id="task-slots" class="slots"></div>
+          <p id="prior-hint" class="prior-hint" hidden>
+            По этому заданию уже есть более ранний вердикт владельца — можно ответить заново
+            или пропустить (последний вариант ответа).
+          </p>
+          <div id="task-options" class="options"></div>
+        </div>
+
+        <div id="answered-card" class="card answered" hidden>
+          <p class="answered-flag" id="answered-flag"></p>
+          <div id="answered-body"></div>
+          <button id="edit-answer-btn" class="primary">Исправить ответ</button>
+        </div>
+
+        <div id="reveal-card" class="card reveal" hidden>
+          <h3 id="reveal-title">Раскрыто после ответа</h3>
+          <div id="reveal-body"></div>
+          <button id="next-btn" class="primary">Далее →</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -52,7 +76,9 @@
 
 <footer>
   <p>Результаты пишутся в <code>output/sentiment_survey_results/&lt;набор&gt;/</code>
-     (не в Git). Клавиши: 1-9 — выбрать вариант ответа, R — переслушать первый клип, Enter — далее.</p>
+     (не в Git); история ответов не переписывается — исправление дописывает новую запись.
+     Клавиши: 1-9 — выбрать вариант ответа, R — переслушать первый клип, Enter — далее,
+     ← / → — предыдущее / следующее задание.</p>
 </footer>
 
 <script src="/app.js"></script>
