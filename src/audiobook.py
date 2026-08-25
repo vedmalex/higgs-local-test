@@ -13,30 +13,77 @@ rather than porting its code, and adds tag-continuity tracking on top, which Qwe
 whole call (m4-plan.md §0.1).
 
 What is newly written here:
-  - Russian-aware sentence splitting that does not break on abbreviations/initials or
-    inside quotes (`split_sentences`).
+  - Russian-aware sentence splitting that does not break on abbreviations/initials, inside
+    quotes, or on numbered-list markers (`split_sentences`).
   - Chunking that groups sentences up to a character budget without ever splitting a
-    sentence (`chunk_sentences`).
+    sentence, with a forced hard split for any single sentence that is itself over budget
+    (`chunk_sentences`).
   - Control-tag continuity tracking across chunk boundaries -- re-emitting (\"reopening\")
     the last-seen emotion/prosody/style tag at the start of a new chunk, or before every
     sentence, depending on `--tag-scope` (see docs/research/audiobook/m4-chapter-results.md
-    for the empirical basis of the default).
-  - A per-segment manifest with resume support, and a separate assembly step with a
-    numeric splice-quality check (`assemble_chapter`).
+    for the empirical basis of the default) -- plus hard validation of every control tag
+    against the model's actual tag vocabulary.
+  - A per-segment, content-hash-keyed manifest with atomic writes, crash recovery, and
+    resume-integrity checks, and a separate streaming assembly step with a numeric
+    splice-quality check (`assemble_chapter`).
 
 What is reused as-is: `mlx_audio.tts.utils.load` and `HiggsAudioV3.generate(text=...,
 temperature=..., max_new_tokens=...)` -- the exact call convention already used by
 `src/tts_test.py --text`. This module does not build a second/parallel generation path;
 `generate_segments` below is the only place that calls the model, and it calls it exactly
 the way `src/tts_test.py` does.
+
+Independent audit findings (2026-08, Refs #57) fixed in this revision -- see
+docs/research/audiobook/m4-chapter-results.md for the corrected write-up of what actually
+works and what does not:
+  F1  -- quote-depth tracking was a single counter that both quote-branches fed with the
+         same character (`"`), so it only ever grew; fixed with per-pair-type stacks, a
+         parity toggle for the ambiguous straight quote, a paragraph-boundary reset, and a
+         force-reset safety valve after `QUOTE_FORCE_RESET_CHARS`.
+  F2  -- a single sentence longer than `max_chars` used to bypass the budget entirely;
+         `chunk_sentences` now force-splits any such sentence on `;`, then `,`, then
+         whitespace, then a hard character cut, and warns.
+  F3  -- chapter assembly used to materialize the whole chapter as float64 arrays twice;
+         `assemble_chapter` now streams: one segment's audio in memory at a time, written
+         directly into the output `wave` handle.
+  F4  -- manifest writes used to truncate-in-place; `save_manifest` now writes to a temp
+         file, fsyncs, and `os.replace()`s, keeping a `.bak`; `load_or_create_manifest`
+         recovers from `.bak` on a `JSONDecodeError` instead of crashing.
+  F5  -- one failed segment used to abort the whole run; `generate_segments` now retries
+         with backoff and, under `continue_on_error=True`, marks a segment `failed` and
+         keeps going instead of raising.
+  F6  -- a `done` segment was trusted on `exists()` alone; generation now validates
+         audio length/duration plausibility and resume now checks the stored sample count
+         against the actual file.
+  F7  -- segments are now keyed by a hash of their own text (reused across chunking-plan
+         changes elsewhere in the chapter) instead of requiring the whole plan to match
+         byte-for-byte, `output_path` is stored relative to the manifest's directory, and
+         the manifest header records `max_chars`/`tag_scope`/`model` for a precise mismatch
+         error.
+  F8  -- `max_chars` accounting under `tag_scope="sentence"` now counts the stored
+         (prefixed) text, not the bare sentence.
+  F9  -- a bare numbered-list marker ("1.", "2.") at the start of a sentence followed by a
+         capitalized word no longer ends a sentence on its own.
+  F10 -- a tag declared mid-sentence (not just at the very start) now suppresses reopening
+         that category for the sentence.
+  F11 -- every control-tag-shaped span is validated against the actual tag vocabulary
+         (`VALID_TAGS`, extracted from the pinned tokenizer.json) and raises immediately.
+  F12 -- `read_wav` now checks the declared frame count against the bytes actually present.
+  F13 -- `assemble_chapter` takes `allow_gaps=True` to insert placeholder silence for
+         non-`done` segments and report them, instead of refusing all-or-nothing.
+  F14 -- `generate_segments` clears the MLX cache every `clear_cache_every` segments and
+         records best-effort memory metrics per segment.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import time
 import wave
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -46,12 +93,30 @@ import numpy as np
 MODEL_ID = "bosonai/higgs-tts-3-4b"
 
 # ---------------------------------------------------------------------------
-# Sentence splitting (Russian-aware: abbreviations, initials, quotes)
+# Sentence splitting (Russian-aware: abbreviations, initials, quotes, lists)
 # ---------------------------------------------------------------------------
 
 SENTENCE_END_CHARS = ".!?…"
-OPEN_QUOTES = "«\"“‘("
-CLOSE_QUOTES = "»\"”’)"
+
+# Paired quote/bracket openers and their expected closers. `"` is deliberately NOT here --
+# it is the same glyph for open and close, so it is tracked separately as a parity toggle
+# (see split_sentences). Note "“" (") appears both as a value (closer for „) and as a
+# key (opener for the plain English-style “…” pair); a stack-based match-top-first resolves
+# the ambiguity contextually instead of by character identity alone.
+PAIR_OPEN_TO_CLOSE = {
+    "«": "»",
+    "„": "“",  # „quote“ -- opens with „, closes with “
+    "“": "”",  # “quote” -- plain English-style curly quotes
+    "‘": "’",  # ‘quote’
+    "(": ")",
+}
+
+# Safety valve: if quote-nesting state has been continuously non-empty for longer than this
+# many characters, force-reset it. Real prose does not hold an open quote this long; this
+# exists so a single unmatched opening quote cannot silently swallow the rest of a chapter
+# into "one sentence" (the catastrophic failure mode fixed here) even though it cannot, by
+# itself, tell where the missing closing quote was actually meant to go.
+QUOTE_FORCE_RESET_CHARS = 400
 
 # Common Russian abbreviations that end in a period but do not end a sentence.
 # Matched case-insensitively against the token immediately preceding the period run.
@@ -65,28 +130,45 @@ ABBREVIATIONS = {
 }
 
 
-def _token_ending_at(text: str, end_idx: int) -> str:
-    """Return the run of letters/periods immediately before (and including) end_idx."""
+def _token_bounds(text: str, end_idx: int) -> tuple[int, str]:
+    """Return (start_idx, token) for the run of letters/digits/periods ending at end_idx."""
     start = end_idx
-    while start > 0 and (text[start - 1].isalpha() or text[start - 1] == "."):
+    while start > 0 and (
+        text[start - 1].isalpha() or text[start - 1] == "." or text[start - 1].isdigit()
+    ):
         start -= 1
-    return text[start : end_idx + 1]
+    return start, text[start : end_idx + 1]
 
 
-def _is_non_terminal_period(text: str, run_start: int) -> bool:
+def _is_non_terminal_period(
+    text: str, run_start: int, run_end: int, sentence_start: int
+) -> bool:
     """True if the period run starting at run_start should NOT end a sentence."""
-    token = _token_ending_at(text, run_start).lower()
+    token_start, token_raw = _token_bounds(text, run_start)
+    token = token_raw.lower()
     if token in ABBREVIATIONS:
         return True
     bare = token.rstrip(".")
     # Single-letter initial, e.g. "А." in "А. С. Пушкин".
     if len(bare) == 1 and bare.isalpha():
         return True
+    if bare.isdigit() and bare:
+        # A bare numbered-list marker ("1.", "23.") at the very start of the current
+        # sentence-in-progress, followed by a capitalized word, is a list label, not a
+        # sentence -- e.g. "1. Первый пункт." must not split into "1." + "Первый пункт.".
+        # A number mid-sentence ("Их было 5. Потом ушли.") is unaffected: sentence_start
+        # to token_start is not blank there, so this branch does not fire.
+        if text[sentence_start:token_start].strip() == "":
+            k = run_end
+            while k < len(text) and text[k].isspace():
+                k += 1
+            if k < len(text) and text[k].isupper():
+                return True
     return False
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split text into sentences without breaking abbreviations, initials, or quotes.
+    """Split text into sentences without breaking abbreviations, initials, lists, or quotes.
 
     Control tags (``<|category:tag|>``) contain no sentence-ending punctuation, so they
     pass through untouched regardless of where they sit in a sentence.
@@ -95,34 +177,81 @@ def split_sentences(text: str) -> list[str]:
     n = len(text)
     i = 0
     start = 0
-    quote_depth = 0
+    quote_stack: list[str] = []
+    straight_quote_open = False
+    stuck_chars = 0
+
+    def inside_quote() -> bool:
+        return bool(quote_stack) or straight_quote_open
+
+    def reset_quote_state() -> None:
+        nonlocal straight_quote_open, stuck_chars
+        quote_stack.clear()
+        straight_quote_open = False
+        stuck_chars = 0
+
     while i < n:
         ch = text[i]
-        if ch in OPEN_QUOTES:
-            quote_depth += 1
+
+        # Paragraph boundary (blank line): a pending quote state cannot legitimately
+        # cross it, and neither can an in-progress sentence -- both are force-flushed
+        # here rather than letting a missing closing quote (or a missing final period)
+        # in one paragraph merge into the next paragraph's real sentences.
+        if ch == "\n" and i + 1 < n and text[i + 1] == "\n":
+            reset_quote_state()
+            para_text = text[start:i].strip()
+            if para_text:
+                sentences.append(para_text)
+            start = i  # leftover newline(s)/whitespace are stripped when the next
+            i += 1  # sentence is appended
+            continue
+
+        if inside_quote():
+            stuck_chars += 1
+            if stuck_chars > QUOTE_FORCE_RESET_CHARS:
+                reset_quote_state()
+        else:
+            stuck_chars = 0
+
+        if ch == '"':
+            straight_quote_open = not straight_quote_open
             i += 1
             continue
-        if ch in CLOSE_QUOTES:
-            quote_depth = max(0, quote_depth - 1)
+        if quote_stack and ch == quote_stack[-1]:
+            quote_stack.pop()
             i += 1
             continue
+        if ch in PAIR_OPEN_TO_CLOSE:
+            quote_stack.append(PAIR_OPEN_TO_CLOSE[ch])
+            i += 1
+            continue
+
         if ch in SENTENCE_END_CHARS:
             run_start = i
             j = i
             while j < n and text[j] in SENTENCE_END_CHARS:
                 j += 1
             end_punct = j
-            # Swallow a directly-following closing quote into the sentence.
+            # Swallow a directly-following closing quote into the sentence, tracking a
+            # LOCAL copy of quote state so we can tell whether the sentence terminator is
+            # still "inside" an open quote afterward without mutating real state yet.
             k = end_punct
-            trailing_quote_depth = quote_depth
-            while k < n and text[k] in CLOSE_QUOTES:
-                trailing_quote_depth = max(0, trailing_quote_depth - 1)
+            local_stack = list(quote_stack)
+            local_straight = straight_quote_open
+            while k < n and (
+                (local_stack and text[k] == local_stack[-1])
+                or (text[k] == '"' and local_straight)
+            ):
+                if text[k] == '"':
+                    local_straight = False
+                else:
+                    local_stack.pop()
                 k += 1
-            if trailing_quote_depth > 0:
+            if local_stack or local_straight:
                 # Still inside an open quote -- this punctuation does not end the sentence.
                 i = j
                 continue
-            if _is_non_terminal_period(text, run_start):
+            if _is_non_terminal_period(text, run_start, end_punct, start):
                 i = j
                 continue
             m = k
@@ -132,7 +261,9 @@ def split_sentences(text: str) -> list[str]:
             if m < n and text[m].islower():
                 boundary_ok = False
             if boundary_ok:
-                quote_depth = trailing_quote_depth
+                quote_stack = local_stack
+                straight_quote_open = local_straight
+                stuck_chars = 0
                 sentence = text[start:k].strip()
                 if sentence:
                     sentences.append(sentence)
@@ -152,12 +283,56 @@ def split_sentences(text: str) -> list[str]:
 # Control-tag tracking and chunking
 # ---------------------------------------------------------------------------
 
-TAG_RE = re.compile(r"<\|(emotion|prosody|style):([a-z_]+)\|>")
+TAG_RE = re.compile(r"<\|(emotion|prosody|style):([a-z0-9_]+)\|>")
+
+# Loose shape used only for validation -- deliberately wider than TAG_RE (any category
+# word, any case, digits) so a typo'd/mis-cased tag is *caught*, not silently ignored.
+_TAG_SHAPE_RE = re.compile(r"<\|[A-Za-z0-9_]+:[A-Za-z0-9_]+\|>")
+
+# The full, exact set of the model's 34 emotion/prosody/style control tags, extracted
+# directly from bosonai/higgs-tts-3-4b's tokenizer.json `added_tokens`
+# (snapshot 7556c17e05201fccd9c8cc120bc216dcc7b5d561, the pinned revision this project
+# uses -- see AGENTS.md's model-constraints section). Any control-tag-shaped span in the
+# input that is not exactly one of these is a bug in the source text (typo, wrong case, or
+# an invented tag) and must fail loudly before a multi-hour run starts, per PROMPTING.md's
+# instruction to never invent tags.
+VALID_TAGS = {
+    "<|emotion:affection|>", "<|emotion:amusement|>", "<|emotion:anger|>",
+    "<|emotion:arousal|>", "<|emotion:awe|>", "<|emotion:bitterness|>",
+    "<|emotion:confusion|>", "<|emotion:contemplation|>", "<|emotion:contentment|>",
+    "<|emotion:determination|>", "<|emotion:disgust|>", "<|emotion:elation|>",
+    "<|emotion:enthusiasm|>", "<|emotion:fear|>", "<|emotion:helplessness|>",
+    "<|emotion:longing|>", "<|emotion:pride|>", "<|emotion:relief|>",
+    "<|emotion:sadness|>", "<|emotion:shame|>", "<|emotion:surprise|>",
+    "<|prosody:expressive_high|>", "<|prosody:expressive_low|>", "<|prosody:long_pause|>",
+    "<|prosody:pause|>", "<|prosody:pitch_high|>", "<|prosody:pitch_low|>",
+    "<|prosody:speed_fast|>", "<|prosody:speed_slow|>", "<|prosody:speed_very_fast|>",
+    "<|prosody:speed_very_slow|>", "<|style:shouting|>", "<|style:singing|>",
+    "<|style:whispering|>",
+}
 
 # Per PROMPTING.md (bosonai/higgs-tts-3-4b, verified against the cached snapshot):
 # "pause" / "long_pause" are INLINE, one-shot effects at an exact position in a
 # sentence -- they are not a sustained state and must never be reopened as one.
 INLINE_ONE_SHOT_PROSODY = {"pause", "long_pause"}
+
+
+def validate_control_tags(text: str) -> None:
+    """Raise ValueError on any control-tag-shaped span that is not one of the 34 known-valid
+    Higgs TTS 3 tags (F11). Without this, a typo like ``<|emotion:Elation|>`` silently fails
+    to match TAG_RE, is never tracked as an active tag, and is read aloud as literal text (or
+    silently dropped) for the rest of the chapter with no warning -- exactly the kind of
+    defect that should fail before a multi-hour unattended run, not after it.
+    """
+    for m in _TAG_SHAPE_RE.finditer(text):
+        candidate = m.group(0)
+        if candidate not in VALID_TAGS:
+            raise ValueError(
+                f"unknown control tag {candidate!r} at text offset {m.start()} -- not one "
+                f"of the {len(VALID_TAGS)} tags known from bosonai/higgs-tts-3-4b's "
+                "tokenizer.json (added_tokens); fix the source text before starting a "
+                "multi-hour run"
+            )
 
 
 @dataclass
@@ -173,16 +348,75 @@ def _sentence_own_tags(sentence: str) -> list[tuple[str, str]]:
 
 
 def _reopen_prefix(active: dict[str, Optional[str]], sentence: str) -> str:
-    """Build the tag prefix to prepend to `sentence` so active state survives."""
+    """Build the tag prefix to prepend to `sentence` so active state survives.
+
+    A category is skipped if `sentence` declares a tag of that category ANYWHERE in it
+    (F10) -- not just at the very start -- since two tags of the same category in one
+    sentence has no defined meaning in PROMPTING.md.
+    """
+    own_categories = {cat for cat, _ in TAG_RE.findall(sentence)}
     prefix_parts = []
-    stripped = sentence.lstrip()
     for category, tag in active.items():
         if tag is None:
             continue
-        if stripped.startswith(f"<|{category}:"):
-            continue  # sentence already (re)declares this category itself
+        if category in own_categories:
+            continue
         prefix_parts.append(tag)
     return "".join(prefix_parts)
+
+
+def _force_split_long_sentence(sentence: str, max_chars: int) -> list[str]:
+    """Split a single sentence that exceeds max_chars on its own (F2).
+
+    `chunk_sentences` can never place a sentence that is already over budget into any
+    chunk, so without this, one long sentence used to become one unbounded chunk (and, if
+    it came from a broken split, potentially the entire remaining chapter). Tries `;`
+    boundaries first, then `,`, then whitespace, then a hard character cut -- always makes
+    progress, so this cannot infinite-loop or return a piece over max_chars.
+    """
+    sentence = sentence.strip()
+    if not sentence:
+        return []
+    if len(sentence) <= max_chars:
+        return [sentence]
+
+    for sep in (";", ","):
+        if sep in sentence:
+            raw_parts = sentence.split(sep)
+            rebuilt = []
+            for idx, p in enumerate(raw_parts):
+                p = p.strip()
+                if not p:
+                    continue
+                rebuilt.append(p + sep if idx < len(raw_parts) - 1 else p)
+            if len(rebuilt) > 1:
+                out: list[str] = []
+                for piece in rebuilt:
+                    out.extend(_force_split_long_sentence(piece, max_chars))
+                return out
+
+    words = sentence.split(" ")
+    if len(words) > 1:
+        grouped: list[str] = []
+        cur = ""
+        for w in words:
+            candidate = f"{cur} {w}".strip() if cur else w
+            if len(candidate) > max_chars and cur:
+                grouped.append(cur)
+                cur = w
+            else:
+                cur = candidate
+        if cur:
+            grouped.append(cur)
+        if len(grouped) > 1:
+            out = []
+            for piece in grouped:
+                out.extend(_force_split_long_sentence(piece, max_chars))
+            return out
+
+    # Last resort: a single unbroken token longer than max_chars -- hard character cut.
+    # This is the guarantee that no piece this function returns ever exceeds max_chars.
+    return [sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)]
 
 
 def chunk_sentences(
@@ -203,9 +437,27 @@ def chunk_sentences(
 
     Inline one-shot prosody (`pause`, `long_pause`) is never reopened; it fires once at
     its authored position and carries no state.
+
+    Any sentence longer than `max_chars` on its own is force-split (F2, see
+    `_force_split_long_sentence`) with a warning, so `max_chars` is a real hard cap on
+    every chunk's text, not merely a per-add check.
     """
     if tag_scope not in ("chunk", "sentence"):
         raise ValueError(f"unknown tag_scope: {tag_scope!r}")
+
+    expanded: list[str] = []
+    for sent in sentences:
+        if len(sent) > max_chars:
+            warnings.warn(
+                f"sentence of {len(sent)} chars exceeds max_chars={max_chars}; "
+                "force-splitting on ';'/','/whitespace boundaries -- audio at the forced "
+                "split point(s) may sound less natural than a real sentence boundary",
+                stacklevel=2,
+            )
+            expanded.extend(_force_split_long_sentence(sent, max_chars))
+        else:
+            expanded.append(sent)
+    sentences = expanded
 
     chunks: list[Chunk] = []
     active: dict[str, Optional[str]] = {"emotion": None, "prosody": None, "style": None}
@@ -240,21 +492,25 @@ def chunk_sentences(
         return chunk
 
     for sent in sentences:
-        sent_len = len(sent)
-        if cur_sentences and cur_len + 1 + sent_len > max_chars:
-            chunk = flush()
-            if chunk is not None:
-                chunks.append(chunk)
-            chunk_start_active = dict(active)
-
         own_tags = _sentence_own_tags(sent)
         if tag_scope == "sentence":
             prefix = _reopen_prefix(active, sent)
             sent_to_store = prefix + sent
         else:
             sent_to_store = sent
+        # F8: count the length of what is actually stored (including any reopened-tag
+        # prefix under tag_scope="sentence"), not the bare sentence -- otherwise the
+        # budget check below silently underestimates a chunk's real size.
+        store_len = len(sent_to_store)
+
+        if cur_sentences and cur_len + 1 + store_len > max_chars:
+            chunk = flush()
+            if chunk is not None:
+                chunks.append(chunk)
+            chunk_start_active = dict(active)
+
         cur_sentences.append(sent_to_store)
-        cur_len += sent_len + 1
+        cur_len += store_len + 1
 
         for category, tag_name in own_tags:
             if category == "prosody" and tag_name in INLINE_ONE_SHOT_PROSODY:
@@ -281,6 +537,14 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
         sampwidth = w.getsampwidth()
         channels = w.getnchannels()
         raw = w.readframes(n)
+    # F12: a WAV whose header claims more frames than the file actually contains (e.g.
+    # truncated by a kill mid-write) used to be accepted silently.
+    expected_bytes = n * sampwidth * channels
+    if len(raw) != expected_bytes:
+        raise ValueError(
+            f"{path}: truncated WAV data -- header declares {n} frames "
+            f"({expected_bytes} bytes) but only {len(raw)} bytes were read"
+        )
     if sampwidth == 2:
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
     elif sampwidth == 4:
@@ -308,45 +572,234 @@ def write_wav(path: Path, audio: np.ndarray, sr: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_manifest(chunks: list[Chunk], output_dir: Path) -> dict:
-    segments = []
-    for c in chunks:
-        segments.append(
-            {
-                "index": c.index,
-                "sentences": c.sentences,
-                "text": c.text,
-                "reopened_tags": c.reopened_tags,
-                "status": "pending",
-                "output_path": str(output_dir / f"segment_{c.index:04d}.wav"),
-                "sample_rate": None,
-                "audio_duration_seconds": None,
-                "generation_seconds": None,
-                "error": None,
-            }
-        )
-    return {"model": MODEL_ID, "created": time.time(), "segments": segments}
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def load_or_create_manifest(manifest_path: Path, chunks: list[Chunk], output_dir: Path) -> dict:
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        existing_texts = [seg["text"] for seg in manifest["segments"]]
-        new_texts = [c.text for c in chunks]
-        if existing_texts != new_texts:
+def _new_segment_entry(chunk: "Chunk") -> dict:
+    text_hash = _text_hash(chunk.text)
+    return {
+        "index": chunk.index,
+        "text_hash": text_hash,
+        "sentences": chunk.sentences,
+        "text": chunk.text,
+        "reopened_tags": chunk.reopened_tags,
+        "status": "pending",
+        # F7: relative to the manifest's own directory, and named by content hash so an
+        # untouched segment keeps its file even if surrounding chunks shift index.
+        "output_path": f"segment_{text_hash}.wav",
+        "sample_rate": None,
+        "num_samples": None,
+        "audio_duration_seconds": None,
+        "generation_seconds": None,
+        "memory": None,
+        "error": None,
+    }
+
+
+def build_manifest(chunks: list[Chunk], max_chars: int, tag_scope: str) -> dict:
+    return {
+        "model": MODEL_ID,
+        "max_chars": max_chars,
+        "tag_scope": tag_scope,
+        "created": time.time(),
+        "segments": [_new_segment_entry(c) for c in chunks],
+    }
+
+
+def _load_manifest_with_recovery(manifest_path: Path) -> dict:
+    """Load the manifest, recovering from `.bak` on a JSONDecodeError (F4).
+
+    A `save_manifest` writes atomically and keeps the previous good version as `.bak`, so a
+    kill mid-write can only ever leave the *new* temp file incomplete (and it is never
+    renamed into place until fsynced) -- but a manifest from before this fix, or corruption
+    from any other cause, is still handled here rather than crashing on `json.loads`.
+    """
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        bak_path = manifest_path.with_suffix(manifest_path.suffix + ".bak")
+        if not bak_path.exists():
             raise RuntimeError(
-                "Existing manifest's segment text does not match the current chunking "
-                "plan -- refusing to resume blindly. Re-run with a fresh --output-dir, "
-                "or confirm the input text/chunking parameters have not changed."
+                f"manifest {manifest_path} is corrupt ({exc}) and no .bak backup exists -- "
+                "cannot recover automatically; the segment WAVs on disk are still there but "
+                "the manifest linking them to text/order is gone"
+            ) from exc
+        try:
+            recovered = json.loads(bak_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as bak_exc:
+            raise RuntimeError(
+                f"manifest {manifest_path} is corrupt ({exc}) and its .bak backup "
+                f"{bak_path} is also corrupt ({bak_exc}) -- cannot recover automatically"
+            ) from bak_exc
+        # Restore the recovered content as the primary file so the next save_manifest()
+        # call has a consistent starting point instead of re-reading the corrupt one.
+        manifest_path.write_text(bak_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return recovered
+
+
+def load_or_create_manifest(
+    manifest_path: Path,
+    chunks: list[Chunk],
+    max_chars: int,
+    tag_scope: str,
+) -> dict:
+    if manifest_path.exists():
+        manifest = _load_manifest_with_recovery(manifest_path)
+
+        # F7: compare the settings that change every segment's text, and name exactly
+        # which one differs instead of a blanket "text doesn't match" error.
+        mismatches = []
+        if manifest.get("model") != MODEL_ID:
+            mismatches.append(f"model: manifest={manifest.get('model')!r} vs current={MODEL_ID!r}")
+        if manifest.get("max_chars") != max_chars:
+            mismatches.append(
+                f"max_chars: manifest={manifest.get('max_chars')!r} vs current={max_chars!r}"
             )
+        if manifest.get("tag_scope") != tag_scope:
+            mismatches.append(
+                f"tag_scope: manifest={manifest.get('tag_scope')!r} vs current={tag_scope!r}"
+            )
+        if mismatches:
+            raise RuntimeError(
+                "Existing manifest was built with different settings, which changes every "
+                "segment's text -- refusing to resume blindly: " + "; ".join(mismatches)
+            )
+
+        # F7: reuse any segment whose own text is unchanged (keyed by content hash), no
+        # matter where it now sits in the chapter, instead of requiring the entire plan to
+        # match byte-for-byte (which previously discarded 40 hours of prior work for a
+        # one-character edit anywhere in the chapter).
+        existing_by_hash = {
+            seg["text_hash"]: seg for seg in manifest["segments"] if "text_hash" in seg
+        }
+        new_segments = []
+        for c in chunks:
+            text_hash = _text_hash(c.text)
+            prior = existing_by_hash.get(text_hash)
+            if prior is not None:
+                seg = dict(prior)
+                seg["index"] = c.index
+                seg["sentences"] = c.sentences
+                seg["reopened_tags"] = c.reopened_tags
+                seg["output_path"] = f"segment_{text_hash}.wav"
+            else:
+                seg = _new_segment_entry(c)
+            new_segments.append(seg)
+        manifest["segments"] = new_segments
+        save_manifest(manifest, manifest_path)
         return manifest
-    manifest = build_manifest(chunks, output_dir)
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    manifest = build_manifest(chunks, max_chars, tag_scope)
+    save_manifest(manifest, manifest_path)
     return manifest
 
 
 def save_manifest(manifest: dict, manifest_path: Path) -> None:
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Write the manifest atomically (F4).
+
+    Writes to a temp file in the same directory, `flush()` + `fsync()`, then
+    `os.replace()`s it into place, keeping the previous version as `.bak`. A kill at any
+    point during this either leaves the old manifest untouched (temp file incomplete, never
+    renamed) or leaves the new one complete (renamed only after fsync) -- there is no window
+    where `manifest_path` itself is a truncated file, unlike the old `path.write_text(...)`
+    in-place truncate.
+    """
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(manifest, ensure_ascii=False, indent=2)
+    tmp_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+    if manifest_path.exists():
+        bak_path = manifest_path.with_suffix(manifest_path.suffix + ".bak")
+        try:
+            os.replace(manifest_path, bak_path)
+        except OSError:
+            pass
+    os.replace(tmp_path, manifest_path)
+
+
+MIN_SECONDS_PER_CHAR = 0.03
+MAX_SECONDS_PER_CHAR = 0.30
+
+
+def _validate_generated_audio(audio: np.ndarray, sample_rate: int, text: str) -> Optional[str]:
+    """Return None if `audio` plausibly matches `text`'s length, else a reason string (F6).
+
+    A `done` segment used to be trusted purely on `out_path.exists()` -- an empty array
+    (0 samples) or a wildly implausible duration (a runaway/looping generation, or a
+    silent truncation at `max_new_tokens`) was written and accepted with no complaint.
+    """
+    if audio.size == 0:
+        return "generated audio is empty (0 samples)"
+    duration = len(audio) / sample_rate if sample_rate else 0.0
+    text_len = max(len(text), 1)
+    min_expected = MIN_SECONDS_PER_CHAR * text_len
+    max_expected = MAX_SECONDS_PER_CHAR * text_len
+    if duration < min_expected:
+        return (
+            f"generated audio ({duration:.3f}s) is implausibly short for {text_len} chars "
+            f"of text (expected >= {min_expected:.3f}s) -- likely a truncated/aborted "
+            "generation"
+        )
+    if duration > max_expected:
+        return (
+            f"generated audio ({duration:.3f}s) is implausibly long for {text_len} chars "
+            f"of text (expected <= {max_expected:.3f}s) -- likely a looping/runaway "
+            "generation"
+        )
+    return None
+
+
+def _resume_check_ok(entry: dict, out_path: Path) -> tuple[bool, Optional[str]]:
+    """Whether a segment marked `done` actually has valid, matching audio on disk (F6)."""
+    if not out_path.exists():
+        return False, "output file missing"
+    try:
+        with wave.open(str(out_path), "rb") as w:
+            actual_samples = w.getnframes()
+            actual_sr = w.getframerate()
+    except (wave.Error, EOFError, OSError) as exc:
+        return False, f"could not read existing WAV: {exc}"
+    if actual_samples == 0:
+        return False, "existing WAV has 0 frames"
+    expected_samples = entry.get("num_samples")
+    if expected_samples is not None and actual_samples != expected_samples:
+        return False, f"manifest expects {expected_samples} samples, file has {actual_samples}"
+    expected_sr = entry.get("sample_rate")
+    if expected_sr is not None and actual_sr != expected_sr:
+        return False, f"manifest expects {expected_sr} Hz, file is {actual_sr} Hz"
+    return True, None
+
+
+def _capture_memory_metrics() -> dict:
+    """Best-effort MLX memory metrics per segment (F14). Never raises: returns all-None
+    fields when `mlx` is unavailable (e.g. running the pure-Python paths under test)."""
+    metrics: dict = {
+        "active_memory_bytes": None,
+        "peak_memory_bytes": None,
+        "cache_memory_bytes": None,
+    }
+    try:
+        import mlx.core as mx  # type: ignore
+
+        metrics["active_memory_bytes"] = int(mx.get_active_memory())
+        metrics["peak_memory_bytes"] = int(mx.get_peak_memory())
+        metrics["cache_memory_bytes"] = int(mx.get_cache_memory())
+    except Exception:
+        pass
+    return metrics
+
+
+def _clear_mlx_cache() -> None:
+    try:
+        import mlx.core as mx  # type: ignore
+
+        mx.clear_cache()
+    except Exception:
+        pass
 
 
 def generate_segments(
@@ -355,47 +808,96 @@ def generate_segments(
     manifest_path: Path,
     temperature: float = 1.0,
     max_new_tokens: int = 4096,
-) -> None:
+    max_retries: int = 3,
+    retry_base_delay: float = 2.0,
+    continue_on_error: bool = False,
+    clear_cache_every: int = 50,
+) -> dict:
     """Generate every pending segment, writing progress to disk after each one.
 
-    On restart, a segment already marked "done" with its WAV present on disk is
-    skipped -- this is the resume mechanism required for multi-hour runs (m4-plan.md
-    §3 M4-TX/T8): a crash mid-chapter only loses the segment in flight, not everything
-    generated so far.
-    """
-    for entry in manifest["segments"]:
-        out_path = Path(entry["output_path"])
-        if entry["status"] == "done" and out_path.exists():
-            continue
+    On restart, a segment already marked "done" is re-validated against the WAV actually on
+    disk (F6) -- a missing file, an empty/corrupt WAV, or a sample count/rate mismatch
+    against the manifest resets it to "pending" instead of being trusted blindly.
 
-        entry["status"] = "in_progress"
-        save_manifest(manifest, manifest_path)
-        try:
-            started = time.perf_counter()
-            results = list(
-                model.generate(
-                    text=entry["text"],
-                    temperature=temperature,
-                    max_new_tokens=max_new_tokens,
-                )
-            )
-            generation_seconds = time.perf_counter() - started
-            if not results:
-                raise RuntimeError("model.generate produced no result")
-            sample_rate = results[0].sample_rate
-            audio = np.concatenate([np.asarray(r.audio).reshape(-1) for r in results])
-            write_wav(out_path, audio, sample_rate)
-            entry["status"] = "done"
-            entry["sample_rate"] = sample_rate
-            entry["audio_duration_seconds"] = len(audio) / sample_rate if sample_rate else None
-            entry["generation_seconds"] = generation_seconds
-            entry["error"] = None
-        except Exception as exc:  # noqa: BLE001 -- must record and keep the manifest resumable
-            entry["status"] = "failed"
-            entry["error"] = f"{type(exc).__name__}: {exc}"
+    On a generation failure, the segment is retried up to `max_retries` times with
+    exponential backoff, explicitly reset to "pending" before each retry (F5). If every
+    retry fails: under `continue_on_error=True` the segment is marked "failed" and the loop
+    keeps going (losing only that segment, not the rest of a multi-hour run); otherwise the
+    original all-or-nothing behavior is preserved and the exception is re-raised.
+
+    Returns {"failures": [{"index": ..., "error": ...}, ...]} -- empty when everything
+    either succeeded or was skipped via a valid resume.
+    """
+    base_dir = manifest_path.parent
+    failures: list[dict] = []
+
+    for seg_i, entry in enumerate(manifest["segments"]):
+        out_path = base_dir / entry["output_path"]
+
+        if entry["status"] == "done":
+            ok, reason = _resume_check_ok(entry, out_path)
+            if ok:
+                continue
+            entry["status"] = "pending"
+            entry["error"] = f"resume check failed, regenerating: {reason}"
+
+        last_error: Optional[str] = None
+        succeeded = False
+        for attempt in range(1, max_retries + 1):
+            entry["status"] = "in_progress"
             save_manifest(manifest, manifest_path)
-            raise
-        save_manifest(manifest, manifest_path)
+            try:
+                started = time.perf_counter()
+                results = list(
+                    model.generate(
+                        text=entry["text"],
+                        temperature=temperature,
+                        max_new_tokens=max_new_tokens,
+                    )
+                )
+                generation_seconds = time.perf_counter() - started
+                if not results:
+                    raise RuntimeError("model.generate produced no result")
+                sample_rate = results[0].sample_rate
+                audio = np.concatenate([np.asarray(r.audio).reshape(-1) for r in results])
+                bad_reason = _validate_generated_audio(audio, sample_rate, entry["text"])
+                if bad_reason:
+                    raise RuntimeError(bad_reason)
+                write_wav(out_path, audio, sample_rate)
+                entry["status"] = "done"
+                entry["sample_rate"] = sample_rate
+                entry["num_samples"] = int(len(audio))
+                entry["audio_duration_seconds"] = len(audio) / sample_rate if sample_rate else None
+                entry["generation_seconds"] = generation_seconds
+                entry["memory"] = _capture_memory_metrics()
+                entry["error"] = None
+                succeeded = True
+            except Exception as exc:  # noqa: BLE001 -- must record and keep the manifest resumable
+                last_error = f"{type(exc).__name__}: {exc}"
+                entry["error"] = last_error
+                if attempt < max_retries:
+                    entry["status"] = "pending"  # explicit reset before retrying (F5)
+                    save_manifest(manifest, manifest_path)
+                    time.sleep(retry_base_delay * (2 ** (attempt - 1)))
+                    continue
+                entry["status"] = "failed"
+            save_manifest(manifest, manifest_path)
+            if succeeded:
+                break
+
+        if not succeeded:
+            if not continue_on_error:
+                raise RuntimeError(
+                    f"segment {entry['index']} failed after {max_retries} attempt(s): "
+                    f"{last_error} -- pass --continue-on-error to keep going and report "
+                    "failed segments at the end"
+                )
+            failures.append({"index": entry["index"], "error": last_error})
+
+        if clear_cache_every and (seg_i + 1) % clear_cache_every == 0:
+            _clear_mlx_cache()
+
+    return {"failures": failures}
 
 
 # ---------------------------------------------------------------------------
@@ -403,75 +905,151 @@ def generate_segments(
 # ---------------------------------------------------------------------------
 
 
-def assemble_chapter(manifest: dict, output_path: Path, silence_ms: int = 200) -> dict:
+def assemble_chapter(
+    manifest: dict,
+    output_path: Path,
+    base_dir: Path,
+    silence_ms: int = 200,
+    allow_gaps: bool = False,
+    gap_silence_ms: int = 1000,
+) -> dict:
+    """Stream-assemble the chapter from per-segment WAVs (F3, F13).
+
+    Only one segment's audio is ever held in memory at a time -- the output file is opened
+    once and written to with `writeframes` per segment, in int16, with no intermediate
+    `np.concatenate` over the whole chapter. Splice-quality metrics are computed from the
+    small edge windows of consecutive segments only, never from the full chapter buffer.
+
+    With `allow_gaps=False` (default), any non-`done` segment raises before anything is
+    written (F13: fail fast, not after writing most of a chapter). With `allow_gaps=True`,
+    each non-`done` segment is replaced with `gap_silence_ms` of silence and reported in
+    `gaps`, once the sample rate is known from a real segment; a run of gaps before the
+    first real segment cannot be sample-rate-stamped and is reported but not written.
+    """
     segments = manifest["segments"]
     if not segments:
         raise RuntimeError("manifest has no segments to assemble")
 
+    not_done = [s for s in segments if s["status"] != "done"]
+    if not_done and not allow_gaps:
+        first = not_done[0]
+        raise RuntimeError(
+            f"{len(not_done)} segment(s) are not done (first: index={first['index']}, "
+            f"status={first['status']!r}) -- cannot assemble a chapter with missing "
+            "segments; pass allow_gaps=True / --allow-gaps to insert silence and report "
+            "the gaps instead"
+        )
+
     sample_rate: Optional[int] = None
-    audio_parts: list[np.ndarray] = []
-    join_reports = []
+    join_reports: list[dict] = []
+    gap_reports: list[dict] = []
+    pending_gap_segments: list[dict] = []
     edge_window_ms = 20
+    total_samples = 0
+    prev_tail: Optional[np.ndarray] = None
+    prev_index: Optional[int] = None
 
-    for i, entry in enumerate(segments):
-        if entry["status"] != "done":
-            raise RuntimeError(
-                f"segment {entry['index']} is not done (status={entry['status']!r}) "
-                "-- cannot assemble a chapter with missing segments"
-            )
-        audio, sr = read_wav(Path(entry["output_path"]))
-        if sample_rate is None:
-            sample_rate = sr
-        elif sr != sample_rate:
-            raise RuntimeError(
-                f"sample rate mismatch: segment {entry['index']} is {sr} Hz, "
-                f"expected {sample_rate} Hz"
-            )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
 
-        if audio_parts:
-            edge_n = int(edge_window_ms / 1000 * sample_rate)
-            prev_tail = audio_parts[-1][-edge_n:] if len(audio_parts[-1]) >= edge_n else audio_parts[-1]
-            this_head = audio[:edge_n] if len(audio) >= edge_n else audio
-            prev_edge_amp = float(np.max(np.abs(prev_tail))) if len(prev_tail) else 0.0
-            head_edge_amp = float(np.max(np.abs(this_head))) if len(this_head) else 0.0
-            # Largest sample-to-sample jump within each edge window, i.e. what an
-            # audible click looks like numerically within a single segment's edge.
-            max_intra_jump = float(
-                max(
-                    np.max(np.abs(np.diff(prev_tail))) if len(prev_tail) > 1 else 0.0,
-                    np.max(np.abs(np.diff(this_head))) if len(this_head) > 1 else 0.0,
+        for entry in segments:
+            if entry["status"] != "done":
+                if sample_rate is None:
+                    # Cannot write silence of the right length/framerate before the output
+                    # framerate is known; report it, do not fabricate an assumed rate.
+                    pending_gap_segments.append(entry)
+                    continue
+                gap_samples = int(gap_silence_ms / 1000 * sample_rate)
+                out.writeframes(np.zeros(gap_samples, dtype=np.int16).tobytes())
+                total_samples += gap_samples
+                gap_reports.append(
+                    {
+                        "index": entry["index"],
+                        "status": entry["status"],
+                        "inserted_silence_ms": gap_silence_ms,
+                    }
                 )
-            )
-            # The jump directly AT the join point: last sample of the previous segment
-            # vs. first sample of the next one. Meaningful mainly at silence_ms=0, where
-            # the two segments are directly concatenated with nothing between them.
-            direct_join_jump = (
-                float(abs(this_head[0] - prev_tail[-1])) if len(prev_tail) and len(this_head) else 0.0
-            )
-            join_reports.append(
-                {
-                    "after_segment": segments[i - 1]["index"],
-                    "before_segment": entry["index"],
-                    "prev_tail_edge_abs_amplitude": prev_edge_amp,
-                    "next_head_edge_abs_amplitude": head_edge_amp,
-                    "max_intra_window_sample_jump": max_intra_jump,
-                    "direct_join_sample_jump": direct_join_jump,
-                }
-            )
-            if silence_ms > 0:
-                silence = np.zeros(int(silence_ms / 1000 * sample_rate), dtype=audio.dtype)
-                audio_parts.append(silence)
-        audio_parts.append(audio)
+                prev_tail = None  # no meaningful edge to join across a gap
+                prev_index = entry["index"]
+                continue
 
-    full_audio = np.concatenate(audio_parts)
-    write_wav(output_path, full_audio, sample_rate)
+            audio, sr = read_wav(base_dir / entry["output_path"])
+            if sample_rate is None:
+                sample_rate = sr
+                out.setframerate(sample_rate)
+                for pending in pending_gap_segments:
+                    gap_reports.append(
+                        {
+                            "index": pending["index"],
+                            "status": pending["status"],
+                            "inserted_silence_ms": 0,
+                            "note": "before the first done segment -- sample rate unknown, "
+                            "no silence could be written for it",
+                        }
+                    )
+                pending_gap_segments = []
+            elif sr != sample_rate:
+                raise RuntimeError(
+                    f"sample rate mismatch: segment {entry['index']} is {sr} Hz, "
+                    f"expected {sample_rate} Hz"
+                )
+
+            edge_n = int(edge_window_ms / 1000 * sample_rate)
+            if prev_tail is not None:
+                this_head = audio[:edge_n] if len(audio) >= edge_n else audio
+                prev_edge_amp = float(np.max(np.abs(prev_tail))) if len(prev_tail) else 0.0
+                head_edge_amp = float(np.max(np.abs(this_head))) if len(this_head) else 0.0
+                max_intra_jump = float(
+                    max(
+                        np.max(np.abs(np.diff(prev_tail))) if len(prev_tail) > 1 else 0.0,
+                        np.max(np.abs(np.diff(this_head))) if len(this_head) > 1 else 0.0,
+                    )
+                )
+                direct_join_jump = (
+                    float(abs(this_head[0] - prev_tail[-1]))
+                    if len(prev_tail) and len(this_head)
+                    else 0.0
+                )
+                join_reports.append(
+                    {
+                        "after_segment": prev_index,
+                        "before_segment": entry["index"],
+                        "prev_tail_edge_abs_amplitude": prev_edge_amp,
+                        "next_head_edge_abs_amplitude": head_edge_amp,
+                        "max_intra_window_sample_jump": max_intra_jump,
+                        "direct_join_sample_jump": direct_join_jump,
+                    }
+                )
+                if silence_ms > 0:
+                    silence_samples = int(silence_ms / 1000 * sample_rate)
+                    out.writeframes(np.zeros(silence_samples, dtype=np.int16).tobytes())
+                    total_samples += silence_samples
+
+            clipped = np.clip(audio, -1.0, 1.0)
+            pcm = (clipped * 32767.0).astype(np.int16)
+            out.writeframes(pcm.tobytes())
+            total_samples += len(pcm)
+
+            prev_tail = audio[-edge_n:] if len(audio) >= edge_n else audio
+            prev_index = entry["index"]
+            del audio, clipped, pcm  # release this segment's memory before the next one
+
+        if sample_rate is None:
+            raise RuntimeError(
+                "no 'done' segments were available to assemble -- "
+                f"{len(pending_gap_segments)} segment(s) were skipped as gaps"
+            )
 
     return {
         "output": str(output_path),
         "sample_rate": sample_rate,
         "num_segments": len(segments),
+        "num_segments_assembled": len(segments) - len(gap_reports),
+        "gaps": gap_reports,
         "silence_ms_between_segments": silence_ms,
-        "total_duration_seconds": len(full_audio) / sample_rate if sample_rate else None,
+        "total_duration_seconds": total_samples / sample_rate if sample_rate else None,
         "join_reports": join_reports,
     }
 
@@ -490,9 +1068,15 @@ def main() -> None:
     parser.add_argument("--tag-scope", choices=("chunk", "sentence"), default="sentence")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=4096)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--retry-base-delay", type=float, default=2.0)
+    parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument("--clear-cache-every", type=int, default=50)
     parser.add_argument("--assemble", action="store_true")
     parser.add_argument("--assemble-only", action="store_true")
+    parser.add_argument("--allow-gaps", action="store_true")
     parser.add_argument("--silence-ms", type=int, default=200)
+    parser.add_argument("--gap-silence-ms", type=int, default=1000)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -503,6 +1087,8 @@ def main() -> None:
     else:
         parser.error("one of --text or --text-file is required")
         return
+
+    validate_control_tags(text)
 
     sentences = split_sentences(text)
     chunks = chunk_sentences(sentences, max_chars=args.max_chars, tag_scope=args.tag_scope)
@@ -519,23 +1105,39 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.output_dir / "manifest.json"
-    manifest = load_or_create_manifest(manifest_path, chunks, args.output_dir)
+    manifest = load_or_create_manifest(
+        manifest_path, chunks, max_chars=args.max_chars, tag_scope=args.tag_scope
+    )
 
     if not args.assemble_only:
         from mlx_audio.tts.utils import load
 
         model = load(MODEL_ID, model_type="higgs_audio_v3")
-        generate_segments(
+        gen_result = generate_segments(
             model,
             manifest,
             manifest_path,
             temperature=args.temperature,
             max_new_tokens=args.max_new_tokens,
+            max_retries=args.max_retries,
+            retry_base_delay=args.retry_base_delay,
+            continue_on_error=args.continue_on_error,
+            clear_cache_every=args.clear_cache_every,
         )
+        if gen_result["failures"]:
+            print(
+                f"WARNING: {len(gen_result['failures'])} segment(s) failed after retries "
+                f"and were skipped (--continue-on-error): {gen_result['failures']}"
+            )
 
     if args.assemble or args.assemble_only:
         result = assemble_chapter(
-            manifest, args.output_dir / "chapter.wav", silence_ms=args.silence_ms
+            manifest,
+            args.output_dir / "chapter.wav",
+            base_dir=args.output_dir,
+            silence_ms=args.silence_ms,
+            allow_gaps=args.allow_gaps,
+            gap_silence_ms=args.gap_silence_ms,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
 

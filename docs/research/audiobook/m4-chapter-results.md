@@ -1,5 +1,41 @@
 # M4-T5/T7 — Segmentation + chunk-boundary tag continuity: results
 
+> **Correction (2026-08-25, Refs #57).** An independent audit of `src/audiobook.py` found 14
+> defects, 5 of them critical, that this document's §1 and §0 claims did not account for. In
+> particular:
+> - §1's "no incorrect split occurred" claim was **not representative**: `quote_depth` was a
+>   single counter fed by both the open- and close-quote branches with the *same* `"`
+>   character, so it only ever grew and never came back down. The hand-verified paragraph in
+>   §1 happens to be the one case (a closing `"` immediately after a period) that this bug
+>   does not break; any other quote pattern — a `"…"` pair anywhere earlier in the text, or
+>   `„…“`-nested quotes inside `«…»` — collapsed the rest of the input into one sentence. This
+>   was not caught because the verification was hand-checked against a single paragraph, not
+>   covered by a test suite exercising the general case.
+> - §0/§1 said nothing about numbered lists: `"1. Первый пункт. 2. Второй пункт."` split into
+>   four segments, two of them the bare, meaningless one-character strings `"1."` and `"2."`
+>   — each would have been sent to the model as its own generation call and read aloud as
+>   "один." / "два." in the finished audiobook.
+> - §0/§1 did not discuss what happens when an abbreviation or initial sits at the very end of
+>   a sentence or paragraph (e.g. `"...и т.д."` immediately followed by end-of-input or a
+>   quote) — an edge case the original hand-verification paragraph did not exercise and this
+>   correction still does not claim full coverage of; treat it as untested.
+> - §0's "resume support" claim did not satisfy M4-T8's resumability requirement: manifest
+>   writes were a plain in-place `path.write_text()` (not atomic), so a kill mid-write left an
+>   unparsable JSON file with no recovery path and no way to know which segments were actually
+>   done; and a `"done"` segment was trusted on `out_path.exists()` alone, with no check that
+>   the WAV was non-empty, complete, or the length its text implied.
+>
+> All of the above (and 9 further findings, several also critical: an unbounded chunk size for
+> a single over-budget sentence, unbounded assembly memory for a full chapter, one failed
+> segment aborting the entire multi-hour run, a `max_chars` accounting bug under
+> `tag_scope="sentence"`, a mid-sentence tag-reopen conflict, silently-ignored malformed
+> control tags, and more) are fixed in the same change that added this correction. Every fix
+> has a regression test in `tests/test_audiobook.py` that first reproduces the original
+> defect against the pre-fix code, then confirms the fix — see that file and its module
+> docstring's F1–F14 mapping for the full list, and the PR that lands this correction for the
+> real test-run output. The rest of this document (§2 onward: the tag-continuity acoustic
+> measurement) is unaffected by this correction and stands as originally recorded.
+
 Date: 2026-08-25. Refs #57. Hardware: Apple M1, 16 GB unified memory, macOS, native arm64,
 `.venv-tts` (MLX-Audio). Scope: the segmentation lane of
 [`m4-plan.md`](m4-plan.md) (M4-T5/M4-T7, Lane 2's prerequisite). **This is not the full-chapter
@@ -9,18 +45,31 @@ A full multi-hour chapter run is a separate, later task once the machine is free
 
 ## 0. What is implemented vs. what is reused
 
-**Implemented in this branch (`src/audiobook.py`):**
+**Implemented in this branch (`src/audiobook.py`), as corrected 2026-08-25 (see the correction
+notice above):**
 - Russian-aware sentence splitting (`split_sentences`) that does not break on common
   abbreviations (`т.е.`, `и т.д.`, `гг.`, `н.э.`, …), single-letter initials (`А. С. Пушкин`),
-  or inside quoted spans (`«…»`, `"…"`).
+  numbered-list markers (`"1. Первый пункт."`), or inside quoted spans (`«…»`, `"…"`,
+  `„…“`-nested-inside-`«…»`) — quote state is now tracked per pair-type with a paragraph-
+  boundary reset and a force-reset safety valve, not the single ever-growing counter this
+  document originally described.
 - Sentence-preserving chunking (`chunk_sentences`) with control-tag continuity tracking across
-  chunk boundaries and (optionally, see §2) across untagged sentences within one chunk.
-- A per-segment manifest with resume support (`build_manifest` / `load_or_create_manifest` /
-  `generate_segments`) — each segment is its own WAV file, manifest status is written to disk
-  after every segment, and a segment already marked `"done"` with its WAV present is skipped on
-  restart.
-- A separate assembly step (`assemble_chapter`) with a numeric splice-quality check (edge
-  amplitude + max sample-to-sample jump at each join).
+  chunk boundaries and (optionally, see §2) across untagged sentences within one chunk, a hard
+  per-chunk character budget (a single over-budget sentence is now force-split rather than
+  passed through whole), and a validated tag vocabulary (an unrecognized/mistyped control tag
+  now raises before generation starts instead of being silently ignored).
+- A per-segment, content-hash-keyed manifest with atomic, crash-safe writes and integrity-
+  checked resume (`build_manifest` / `load_or_create_manifest` / `generate_segments`) — each
+  segment is its own WAV file, manifest status is written atomically after every segment (with
+  a `.bak` fallback recovered from on a corrupt read), and a segment already marked `"done"` is
+  re-validated against the actual WAV on disk (non-empty, plausible duration, matching sample
+  count) rather than trusted on `out_path.exists()` alone. A single segment's generation
+  failure is retried with backoff and, under `--continue-on-error`, no longer aborts the rest
+  of a multi-hour run.
+- A separate, streaming assembly step (`assemble_chapter`) with a numeric splice-quality check
+  (edge amplitude + max sample-to-sample jump at each join) that never materializes a full
+  chapter's audio in memory, and an `--allow-gaps` mode that inserts reported placeholder
+  silence for missing segments instead of refusing all-or-nothing.
 
 **Reused as-is:** `mlx_audio.tts.utils.load` and `HiggsAudioV3.generate(text=..., temperature=...,
 max_new_tokens=...)` — the exact call convention `src/tts_test.py --text` already established
@@ -36,6 +85,17 @@ splice-quality check in §4. The prosody analyzer used for the numeric evidence 
 - Any change to `src/tts_test.py`.
 
 ## 1. Sentence splitter — verification
+
+> **This section's original claim was wrong for the general case** (see the correction notice
+> above). The single hand-verified paragraph below happened to avoid the specific quote
+> pattern (`quote_depth` as a single ever-growing counter) that broke on most other inputs,
+> so "no incorrect split occurred" described one lucky paragraph, not the splitter's actual
+> behavior. The splitter has since been rewritten (per-pair-type quote tracking, numbered-list
+> handling) and is now covered by `tests/test_audiobook.py`, including tests built specifically
+> from the audit's failing examples (straight-quote pairs, `„…“`-inside-`«…»` nesting, and
+> numbered lists) run against both the original and the fixed code. The paragraph below is kept
+> for continuity but should be read as "one hand-checked example that still passes," not as
+> general verification.
 
 Tested against a synthetic paragraph exercising every case called out in the task (abbreviations,
 initials, quotes):
@@ -203,6 +263,9 @@ queued, not completed.
 ## 6. Files
 
 - Code: `src/audiobook.py` (production segmentation/generation/assembly module).
+- Regression tests (added 2026-08-25, Refs #57): `tests/test_audiobook.py` — one test class per
+  audited finding (F1-F14), each reproducing the original defect against the pre-fix code before
+  asserting the fix. Run with `.venv-tts/bin/python3 -m unittest discover -s tests -v`.
 - Verification harnesses: `docs/research/audiobook/m4_boundary_check.py` (full 8-clip design,
   planned but not completed this pass — see §2), `docs/research/audiobook/
   m4_boundary_check_minimal.py` (the 2-clip cutdown that actually ran).
