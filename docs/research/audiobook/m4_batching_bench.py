@@ -81,6 +81,23 @@ NUM_SEGMENTS = len(SEGMENTS)
 WARMUP_TEXT = "Это короткая прогревочная фраза перед замером."
 
 
+def load_segments_file(path: Path) -> list[str]:
+    """Load an alternate segment pool from a blank-line-separated text file.
+
+    Additive-only: `SEGMENTS` above (the short-sentence pool this script's
+    published results, `m4-batching-results.md`, were measured on) is left
+    untouched, and this is only used when `--segments-file` is passed
+    (issue #57 follow-up task: re-run this same measurement on
+    paragraph-length replies, `m4_long_segments_ru.txt`, without rewriting
+    the existing measurement logic).
+    """
+    raw = path.read_text(encoding="utf-8").strip()
+    blocks = [block.strip().replace("\n", " ") for block in raw.split("\n\n") if block.strip()]
+    if not blocks:
+        raise ValueError(f"{path}: no segments found (expected blank-line-separated paragraphs)")
+    return blocks
+
+
 def machine_state() -> dict:
     def run(cmd: list[str]) -> str:
         try:
@@ -98,10 +115,10 @@ def audio_duration(samples: int, sample_rate: int) -> float:
     return samples / sample_rate if sample_rate else 0.0
 
 
-def run_baseline(model, out_dir: Path, max_new_tokens: int) -> list[dict]:
-    """batch-size 1: NUM_SEGMENTS independent, sequential model.generate() calls."""
+def run_baseline(model, out_dir: Path, max_new_tokens: int, segments: list[str] = SEGMENTS) -> list[dict]:
+    """batch-size 1: len(segments) independent, sequential model.generate() calls."""
     per_segment = []
-    for index, text in enumerate(SEGMENTS):
+    for index, text in enumerate(segments):
         t0 = time.perf_counter()
         results = list(model.generate(text=text, temperature=1.0, max_new_tokens=max_new_tokens))
         mx.eval(*[r.audio for r in results])
@@ -129,11 +146,14 @@ def run_baseline(model, out_dir: Path, max_new_tokens: int) -> list[dict]:
     return per_segment
 
 
-def run_batched(model, out_dir: Path, batch_size: int, max_new_tokens: int) -> list[dict]:
-    """batch-size N>1: NUM_SEGMENTS split into ceil(NUM_SEGMENTS/N) batch_generate calls."""
+def run_batched(
+    model, out_dir: Path, batch_size: int, max_new_tokens: int, segments: list[str] = SEGMENTS
+) -> list[dict]:
+    """batch-size N>1: len(segments) split into ceil(len(segments)/N) batch_generate calls."""
     per_segment = []
-    for chunk_start in range(0, NUM_SEGMENTS, batch_size):
-        chunk = SEGMENTS[chunk_start : chunk_start + batch_size]
+    num_segments = len(segments)
+    for chunk_start in range(0, num_segments, batch_size):
+        chunk = segments[chunk_start : chunk_start + batch_size]
         t0 = time.perf_counter()
         chunk_results = list(
             model.batch_generate(texts=chunk, temperature=1.0, max_new_tokens=max_new_tokens)
@@ -160,7 +180,7 @@ def run_batched(model, out_dir: Path, batch_size: int, max_new_tokens: int) -> l
             per_segment.append(
                 {
                     "segment": index,
-                    "chars": len(SEGMENTS[index]),
+                    "chars": len(segments[index]),
                     "chunk_wall_seconds": chunk_wall,
                     "chunk_size": len(chunk),
                     "audio_duration_seconds": duration,
@@ -177,17 +197,28 @@ def run_batched(model, out_dir: Path, batch_size: int, max_new_tokens: int) -> l
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--batch-size", type=int, required=True, choices=(1, 2, 4, 8))
+    parser.add_argument("--batch-size", type=int, required=True)
     parser.add_argument("--max-new-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--segments-file",
+        type=Path,
+        default=None,
+        help=(
+            "optional blank-line-separated paragraph pool overriding the built-in "
+            "short-sentence SEGMENTS (issue #57 follow-up: paragraph-length replies)"
+        ),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
-        help="defaults to output/m4_batching/batch<N>/",
+        help="defaults to output/m4_batching/<tag>batch<N>/",
     )
     args = parser.parse_args()
 
-    out_dir = args.output_dir or (ROOT / "output" / "m4_batching" / f"batch{args.batch_size}")
+    segments = load_segments_file(args.segments_file) if args.segments_file else SEGMENTS
+    tag = f"{args.segments_file.stem}_" if args.segments_file else ""
+    out_dir = args.output_dir or (ROOT / "output" / "m4_batching" / f"{tag}batch{args.batch_size}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     state_before = machine_state()
@@ -209,9 +240,9 @@ def main() -> None:
     mx.reset_peak_memory()
     run_start = time.perf_counter()
     if args.batch_size == 1:
-        per_segment = run_baseline(model, out_dir, args.max_new_tokens)
+        per_segment = run_baseline(model, out_dir, args.max_new_tokens, segments=segments)
     else:
-        per_segment = run_batched(model, out_dir, args.batch_size, args.max_new_tokens)
+        per_segment = run_batched(model, out_dir, args.batch_size, args.max_new_tokens, segments=segments)
     run_wall = time.perf_counter() - run_start
 
     total_audio = sum(s["audio_duration_seconds"] for s in per_segment)
@@ -223,7 +254,8 @@ def main() -> None:
 
     result = {
         "batch_size": args.batch_size,
-        "num_segments": NUM_SEGMENTS,
+        "num_segments": len(segments),
+        "segments_source": str(args.segments_file) if args.segments_file else "SEGMENTS (built-in, short sentences)",
         "max_new_tokens": args.max_new_tokens,
         "model_load_seconds": load_seconds,
         "warmup_seconds": warmup_seconds,

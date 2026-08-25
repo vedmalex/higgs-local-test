@@ -197,6 +197,16 @@ this calculus, which is why condition B is recorded explicitly rather than left 
 assumption. See [`m4-stage-profile-results.md`](m4-stage-profile-results.md) ("This closure is
 conditional on the current AR/vocoder cost ratio, not permanent") for the full arithmetic.
 
+**Update (2026-08-25) — condition B checked directly against the batching track, not yet
+triggered.** [`../audiobook/m4-batching-stage-profile-results.md`](../audiobook/m4-batching-stage-profile-results.md)
+measured this with `instrument()`/`deinstrument()` applied to `batch_generate` at batch=8 (same
+short-sentence fixture as the batching benchmark): AR loop sped up **3.23x** (short of the ≥4x
+threshold), and `codec_decode`'s share of wall time grew from 2.01% to **7.85%** — up sharply, but
+still under the 15% closure threshold. **The track stays closed. This is recorded because the
+margin has meaningfully narrowed** (7.85% is roughly half of 15%, not a small fraction of it as
+1.78-3.76% was), and because batching plus a further AR-loop lever (quantization, M4-T3) could
+plausibly close the remaining gap — a decision for the owner, not made here.
+
 ---
 
 ## 5. Consequence for any future vocoder work
