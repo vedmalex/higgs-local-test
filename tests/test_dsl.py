@@ -264,6 +264,71 @@ class TestSpeakerAndAttributesSurviveChunkBoundaries(unittest.TestCase):
         self.assertEqual(speakers, ["narrator", "maya"])
 
 
+class TestOwnerDecisionsE0Followup(unittest.TestCase):
+    """dsl-spec.md sec. 2.8/2.9, sec. 7: owner decisions on the two Э0 listening-test
+    open questions (resolved 2026-08-25, Refs #114) -- attribution clauses stay with the
+    narrator, and a short embedded quote gets an audible pause via the existing inline
+    sugar, not a new block type."""
+
+    def test_attribution_clause_stays_in_prose_reply_starts_say(self):
+        """dsl-spec.md sec. 2.8 worked example, the owner's own sentence."""
+        abs_text = (
+            "#prose\nМудрецы сказали:\n\n"
+            "#say mudretsy\nО главный среди святых царей династии Панду.\n"
+        )
+        _doc, segs = dsl.compile_source(abs_text)
+        self.assertEqual(segs[0]["speaker"], "narrator")
+        self.assertEqual(segs[0]["text"], "Мудрецы сказали:")
+        self.assertEqual(segs[1]["speaker"], "mudretsy")
+        self.assertEqual(
+            segs[1]["text"], "О главный среди святых царей династии Панду."
+        )
+
+    def test_short_quote_pause_uses_existing_sugar_no_new_block_type(self):
+        """dsl-spec.md sec. 2.9: the owner's exact flagged sentence, wrapped in the
+        existing [пауза] sugar on both sides of the quote, inside one #prose block --
+        no #say, no speaker change, no new syntax."""
+        abs_text = (
+            "#prose\n"
+            "Все великие мудрецы, собравшиеся там, восторженно приняли решение "
+            "Махараджи Парикшита и выразили свое одобрение словами: [пауза] "
+            "«Очень хорошо!» [пауза]\n"
+        )
+        _doc, segs = dsl.compile_source(abs_text)
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0]["speaker"], "narrator")
+        self.assertEqual(
+            segs[0]["text"],
+            "Все великие мудрецы, собравшиеся там, восторженно приняли решение "
+            "Махараджи Парикшита и выразили свое одобрение словами: "
+            "<|prosody:pause|> «Очень хорошо!» <|prosody:pause|>",
+        )
+
+    def test_short_quote_pause_canonical_round_trip(self):
+        abs_text = (
+            "#prose\nСлова: [пауза] «Очень хорошо!» [пауза] и тишина.\n"
+        )
+        canon = dsl.strip_markup(abs_text)
+        self.assertEqual(canon, "Слова: «Очень хорошо!» и тишина.")
+
+    def test_short_quote_pause_passes_coverage_and_lint(self):
+        abs_text = (
+            "#prose\nСлова: [пауза] «Очень хорошо!» [пауза] и тишина.\n"
+        )
+        self.assertEqual(dsl.collect_lint_issues(abs_text), [])
+        _doc, segs = dsl.compile_source(abs_text)
+        canon = dsl.strip_markup(abs_text)
+
+        def norm(t):
+            import re
+
+            t = dsl.TAG_SPAN_RE.sub(" ", t)
+            t = dsl._strip_stress_apostrophes(t)
+            return re.sub(r"\s+", " ", t).strip().split(" ")
+
+        self.assertEqual(norm(canon), norm("\n\n".join(s["text"] for s in segs)))
+
+
 class TestCanonicalRoundTrip(unittest.TestCase):
     def test_simple_document_round_trips_to_plain_text(self):
         abs_text = (
