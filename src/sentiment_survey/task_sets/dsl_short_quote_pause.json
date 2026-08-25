@@ -1,0 +1,21 @@
+{
+  "id": "dsl_short_quote_pause",
+  "title": "DSL (issue #114): пауза вокруг короткой цитаты в повествовании",
+  "priority": 1,
+  "description": "output/m4_dsl_short_quote/ -- та самая фраза из главы 19 (\"...выразили свое одобрение словами: «Очень хорошо!»\"), которую владелец услышал слитной в chapter-114-e0/chapter.wav. 'before' -- без разметки паузы (как в Э0 сейчас). 'after' -- та же фраза, скомпилированная из #prose с [пауза] вокруг цитаты (dsl-spec.md sec. 2.9), реальным компилятором scripts/audiobook_dsl.py, реальной генерацией Higgs TTS 3. Вопрос на слух, а не по коду.",
+  "tasks": [
+    {
+      "id": "dsl-short-quote-pause-audible",
+      "type": "pair_compare",
+      "answer_kind": "which",
+      "question": "В каком из двух клипов пауза вокруг цитаты «Очень хорошо!» звучит отчётливо, отдельно от остальной фразы -- а не слитно, как в исходной Э0 разметке?",
+      "options": ["A", "B", "Оба одинаково слитно", "Не уверен(а)"],
+      "clips": {"A": "output/m4_dsl_short_quote/before.wav", "B": "output/m4_dsl_short_quote/after.wav"},
+      "hidden": {
+        "A": {"variant": "before -- no pause markup (matches Э0 as marked up today)"},
+        "B": {"variant": "after -- [пауза] around the quote, dsl-spec.md sec. 2.9"},
+        "correct_answer": "B"
+      }
+    }
+  ]
+}

@@ -151,6 +151,60 @@ line already ends with an explicit pause tag, the compiler does not add a second
 Combining a trailing `\` with an explicit pause tag on the same line is a compile error
 (contradictory: one says "no pause here," the other says "pause here").
 
+### 2.8 Attribution clauses — owner decision (2026-08-25, Refs #114)
+
+Where to end `#prose` and begin `#say` around a clause like `Мудрецы сказали:` was an
+open question in an earlier revision of this spec (§7 used to carry it). **Decided:**
+the attribution clause is read by the narrator. `#prose` includes the clause and ends
+after it; `#say` begins with the reply itself, not with the clause that introduces it.
+
+```
+#prose
+Мудрецы сказали:
+
+#say mudretsy
+О главный среди святых царей династии Панду, строго следующих Самому Господу Шри
+Кришне!..
+```
+
+This is a markup rule for every chapter going forward, not a one-off call for this
+sentence: wherever source text has an introducer ("Х сказал:", "Х спросил:", "Х
+подумал:") immediately before a quoted reply, the introducer stays in the preceding
+`#prose` (or the `#prose` that follows a `#say`, if the introducer comes after the
+quote instead of before it) and the `#say`/`#recite` block's body starts at the first
+word actually spoken/thought by the character.
+
+### 2.9 Short quotes inside narration — owner decision (2026-08-25, Refs #114)
+
+A one-or-two-word quoted aside embedded in a narration sentence (e.g. `...выразили
+свое одобрение словами: «Очень хорошо!»`) does not get its own `#say` block — see §7
+for why a new block type was rejected. The owner's requirement, verified by ear, not
+inferred: whatever mechanism is used, **the separation must be an audibly distinct
+pause, not a smooth, blended transition** — this is what the un-marked Э0 narration
+failed at.
+
+**Decided mechanism: the existing `[пауза]`/`[долгая пауза]` inline sugar (§2.5),
+used inside the same `#prose` block, on both sides of the quote.** No new syntax, no
+new block type, no speaker change, no chunk-boundary reopening concern (it is a
+one-shot inline effect within a single sentence, not a sustained state):
+
+```
+#prose
+Все великие мудрецы, собравшиеся там, восторженно приняли решение Махараджи
+Парикшита и выразили свое одобрение словами: [пауза] «Очень хорошо!» [пауза]
+```
+
+This was chosen over every heavier alternative precisely because it needed nothing new
+to be added to the format that had just deliberately shed two block types (§6):
+`<|prosody:pause|>` is already one of the 43 catalog tags, already validated, already
+inline/one-shot per PROMPTING.md, and already passes through `strip_markup`/
+`check_coverage` unchanged as long as it is written with the existing sugar. Listening
+verification (real Higgs TTS 3 generation, not a code-level assertion that a tag was
+inserted) is recorded in `docs/research/audiobook/e1-short-quote-pause-listening.md`
+and the corresponding `output/m4_dsl_short_quote/` clips + `task_sets/
+dsl_short_quote_pause.json` entry the owner can listen to directly in the sentiment
+survey app (`make sentiment-survey`).
+
 ## 3. Compilation output
 
 Each block compiles to one JSON object:
@@ -223,32 +277,39 @@ should never be narrated does not reach `.abs` authoring in the first place. The
 "skipped" category in this DSL's coverage model as a result — §5's completeness check is
 strict, not "strict except for a skip list."
 
-## 7. Open questions for the project owner (not decided here)
+## 7. Owner decisions on the Э0 listening-test findings (resolved 2026-08-25, Refs #114)
 
 These surfaced from listening to the Э0 chapter output
 (`output/chapter-114-e0/chapter.wav`) against `samples/audiobook/prepared/sb-1-19.txt`,
 which was marked up minimally (no speaker/attribute structure at all, to measure the
 pipeline) and as a result reads dialogue and narration in one continuous voice with no
 pause between them. The DSL mechanics needed to fix this already exist (`#say`, `#prose`
-→ `#say` speaker changes, `--speaker-change-silence-ms`) and were verified working in
-this stage (§2.3, §2.4) — what is genuinely undecided is *where to draw the block
-boundary* in real source text, which is an editorial call, not a mechanical one:
+→ `#say` speaker changes, `--speaker-change-silence-ms`, and the existing inline pause
+sugar) and were verified working in this stage (§2.3, §2.4, §2.9) — what was genuinely
+undecided was *where to draw the block boundary* in real source text, an editorial call,
+not a mechanical one. Both questions below were open in an earlier revision of this
+document and are now resolved:
 
-1. **Does the attribution clause belong to the narrator or to the reply?** Concretely,
-   in `Мудрецы сказали: О главный среди святых царей династии Панду, строго следующих
-   Самому Господу Шри Кришне!..."`, should `#prose` end (and `#say` begin) before or
-   after "Мудрецы сказали:"? Ending `#prose` before it makes the attribution itself
-   spoken by the narrator (natural for an audiobook, and it gets the narrator's own
-   voice/pace); folding it into the `#say` block makes it part of what the character
-   line looks like on the page. Both are mechanically valid `.abs`; nothing in this
-   stage's spec or code picks one. **Needs an owner decision before any real chapter is
-   marked up**, since it changes where every such clause is split throughout a book.
-2. **Short quotes embedded inside narration** — e.g. `...выразили свое одобрение
-   словами: «Очень хорошо!»` — are one or two words, not a real turn of dialogue. Forcing
-   a `#say` block around something this short seems disproportionate (and this DSL just
-   deliberately shed two block types — `#verse`/`#gloss` — rather than gain one without
-   need). Whether the DSL should grow a lighter marker for an inline quoted aside, or
-   whether this is squarely the audiobook-preparation pass's job (upstream of `.abs`
-   authoring, like the gloss/navigation stripping `prepare.py` already does), or whether
-   it should simply be left as narrator prose and accepted as a minor imperfection, is an
-   open question this stage does not resolve.
+1. **Does the attribution clause belong to the narrator or to the reply? Resolved: the
+   narrator reads it.** See §2.8 for the rule and a worked example using the owner's own
+   `Мудрецы сказали:` sentence.
+2. **Short quotes embedded inside narration** (`...выразили свое одобрение словами:
+   «Очень хорошо!»`) **— resolved as a hard requirement, not a choice among the options
+   this document used to list**: whatever mechanism is used must produce an audibly
+   distinct pause around the quote, not the smooth blend the un-marked Э0 narration had.
+   The cheapest option — reusing the existing inline `[пауза]` sugar inside `#prose`,
+   requiring no format growth at all — satisfied that requirement; see §2.9 and
+   `docs/research/audiobook/e1-short-quote-pause-listening.md` for the listening
+   verification. "Leave it as unmarked narrator prose" was explicitly ruled out by the
+   owner: that smoothness is exactly what the Э0 listening pass flagged as wrong.
+
+**Still genuinely open, not asked of the owner (per explicit instruction not to raise it
+without being asked):** the hash-reproduction gap documented in
+`docs/research/audiobook/e1-dsl-hash-reproduction.md` (only 26 of the Э0 manifest's 70
+segment hashes reproduce) stems from the DSL's blank-line-closes-block grammar forcing
+one screenplay JSON line per paragraph. A block-continuation marker (letting an author
+say "this block is a continuation of the previous one, keep packing across the
+boundary") is a real option for closing that gap, but is a further format-growth
+decision on top of the one already made in §6 to keep the grammar small, and Э0 is being
+regenerated regardless once per-speaker voice separation lands, which has made
+byte-for-byte reproduction of Э0's specific chunk boundaries no longer urgent.
