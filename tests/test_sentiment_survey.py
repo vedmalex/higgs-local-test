@@ -872,6 +872,75 @@ class TestVoiceCastingBuilder(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)), "duplicate task ids")
 
 
+class TestVoiceCastingBackwardCompat(unittest.TestCase):
+    """Owner: "нужно не потерять то что уже помелили" -- the owner already
+    fully cast all 70 chapter-114-e0 segments (78 answers.jsonl lines) under
+    the OLD schema, with no pleasantness/room_feel/measured_features keys.
+    Adding those fields must not break reading, grading, or editing that
+    real data."""
+
+    def setUp(self):
+        self._orig_results_dir = server.RESULTS_DIR
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = self.tmp_dir
+
+    def tearDown(self):
+        server.RESULTS_DIR = self._orig_results_dir
+
+    def _old_shaped_record(self, task_id="voice-cast-00", name=None, selected=False):
+        # Exact shape of a real pre-this-change line (no pleasantness,
+        # room_feel, or measured_features keys at all).
+        return {
+            "task_id": task_id, "set_id": "voice_casting_chapter114e0",
+            "type": "voice_casting", "answer_kind": "voice_cast",
+            "question": "Сегмент 1 из 70...",
+            "answer_label": f"male/middle" + (f" → «{name}»" if selected else ""),
+            "answer_role": None, "gender": "male", "age_bucket": "middle",
+            "selected": selected, "name": name, "measured_f0_hz": 163.3,
+            "note": "", "listen_ms": 26465, "timestamp": "2026-08-25T17:18:05+0300",
+            "hidden": {"segment_index": 0, "output_path": "segment_x.wav",
+                       "segment_text": "...", "manifest_speaker": "narrator"},
+            "correct_answer": None, "matches_expected": None, "skipped_prior": False,
+            "pitch_warning": None,
+        }
+
+    def test_old_shaped_record_reads_without_error(self):
+        server.append_answer("voice_casting_chapter114e0", self._old_shaped_record())
+        answers = server.load_answers("voice_casting_chapter114e0")
+        rec = answers["voice-cast-00"]
+        self.assertIsNone(rec.get("pleasantness"))
+        self.assertIsNone(rec.get("room_feel"))
+        self.assertIsNone(rec.get("measured_features"))
+
+    def test_old_named_selected_record_is_still_selected_and_in_the_roster(self):
+        server.append_answer("voice_casting_chapter114e0",
+                              self._old_shaped_record(task_id="voice-cast-02", name="чтец", selected=True))
+        answers = server.load_answers("voice_casting_chapter114e0")
+        rec = answers["voice-cast-02"]
+        self.assertTrue(rec["selected"])
+        self.assertEqual(rec["name"], "чтец")
+
+    def test_appending_pleasantness_only_on_top_of_an_old_record_preserves_gender_age_name(self):
+        server.append_answer("voice_casting_chapter114e0",
+                              self._old_shaped_record(task_id="voice-cast-02", name="чтец", selected=True))
+        # Owner comes back later, adds only a pleasantness rating, resending
+        # the same gender/age/name from the old record (client always sends
+        # the full form -- see submitVoiceCast()/renderVoiceCastForm()
+        # prefill in app.js) plus the new field.
+        new_rec = self._old_shaped_record(task_id="voice-cast-02", name="чтец", selected=True)
+        new_rec["pleasantness"] = "5"
+        server.append_answer("voice_casting_chapter114e0", new_rec)
+
+        latest = server.load_answers("voice_casting_chapter114e0")["voice-cast-02"]
+        self.assertEqual(latest["name"], "чтец")
+        self.assertEqual(latest["gender"], "male")
+        self.assertEqual(latest["pleasantness"], "5")
+
+        history = server.load_answer_history("voice_casting_chapter114e0")
+        task_history = [r for r in history if r["task_id"] == "voice-cast-02"]
+        self.assertEqual(len(task_history), 2, "the original old-shaped answer must survive on disk")
+
+
 @unittest.skipUnless(CHAPTER114E0_PRESENT and NUMPY_PRESENT,
                       "needs both output/chapter-114-e0/ and numpy")
 class TestVoiceCastingOverHTTP(unittest.TestCase):
@@ -930,12 +999,106 @@ class TestVoiceCastingOverHTTP(unittest.TestCase):
         })
         self.assertEqual(status, 400)
 
-    def test_selected_without_name_rejected(self):
+    def test_empty_name_is_valid_and_means_not_selected(self):
+        # Issue #57/#118 follow-up: no separate "selected" checkbox anymore
+        # -- a blank name is a perfectly valid answer, it just isn't a cast
+        # decision. Must NOT be rejected.
         status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
             "task_id": "voice-cast-01", "gender": "male", "age_bucket": "middle",
-            "selected": True, "name": "", "listen_ms": 0,
+            "name": "", "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        rec = server.load_answers(self.set_id)["voice-cast-01"]
+        self.assertFalse(rec["selected"])
+        self.assertIsNone(rec["name"])
+
+    def test_typed_name_alone_implies_selected_no_checkbox_needed(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-04", "gender": "male", "age_bucket": "young",
+            "name": "arjuna", "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        rec = server.load_answers(self.set_id)["voice-cast-04"]
+        self.assertTrue(rec["selected"])
+        self.assertEqual(rec["name"], "arjuna")
+
+    def test_pleasantness_and_room_feel_are_optional(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-05", "gender": "female", "age_bucket": "old",
+            "name": "", "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        rec = server.load_answers(self.set_id)["voice-cast-05"]
+        self.assertIsNone(rec["pleasantness"])
+        self.assertIsNone(rec["room_feel"])
+
+    def test_invalid_pleasantness_rejected(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-06", "gender": "male", "age_bucket": "young",
+            "name": "", "pleasantness": "11", "listen_ms": 0,
         })
         self.assertEqual(status, 400)
+
+    def test_invalid_room_feel_rejected(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-07", "gender": "male", "age_bucket": "young",
+            "name": "", "room_feel": "cathedral", "listen_ms": 0,
+        })
+        self.assertEqual(status, 400)
+
+    def test_pleasantness_scale_round_trips_and_is_shown_in_answer_label(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-08", "gender": "female", "age_bucket": "middle",
+            "name": "", "pleasantness": "5", "room_feel": "dry", "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        rec = server.load_answers(self.set_id)["voice-cast-08"]
+        self.assertEqual(rec["pleasantness"], "5")
+        self.assertEqual(rec["room_feel"], "dry")
+        self.assertIn("5", rec["answer_label"])
+
+    def test_adding_pleasantness_to_an_already_cast_segment_does_not_require_redoing_it(self):
+        """Owner: "нужно не потерять то что уже помелили" -- filling in
+        gender/age/name once, then coming back later to add ONLY the new
+        pleasantness field, must work without resupplying anything else."""
+        task_id = "voice-cast-09"
+        self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "gender": "male", "age_bucket": "old",
+            "name": "narrator2", "listen_ms": 0,
+        })
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "gender": "male", "age_bucket": "old",
+            "name": "narrator2", "pleasantness": "4", "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+        rec = server.load_answers(self.set_id)[task_id]
+        self.assertEqual(rec["name"], "narrator2")  # unchanged, not lost
+        self.assertEqual(rec["pleasantness"], "4")  # newly added
+
+    def test_measured_features_are_exposed_in_task_view_and_baked_into_the_record(self):
+        status, detail = self._get(f"/api/sets/{self.set_id}/task/voice-cast-10")
+        self.assertEqual(status, 200)
+        # None only if numpy genuinely unavailable in this interpreter --
+        # this test class already requires NUMPY_PRESENT.
+        self.assertIsNotNone(detail["task"]["measured_features"])
+        self.assertIn("reverb_tail_ms", detail["task"]["measured_features"])
+
+        self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-10", "gender": "male", "age_bucket": "middle",
+            "name": "", "listen_ms": 0,
+        })
+        rec = server.load_answers(self.set_id)["voice-cast-10"]
+        self.assertIsNotNone(rec["measured_features"])
+
+    def test_cast_roster_lists_named_voices_in_task_list(self):
+        self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-11", "gender": "female", "age_bucket": "young",
+            "name": "sita2", "listen_ms": 0,
+        })
+        status, tasks = self._get(f"/api/sets/{self.set_id}/tasks")
+        self.assertEqual(status, 200)
+        row = next(t for t in tasks["tasks"] if t["id"] == "voice-cast-11")
+        self.assertEqual(row["name"], "sita2")
 
     def test_cast_and_name_round_trips_and_is_machine_readable(self):
         status, ans = self._post_json(f"/api/sets/{self.set_id}/answer", {

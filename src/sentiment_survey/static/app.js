@@ -282,12 +282,50 @@ function renderTaskForm(task) {
 
 // ---------------------------------------------------------------- voice casting (not blind)
 
+// Measured-feature labels + a short honest caveat -- these are homemade,
+// uncalibrated proxies (docs/research/audiobook/m4_prosody_metrics.py),
+// good for comparing this project's own clips, not real physical units.
+const MEASURED_FEATURE_LABELS = {
+  reverb_tail_ms: ["Хвост затухания (реверберация)", "мс"],
+  sibilance_ratio: ["Доля энергии в шипящих (5–8 кГц)", ""],
+  low_band_ratio: ["Доля низких частот (близость к микрофону)", ""],
+  spectral_tilt_db_per_khz: ["Спектральный наклон (глуховатость)", "дБ/кГц"],
+  spectral_centroid_hz: ["Спектральный центроид (яркость тембра)", "Гц"],
+};
+
+function renderMeasuredFeatures(task) {
+  const dl = el("voice-cast-measured");
+  dl.innerHTML = "";
+  const f0 = task.measured_f0_hz;
+  if (f0 != null) {
+    dl.innerHTML += `<dt>Медиана основного тона (высота)</dt><dd>${f0} Гц</dd>`;
+  }
+  const feats = task.measured_features || {};
+  for (const [key, [label, unit]] of Object.entries(MEASURED_FEATURE_LABELS)) {
+    const v = feats[key];
+    if (v == null) continue;
+    dl.innerHTML += `<dt>${escapeHtml(label)}</dt><dd>${v}${unit ? " " + unit : ""}</dd>`;
+  }
+  if (!dl.innerHTML) {
+    dl.innerHTML = "<dd>Измерения недоступны (нет numpy в этом запуске сервера).</dd>";
+  }
+}
+
+function renderCastRoster() {
+  const named = state.taskList.filter((t) => t.type === "voice_casting" && t.name);
+  const box = el("vc-roster");
+  if (!named.length) {
+    box.textContent = "Пока ни один голос не назван.";
+    return;
+  }
+  box.textContent = "Уже названы: " + named.map((t) => t.name).join(", ");
+}
+
 function renderVoiceCastForm(task) {
   el("voice-cast-form").hidden = false;
   el("voice-cast-transcript").textContent = task.transcript || "";
-  el("voice-cast-f0").textContent = task.measured_f0_hz != null
-    ? `Измеренная медиана основного тона: ${task.measured_f0_hz} Гц`
-    : "Медиана основного тона не измерена (нет numpy в этом запуске).";
+  renderMeasuredFeatures(task);
+  renderCastRoster();
 
   const prior = state.currentDetail.previous_answer;
   document.querySelectorAll('input[name="vc-gender"]').forEach((r) => {
@@ -296,15 +334,14 @@ function renderVoiceCastForm(task) {
   document.querySelectorAll('input[name="vc-age"]').forEach((r) => {
     r.checked = !!prior && r.value === prior.age_bucket;
   });
-  const selectedBox = el("vc-selected");
-  selectedBox.checked = !!prior && !!prior.selected;
+  document.querySelectorAll('input[name="vc-pleasantness"]').forEach((r) => {
+    r.checked = !!prior && r.value === prior.pleasantness;
+  });
+  document.querySelectorAll('input[name="vc-room"]').forEach((r) => {
+    r.checked = !!prior && r.value === prior.room_feel;
+  });
   el("vc-name").value = (prior && prior.name) || "";
-  el("vc-name-field").hidden = !selectedBox.checked;
 }
-
-el("vc-selected").addEventListener("change", () => {
-  el("vc-name-field").hidden = !el("vc-selected").checked;
-});
 
 el("vc-submit-btn").addEventListener("click", () => submitVoiceCast(state.currentDetail.task));
 
@@ -316,18 +353,19 @@ async function submitVoiceCast(task) {
     alert("Выберите пол и примерный возраст.");
     return;
   }
-  const selected = el("vc-selected").checked;
+  // A typed name IS "select this voice" -- no separate checkbox (issue
+  // #57/#118 follow-up: the old checkbox-then-name flow got 1 name out of
+  // 70 segments cast; one action is easier to actually use).
   const name = el("vc-name").value.trim();
-  if (selected && !name) {
-    alert("Для отобранного голоса нужно имя.");
-    return;
-  }
+  const pleasantnessEl = document.querySelector('input[name="vc-pleasantness"]:checked');
+  const roomEl = document.querySelector('input[name="vc-room"]:checked');
   const body = {
     task_id: task.id,
     gender: genderEl.value,
     age_bucket: ageEl.value,
-    selected,
     name,
+    pleasantness: pleasantnessEl ? pleasantnessEl.value : null,
+    room_feel: roomEl ? roomEl.value : null,
     note: el("task-note").value,
     listen_ms: totalListenMs(),
   };

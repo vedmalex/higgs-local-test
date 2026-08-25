@@ -63,6 +63,27 @@ VALID_TYPES = {"pair_compare", "single_rating", "triple_compare", "voice_casting
 VALID_GENDERS = {"male", "female", "unclear"}
 VALID_AGE_BUCKETS = {"young", "middle", "old", "unclear"}
 
+# Voice casting round 2 (issue #57/#118, owner: "нужно добавить шкалу
+# приятности голоса"). Deliberately 5 steps, not 10 -- a coarser scale than
+# that is not reliably distinguishable by ear (same reasoning the owner
+# already gave for age: "на вскидку", not fine-grained), plus an explicit
+# "can't decide" that is NOT the same as "3/neutral" (a genuine "3" is a
+# judgment; "unsure" is a refusal to judge -- collapsing them would lose
+# that distinction). Both new fields are OPTIONAL: unlike gender/age_bucket,
+# a missing value here does not fail validation, so revisiting an already
+# fully-answered segment (58 male/20 female cast already, see issue #57
+# follow-up) to add only a pleasantness rating never requires re-entering
+# fields the owner already gave.
+VALID_PLEASANTNESS = {"1", "2", "3", "4", "5", "unsure"}
+# "ощущение пространства" -- kept as a coarse, OPTIONAL human question
+# (reverberation ITSELF is measured, see pitch.py's measured_features /
+# reverb_tail_ms), because "how roomy this sounds" is a step beyond the raw
+# decay-time number: two clips with similar reverb_tail_ms can still read
+# very differently as "small room" vs "hall" to a human ear. The measured
+# reverb_tail_ms is always shown right next to this question so a
+# disagreement is visible and checkable, not silently ignored.
+VALID_ROOM_FEEL = {"dry", "slight", "noticeable", "unsure"}
+
 # Sentinel answer text for "I already know the verdict from a previous session
 # (docs/guides/tag_reference.md, m4-sentiment-results.md, ...) — don't make me
 # re-listen." Never reveals the tag itself; the actual prior verdict text is
@@ -285,7 +306,8 @@ def _answer_value(rec: dict) -> tuple:
     is_correction/answered_after_reveal here are just an honest revision
     history, not gate bookkeeping."""
     if rec.get("type") == "voice_casting":
-        return (rec.get("gender"), rec.get("age_bucket"), rec.get("selected"), rec.get("name"))
+        return (rec.get("gender"), rec.get("age_bucket"), rec.get("selected"), rec.get("name"),
+                rec.get("pleasantness"), rec.get("room_feel"))
     return (rec.get("answer_label"), rec.get("answer_role"))
 
 
@@ -435,6 +457,12 @@ def render_markdown(set_id: str, answers: dict[str, dict]) -> str:
         lines.append(f"- Вопрос: {rec.get('question', '')}")
         lines.append(f"- Ответ владельца: **{rec.get('answer_label', rec.get('answer', ''))}**")
         lines.append(f"- Скрытые метаданные: `{json.dumps(rec.get('hidden', {}), ensure_ascii=False)}`")
+        if rec.get("type") == "voice_casting" and rec.get("measured_features"):
+            lines.append(
+                f"- Измерено (самодельные, некалиброванные считалки — см. "
+                f"`docs/research/audiobook/m4_prosody_metrics.py`): "
+                f"`{json.dumps(rec['measured_features'], ensure_ascii=False)}`"
+            )
         note = (rec.get("note") or "").strip()
         if note:
             lines.append("- Заметка владельца:")
@@ -497,6 +525,11 @@ def build_task_view(ts: TaskSet, task: dict) -> dict:
         view["options"] = []
         view["transcript"] = task.get("hidden", {}).get("segment_text", "")
         view["measured_f0_hz"] = task.get("measured_f0_hz")
+        # Issue #57/#118 follow-up: reverb/sibilance/spectral proxies, same
+        # calibration caveat as F0 (docs/research/audiobook/
+        # m4_prosody_metrics.py's module docstring) -- shown, never hidden,
+        # since this task type is not blind to begin with.
+        view["measured_features"] = task.get("measured_features")
         return view  # no SKIP_LABEL / prior-verdict machinery applies here
     else:
         view["response_mode"] = "fixed_options"
@@ -744,6 +777,7 @@ class Handler(BaseHTTPRequestHandler):
                 "skipped_prior": bool(rec.get("skipped_prior")) if rec else False,
                 "has_note": bool((rec.get("note") or "").strip()) if rec else False,
                 "selected": bool(rec.get("selected")) if rec else False,
+                "name": rec.get("name") if rec else None,
             })
         self._send_json({
             "set_id": set_id,
@@ -876,8 +910,21 @@ class Handler(BaseHTTPRequestHandler):
         """
         gender = body.get("gender")
         age_bucket = body.get("age_bucket")
-        selected = bool(body.get("selected"))
         name = str(body.get("name") or "").strip()
+        # A typed name IS the "keep this voice" decision -- issue #57/#118
+        # follow-up: only 1 of 70 segments got a name under the old
+        # checkbox-then-name-field flow, and the most likely reason is that
+        # the checkbox was an extra, easy-to-skip step. One action now:
+        # type a name to select, clear it to un-select. `selected` stays in
+        # the record (downstream consumers -- docs/guides/audiobook_guide.md
+        # §2b -- already filter on it) but is derived, not a separate input.
+        selected = bool(name)
+        # Both optional (issue #57/#118 follow-up) -- see VALID_PLEASANTNESS/
+        # VALID_ROOM_FEEL above for why. Absent/null is a valid "not
+        # answered yet", not an error, so adding one to an already-answered
+        # segment never requires re-entering gender/age/name too.
+        pleasantness = body.get("pleasantness")
+        room_feel = body.get("room_feel")
 
         if gender not in VALID_GENDERS:
             self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid gender {gender!r}")
@@ -885,11 +932,18 @@ class Handler(BaseHTTPRequestHandler):
         if age_bucket not in VALID_AGE_BUCKETS:
             self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid age_bucket {age_bucket!r}")
             return
-        if selected and not name:
-            self._send_error_json(HTTPStatus.BAD_REQUEST, "selected=true requires a non-empty name")
+        if pleasantness is not None and pleasantness not in VALID_PLEASANTNESS:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid pleasantness {pleasantness!r}")
+            return
+        if room_feel is not None and room_feel not in VALID_ROOM_FEEL:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid room_feel {room_feel!r}")
             return
 
         answer_label = f"{gender}/{age_bucket}" + (f" → «{name}»" if selected else "")
+        if pleasantness is not None:
+            answer_label += f", приятность {pleasantness}"
+        if room_feel is not None:
+            answer_label += f", пространство: {room_feel}"
         record = {
             "task_id": task_id,
             "set_id": set_id,
@@ -902,7 +956,10 @@ class Handler(BaseHTTPRequestHandler):
             "age_bucket": age_bucket,
             "selected": selected,
             "name": name if selected else None,
+            "pleasantness": pleasantness,
+            "room_feel": room_feel,
             "measured_f0_hz": task.get("measured_f0_hz"),
+            "measured_features": task.get("measured_features"),
             "note": note,
             "listen_ms": listen_ms,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -937,6 +994,18 @@ class Handler(BaseHTTPRequestHandler):
         gradeable = [r for r in answers.values() if r.get("type") != "voice_casting"]
         cast = [r for r in answers.values() if r.get("type") == "voice_casting"]
         cast_selected = [r for r in cast if r.get("selected")]
+        # Roster of already-named voices (issue #57/#118 follow-up) -- shown
+        # in the UI next to the naming field so naming isn't done into a
+        # void; sorted by task_id for a stable order.
+        cast_roster = sorted(
+            (
+                {"task_id": r["task_id"], "name": r["name"], "gender": r.get("gender"),
+                 "age_bucket": r.get("age_bucket")}
+                for r in cast_selected
+            ),
+            key=lambda x: x["task_id"],
+        )
+        pleasantness_rated = [r for r in cast if r.get("pleasantness") not in (None, "unsure")]
 
         fresh = [r for r in gradeable if not r.get("skipped_prior")]
         skipped = sum(1 for r in gradeable if r.get("skipped_prior"))
@@ -985,6 +1054,12 @@ class Handler(BaseHTTPRequestHandler):
             # candidate dictor. Not part of the gate above.
             "cast_total": len(cast),
             "cast_selected_total": len(cast_selected),
+            "cast_roster": cast_roster,
+            "cast_pleasantness_rated_total": len(pleasantness_rated),
+            "cast_pleasantness_mean": (
+                round(sum(int(r["pleasantness"]) for r in pleasantness_rated) / len(pleasantness_rated), 2)
+                if pleasantness_rated else None
+            ),
             "answers": list(answers.values()),
         })
 

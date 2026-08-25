@@ -95,17 +95,19 @@ def _cache_key(path: Path) -> str:
     return str(path.resolve())
 
 
-def median_f0_hz(path: Path, cache: dict | None = None) -> float | None:
-    """Median F0 (Hz) over voiced frames of one clip, via the project's own
-    autocorrelation estimator. None if the file has no reliably voiced
-    frames (e.g. pure silence/noise) -- callers must treat that as "unknown
-    pitch", never as 0 Hz.
+def analyze_clip(path: Path, cache: dict | None = None) -> dict | None:
+    """Full per-clip analysis -- F0 plus every other homemade acoustic proxy
+    in docs/research/audiobook/m4_prosody_metrics.py's `analyze()` (issue
+    #57/#118 voice-casting follow-up: spectral centroid/tilt/sibilance/
+    low-band ratio, reverberation-decay proxy). None if the file can't be
+    read at all.
 
-    `cache` is an optional in-memory dict (path -> {mtime, size, f0}) the
-    caller can share across many calls in one process/run; when omitted, the
-    on-disk cache (CACHE_PATH) is read and written directly (safe for
-    occasional/CLI use, a bit wasteful for measuring hundreds of files in a
-    loop -- prefer build_f0_index() for that).
+    `cache` is an optional in-memory dict (path -> {mtime, size, analysis})
+    the caller can share across many calls in one process/run; when
+    omitted, the on-disk cache (CACHE_PATH) is read and written directly.
+    A cache entry from before these extra fields existed (schema upgrade)
+    is missing the "analysis" key and is transparently recomputed, not
+    trusted as-is.
     """
     own_cache = cache is None
     if own_cache:
@@ -116,36 +118,51 @@ def median_f0_hz(path: Path, cache: dict | None = None) -> float | None:
     except OSError:
         return None
     entry = cache.get(key)
-    if entry and entry.get("mtime") == stat.st_mtime and entry.get("size") == stat.st_size:
-        return entry.get("f0")
+    if (entry and entry.get("mtime") == stat.st_mtime and entry.get("size") == stat.st_size
+            and "analysis" in entry):
+        return entry["analysis"]
 
     prosody = _prosody_module()
     result = prosody.analyze(path)
-    f0 = result.get("f0_median_hz")
-    cache[key] = {"mtime": stat.st_mtime, "size": stat.st_size, "f0": f0}
+    cache[key] = {"mtime": stat.st_mtime, "size": stat.st_size, "analysis": result}
     if own_cache:
         _atomic_write_json(CACHE_PATH, cache)
-    return f0
+    return result
 
 
-def build_f0_index(paths: list[Path]) -> dict[str, float | None]:
-    """Measure (or fetch from cache) median F0 for many clips in one pass,
-    writing the on-disk cache once at the end. Keys are the input paths'
-    string form (not resolved) so callers can look values up the same way
-    they passed them in."""
+def median_f0_hz(path: Path, cache: dict | None = None) -> float | None:
+    """Median F0 (Hz) over voiced frames of one clip. None if the file has
+    no reliably voiced frames (e.g. pure silence/noise) -- callers must
+    treat that as "unknown pitch", never as 0 Hz. Thin wrapper over
+    analyze_clip() for callers that only need F0 (e.g. pitch-pairing)."""
+    result = analyze_clip(path, cache=cache)
+    return result.get("f0_median_hz") if result else None
+
+
+def build_analysis_index(paths: list[Path]) -> dict[str, dict | None]:
+    """Measure (or fetch from cache) the full analysis for many clips in one
+    pass, writing the on-disk cache once at the end. Keys are the input
+    paths' string form (not resolved) so callers can look values up the
+    same way they passed them in."""
     cache = _load_cache()
-    index: dict[str, float | None] = {}
+    index: dict[str, dict | None] = {}
     dirty = False
     for path in paths:
         key = _cache_key(path)
         before = cache.get(key)
-        f0 = median_f0_hz(path, cache=cache)
-        index[str(path)] = f0
+        index[str(path)] = analyze_clip(path, cache=cache)
         if cache.get(key) is not before:
             dirty = True
     if dirty:
         _atomic_write_json(CACHE_PATH, cache)
     return index
+
+
+def build_f0_index(paths: list[Path]) -> dict[str, float | None]:
+    """Same as build_analysis_index(), narrowed to just median F0 -- kept
+    for callers (pitch-pairing) that only ever needed that one field."""
+    analysis = build_analysis_index(paths)
+    return {k: (v.get("f0_median_hz") if v else None) for k, v in analysis.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -263,11 +280,12 @@ def annotate_pitch_warnings(docs: list[dict]) -> dict:
     one (see server.py's summary handler for how the mismatched bucket is
     kept separate from the graded/differ_pairs statistics).
 
-    Also stamps `measured_f0_hz` (a plain float or None, not a dict) on any
-    task with exactly one clip -- single-clip tasks (e.g. voice casting,
-    issue #57/#118 follow-up) aren't a comparison and get no pitch_warning,
-    but the same already-computed F0 is worth surfacing directly rather than
-    measuring it a second time elsewhere.
+    Also stamps `measured_f0_hz` (a plain float or None) AND
+    `measured_features` (the full analyze_clip() dict, or None) on any task
+    with exactly one clip -- single-clip tasks (e.g. voice casting, issue
+    #57/#118 follow-up) aren't a comparison and get no pitch_warning, but
+    the same already-computed analysis is worth surfacing directly rather
+    than measuring it a second time elsewhere.
 
     Returns the threshold report (see build_threshold_report()) for
     logging/documentation.
@@ -284,7 +302,8 @@ def annotate_pitch_warnings(docs: list[dict]) -> dict:
                     seen.add(abs_path)
                     all_paths.append(abs_path)
 
-    index = build_f0_index(all_paths)
+    analysis_index = build_analysis_index(all_paths)
+    index = {k: (v.get("f0_median_hz") if v else None) for k, v in analysis_index.items()}
     report = build_threshold_report(list(index.values()))
     threshold = report["threshold_hz"]
 
@@ -293,7 +312,9 @@ def annotate_pitch_warnings(docs: list[dict]) -> dict:
             clips = task.get("clips", {})
             if len(clips) == 1:
                 (only_path,) = clips.values()
-                task["measured_f0_hz"] = index.get(str((REPO_ROOT / only_path).resolve()))
+                key = str((REPO_ROOT / only_path).resolve())
+                task["measured_f0_hz"] = index.get(key)
+                task["measured_features"] = analysis_index.get(key)
 
     for doc in docs:
         for task in doc.get("tasks", []):

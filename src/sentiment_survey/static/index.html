@@ -53,6 +53,7 @@
           <div id="voice-cast-form" class="voice-cast-form" hidden>
             <p id="voice-cast-transcript" class="transcript"></p>
             <p id="voice-cast-f0" class="f0-hint"></p>
+            <dl id="voice-cast-measured" class="measured-features"></dl>
             <fieldset class="cast-field">
               <legend>Пол</legend>
               <label><input type="radio" name="vc-gender" value="male"> Мужской</label>
@@ -66,10 +67,26 @@
               <label><input type="radio" name="vc-age" value="old"> Пожилой</label>
               <label><input type="radio" name="vc-age" value="unclear"> Не разобрать</label>
             </fieldset>
-            <label class="cast-select"><input type="checkbox" id="vc-selected"> Отобрать этот голос для книги</label>
-            <div id="vc-name-field" class="cast-field" hidden>
-              <label for="vc-name">Имя диктора (так он будет назначаться персонажу):</label>
+            <fieldset class="cast-field">
+              <legend>Приятность голоса (необязательно)</legend>
+              <label><input type="radio" name="vc-pleasantness" value="1"> 1 — неприятный</label>
+              <label><input type="radio" name="vc-pleasantness" value="2"> 2</label>
+              <label><input type="radio" name="vc-pleasantness" value="3"> 3 — нейтрально</label>
+              <label><input type="radio" name="vc-pleasantness" value="4"> 4</label>
+              <label><input type="radio" name="vc-pleasantness" value="5"> 5 — очень приятный</label>
+              <label><input type="radio" name="vc-pleasantness" value="unsure"> Не могу решить</label>
+            </fieldset>
+            <fieldset class="cast-field">
+              <legend>Ощущение пространства (необязательно — реверберация уже измерена выше)</legend>
+              <label><input type="radio" name="vc-room" value="dry"> Сухо, без комнаты</label>
+              <label><input type="radio" name="vc-room" value="slight"> Немного комнаты</label>
+              <label><input type="radio" name="vc-room" value="noticeable"> Заметно комнаты / гулко</label>
+              <label><input type="radio" name="vc-room" value="unsure"> Не уверен(а)</label>
+            </fieldset>
+            <div id="vc-name-field" class="cast-field">
+              <label for="vc-name">Имя диктора (необязательно — заполните, чтобы отобрать голос для книги):</label>
               <input type="text" id="vc-name" placeholder="например: narrator, krishna, parikshit">
+              <p id="vc-roster" class="cast-roster"></p>
             </div>
           </div>
 

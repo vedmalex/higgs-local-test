@@ -70,7 +70,13 @@ GitHub Issues are the canonical surface for task state and development history. 
   mark a segment as a kept dictor candidate — deliberately NOT blind (nothing to hide) and kept
   out of every blind-gate statistic; its `answers.jsonl` IS the casting result
   `docs/guides/audiobook_guide.md` §2a reads to call `register_voice()` (a separate, deliberately
-  manual, model-loading step this app does not perform). Run via `make sentiment-survey`; see
+  manual, model-loading step this app does not perform). `m4_prosody_metrics.py` (and `pitch.py`'s
+  cache) also measures spectral centroid/tilt, 5-8kHz sibilance ratio, sub-300Hz proximity ratio,
+  and a reverberation-decay proxy per clip, shown alongside gender/age/an optional 5-step
+  pleasantness rating (the one thing worth asking a human, per the owner) and an optional room-feel
+  question (kept human on purpose, but always shown next to the measured decay number). All new
+  casting fields are optional so extending the schema never invalidates or requires redoing the
+  70-segment pass already recorded. Run via `make sentiment-survey`; see
   `docs/guides/sentiment_survey_guide.md`.
 - `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
 - `scripts/model_cache_lib.py` / `scripts/model_drive_sync.py`: the local-cache-to-Drive half of model sync (the reverse of the notebook above, which only ever writes Drive from the internet). `model_cache_lib.py` holds the one HF-cache tar-packing recipe (symlink-preserving); `model_drive_sync.py reconcile` diffs local cache vs Drive vs `model_catalog.json` (also flags anything on disk but missing from the catalog entirely), `plan` previews an upload run's size with nothing sent, `upload --model <name>` packs and pushes one entry (size-compared against Drive first, never overwrites a differing archive without `--force`), and `refresh-catalog` re-stamps `status`/`notes`/`verified` from what `reconcile` observed.
