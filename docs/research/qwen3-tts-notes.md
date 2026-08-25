@@ -717,6 +717,29 @@ result is the only one of the three worth a human-listened follow-up; U+0301
 and `+` are now recorded as actively harmful for this checkpoint and should
 not be retried without new evidence.
 
+**Update (2026-08-25) — the human-listened follow-up happened, on Higgs, not
+Qwen, and item 3's "least-bad" reading did not hold up by ear.** Per
+`docs/research/audiobook/m4-tag-inventory-results.md` §3.6/§3.7, the project
+owner listened to the equivalent doubled-vowel notation on Higgs
+(`заамок`/`Раадха`-style doubling) and reported plainly: *"двойные буквы
+проговариваются как двойные буквы - удлиняя звук"* — doubled letters are
+pronounced as doubled letters, lengthening the sound. **This is not a stress
+effect; it is a vowel-duration effect that the ASR round-trip check above was
+structurally incapable of detecting**, because ASR transcripts output
+normalized spelling, not duration or stress placement. The "least-bad of the
+three" framing above was correct about what it measured (no garbling, no
+spurious syllables) and wrong about what that measurement could prove (that
+the workaround "doesn't damage the audio's segmentation" was never evidence
+that it "corrects the stress," and this document said so explicitly at the
+time — the caveat held, and the doubled-vowel workaround should now be
+treated as **not a stress-control mechanism**, on either backend, until
+proven otherwise by a Qwen-specific listen). **General lesson recorded here
+for future work**: an objective proxy can only surface the failure modes it
+is structurally able to represent; a proxy blind to duration/stress/pitch
+will pass an intervention that fails on exactly that axis, silently. Treat a
+clean STT round-trip as "did not corrupt words/segmentation," never as "did
+what the notation claims to do."
+
 ## Выводы для реализации (`src/tts_qwen_cuda.py`)
 
 Follow the same architecture as `src/tts_cuda.py`, not a rewrite:

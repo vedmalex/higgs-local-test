@@ -969,5 +969,98 @@ class TestScreenplaySpeakerChangeAssembly(unittest.TestCase):
             self.assertAlmostEqual(result["total_duration_seconds"], 0.3, places=2)
 
 
+class TestStressApostropheNotation(unittest.TestCase):
+    """Refs #57: the owner confirmed by ear (docs/research/audiobook/m4-tag-inventory-results.md
+    sec. 3) that an apostrophe placed right after the stressed vowel ("за'мок") is the one
+    stress-mark notation that (a) is never spoken aloud and (b) does not corrupt Higgs's
+    output, unlike U+0301/`+`/doubled vowels. These tests check that the apostrophe (1) does
+    not disturb split_sentences/chunk_sentences/validate_control_tags/hashing, and (2) that the
+    heuristic used to tell a stress mark apart from a name apostrophe ("д'Артаньян",
+    "О'Генри") behaves as documented."""
+
+    def test_apostrophe_does_not_break_sentence_splitting(self):
+        text = "На холме стоит старинный за'мок. На двери висит крепкий замо'к."
+        sentences = ab.split_sentences(text)
+        self.assertEqual(
+            sentences,
+            ["На холме стоит старинный за'мок.", "На двери висит крепкий замо'к."],
+        )
+
+    def test_apostrophe_survives_chunking_unchanged(self):
+        sentences = ab.split_sentences("Он живёт в старинном за'мке уже сто лет.")
+        chunks = ab.chunk_sentences(sentences, max_chars=500)
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("за'мке", chunks[0].text)
+
+    def test_apostrophe_does_not_trip_control_tag_validation(self):
+        # Must not raise: a bare "'" does not match _TAG_SHAPE_RE and is not tracked as a
+        # quote pair (only the curly '‘'/'’' pair is).
+        ab.validate_control_tags("<|emotion:sadness|> Он вошёл в старый за'мок.")
+
+    def test_stress_mark_apostrophe_recognized_inside_lowercase_word(self):
+        text = "за'мок"
+        # index of the apostrophe
+        idx = text.index("'")
+        self.assertTrue(ab.is_stress_apostrophe(text, idx))
+        self.assertEqual(ab.count_stress_marks(text), 1)
+        self.assertEqual(ab.count_ambiguous_apostrophes(text), 0)
+
+    def test_name_apostrophe_after_consonant_and_capital_not_treated_as_stress(self):
+        # "д'Артаньян": apostrophe follows a consonant and precedes an uppercase letter --
+        # neither half of the stress-mark rule is satisfied.
+        text = "Это был д'Артаньян."
+        idx = text.index("'")
+        self.assertFalse(ab.is_stress_apostrophe(text, idx))
+        self.assertEqual(ab.count_stress_marks(text), 0)
+        self.assertEqual(ab.count_ambiguous_apostrophes(text), 1)
+
+    def test_name_apostrophe_after_vowel_but_before_capital_not_treated_as_stress(self):
+        # "О'Генри": apostrophe follows a vowel (like a real stress mark would) but is
+        # followed by an uppercase letter, not a lowercase continuation of the same word --
+        # this is the case the heuristic exists specifically to catch.
+        text = "Рассказ О'Генри мне понравился."
+        idx = text.index("'")
+        self.assertFalse(ab.is_stress_apostrophe(text, idx))
+        self.assertEqual(ab.count_stress_marks(text), 0)
+        self.assertEqual(ab.count_ambiguous_apostrophes(text), 1)
+
+    def test_manifest_records_stress_and_ambiguous_apostrophe_counts(self):
+        sentences = ab.split_sentences("В старинном за'мке жил д'Артаньян.")
+        chunks = ab.chunk_sentences(sentences, max_chars=500)
+        manifest = ab.build_manifest(chunks, max_chars=500, tag_scope="chunk")
+        self.assertEqual(manifest["stress_marks_detected"], 1)
+        self.assertEqual(manifest["ambiguous_apostrophes_detected"], 1)
+
+    def test_editing_stress_mark_regenerates_only_that_segment(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks_v1 = [
+                ab.Chunk(index=0, sentences=["Стоит замок."], reopened_tags={}, text="Стоит замок."),
+                ab.Chunk(index=1, sentences=["Второе предложение."], reopened_tags={}, text="Второе предложение."),
+            ]
+            manifest = ab.load_or_create_manifest(manifest_path, chunks_v1, max_chars=1000, tag_scope="chunk")
+            manifest["segments"][0]["status"] = "done"
+            manifest["segments"][0]["num_samples"] = 42
+            manifest["segments"][1]["status"] = "done"
+            manifest["segments"][1]["num_samples"] = 99
+            ab.save_manifest(manifest, manifest_path)
+
+            # Add a stress mark to only the first segment's text -- its hash must change
+            # (forcing regeneration) while the untouched second segment is reused.
+            chunks_v2 = [
+                ab.Chunk(index=0, sentences=["Стоит за'мок."], reopened_tags={}, text="Стоит за'мок."),
+                ab.Chunk(index=1, sentences=["Второе предложение."], reopened_tags={}, text="Второе предложение."),
+            ]
+            manifest2 = ab.load_or_create_manifest(manifest_path, chunks_v2, max_chars=1000, tag_scope="chunk")
+            self.assertNotEqual(
+                manifest2["segments"][0]["text_hash"], manifest["segments"][0]["text_hash"]
+            )
+            self.assertEqual(manifest2["segments"][0]["status"], "pending")
+            self.assertEqual(manifest2["segments"][1]["status"], "done")
+            self.assertEqual(manifest2["segments"][1]["num_samples"], 99)
+
+
 if __name__ == "__main__":
     unittest.main()

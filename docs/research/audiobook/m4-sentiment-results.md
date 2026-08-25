@@ -275,13 +275,37 @@ speaking rate"): treat F0 median as unreliable for this checkpoint/language and 
 pass/fail signal — it would have raised a false alarm here and could again. F0 spread (range/std)
 and pause duration are the proxies with owner-verdict-corroborated validity; prefer them.
 
+**(d) Contradiction with the later full-inventory measurement of `speed_slow`, resolved
+(2026-08-25).** §3 above measured `speed_slow` as this document's cleanest, most consistent
+tempo effect (tempo 1.57 vs. 1.87 words/s, -16%). The later 34-tag inventory
+(`docs/research/audiobook/m4-tag-inventory-results.md` §4) measured the same tag on a different
+carrier text and generation run and found it in Group C — tempo within noise of neutral
+(-0.03 wps). Read side by side these look like a flat contradiction. The owner's listening
+verdict on that document (`m4-tag-inventory-results.md` §3.6/§4.1a) resolves it: *«медленный
+голос не всегда сильно медленнее»* — "the slow voice isn't always much slower." **The correct
+conclusion is not that one of these two measurements is wrong: `speed_slow` has a real but weak
+and inconsistent effect on tempo**, strong enough to show cleanly in this document's single
+carrier/run and weak enough to vanish into noise in the inventory's carrier/run. Do not read
+either document's single measurement of this tag as the tag's true, fixed effect size.
+
+**(e) Update (2026-08-25): the emotion-tag verdict here is corroborated, cautiously, at group
+scale.** The 34-tag inventory's owner listening pass
+(`m4-tag-inventory-results.md` §4.1) reports, across the emotion tags more broadly: *«эмоции
+вроде различимы и работают»* — a moderate-confidence («вроде»), group-level echo of this
+section's stronger single-pair finding for `sadness`/`elation` specifically. The two verdicts
+are not the same claim (this one is specific and strong; that one is general and cautious) and
+should not be merged into one, but they point the same direction and, taken together with §4's
+methodological note (c) above, increase confidence that the objective Group A/B/C triage in the
+inventory document is tracking something real for the emotion tags at least.
+
 **Net effect on M4:** the blocking gate is cleared, and cleared on substance (sadness sounds
 genuinely sad, not merely different) — the optimization branch (batching → quantization, Lane 1 of
 `m4-plan.md` §1) is unblocked, since there is now a real, semantically-correct sentiment baseline
 worth preserving under quantization. Separately, `whispering` is downgraded from "one of the four
 probed tags" to "known not fit for purpose"; see `m4-plan.md`'s updated §0.4/M4-T5 for the
 practical consequence for audiobook tag choice and for the other 30 unverified tags, and §3/M4-T4
-for the F0-median proxy caution.
+for the F0-median proxy caution. `speed_slow` is correctly described as "real but weak/inconsistent
+effect," not "confirmed tempo control" and not "no-op" — see (d) above.
 
 ## 7. Files
 

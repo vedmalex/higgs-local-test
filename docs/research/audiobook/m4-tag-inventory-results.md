@@ -39,6 +39,12 @@ full inventory; the 9 `sfx:*` tags were not covered.**
   which matters most for the codebase, is flagged for listening rather than decided by metric.
 - **Stress-mark notation on Higgs had never been tested before this run.** An earlier revision
   of `README.md` implied a cross-backend failure; that was wrong and has been corrected (§3.0).
+  **Update (2026-08-25, post-listening): the owner has now listened to the `04_stress/` clips
+  and delivered a verdict — apostrophe notation works, and stress marking is NOT optional for
+  a Russian book. See §3.6.**
+- **Update (2026-08-25, post-listening): the owner also listened to the emotion-tag clips and
+  reports emotions are broadly distinguishable and usable — see §4.1.** This is a cautious,
+  not a strong, confirmation (see §4.1 for exact wording and scope).
 - **One base carrier sentence for the stress "fabric" meaning (атлас) produced garbled
   transcripts across ALL notations** (§3.3) — this looks like a sentence-quality problem with
   that specific carrier, not a stress-notation effect, and is reported as inconclusive for that
@@ -263,6 +269,80 @@ in the overwhelming majority of cases; `+` shows the same failure class Qwen had
 stress actually moves is unverified pending listening; the `04_stress/` folder and `LISTEN.md`
 are built specifically to make that judgment fast.
 
+### 3.6 Owner's listening verdict (2026-08-25) — SUBJECTIVE, human judgment
+
+The owner listened to the `04_stress/` clips (and others) and delivered this verdict, quoted
+verbatim per this project's convention of preserving subjective human judgments word-for-word
+rather than paraphrasing them:
+
+> «там где нет ударений, он выбирает случайное ударение
+> двойные буквы проговариваются как двойные буквы - удлиняя звук
+> плюс иногда проговаривает букву п
+> апостроф дает ударение
+> заглавная буква иногда создает ударение, а иногда создает ощущение акцента на слове
+> медленный голос не всегда сильно медленнее
+>
+> причем видно что если ударение непроставлено, то он выбирает свое, и не всегда правильное»
+
+**This is a subjective human judgment, not a re-run of the objective metrics above.** It
+resolves §3.4's "cannot be answered here" and §4's `speed_slow` open question (see §4.1a), but
+it is scoped to exactly what the owner listened to: the 3 homograph pairs and their 6 notations
+in `04_stress/`, plus the `speed_*` clips. It is **not** a general claim about Russian stress
+behavior beyond those words — see the Honesty note at the top of this document.
+
+| Нотация (as tested in §3.1) | Owner's verdict | Interpretation |
+|---|---|---|
+| **апостроф** (`за'мок`) | **РАБОТАЕТ — даёт ударение.** | The one notation confirmed both objectively (§3.3, cleanest STT round-trip) and now subjectively (correct stress placement). This is the only notation this document can now call fit for use. |
+| удвоение гласной (`заамок`) | НЕ ударение — проговаривается как удвоенная буква, удлиняя звук. | Corrects §3.5's "candidate, needs listen" — by ear this is not a stress mechanism at all, it is a literal vowel-length effect. See §3.7 for why the STT round-trip in §3.3 could not have caught this. |
+| `+` перед гласной (`з+амок`) | Иногда произносится вслух как буква «п» — provisionally read as the same class of failure §3.3 already caught once (`сто+ит` → «оступлить») and that Qwen's `+Это` → «Plus, Эйхолог» failure represents; the owner's exact wording names the letter "п", not the word "плюс", which may be a distinct artifact of Higgs's tokenizer rather than literally the same failure — recorded verbatim rather than reinterpreted. | Confirms §3.5's "risky — likely unreliable" verdict; do not use. |
+| заглавная буква (`зАмок`) | Ненадёжна: иногда даёт ударение, иногда только смысловое выделение слова (аналог логического ударения/акцента), а не сдвиг словесного ударения. | Downgrades §3.5's "candidate — listen to confirm" to **not reliable**: the effect exists but is not consistently the effect this project needs (a specific-syllable stress cue). |
+| без пометки (`замок`, control) | **Модель выбирает ударение сама, случайно, и не всегда верно.** | This is the load-bearing finding for §3.8 below: leaving a homograph unmarked is not a neutral/safe default — it is an unforced, occasionally-wrong guess. |
+
+Separately, on `<|prosody:speed_slow|>`: *«медленный голос не всегда сильно медленнее»* — see
+§4.1a, which folds this into the resolution of the `m4-sentiment-results.md` vs. this
+document's contradiction on that tag.
+
+### 3.7 Lesson: the STT round-trip proxy has a real, now-demonstrated blind spot
+
+`m4-sentiment-results.md`'s predecessor investigation into Qwen3-TTS
+(`docs/research/qwen3-tts-notes.md`, "Stress control" section) judged doubled-vowel notation
+(`Вриндаваан`) as "the least-bad of the three" workarounds because the ASR round-trip came back
+"close to the clean baseline" — i.e. it did not introduce spurious syllables/garbling the way
+U+0301 and `+` did. That document was explicit that this only showed the workaround "doesn't
+damage the *segmentation* of the audio, not that it corrects the *stress*" and flagged it as
+needing "an actual listen before being treated as anything more than 'didn't make it worse.'"
+The owner's listen has now happened (§3.6, this document, on Higgs rather than Qwen), and the
+answer is exactly the failure mode that caveat anticipated: doubled-vowel notation does not
+move stress at all — it lengthens the vowel sound, which a speech-recognition transcript
+literally cannot represent (ASR outputs normalized spelling, not duration), so the proxy read
+it as harmless when by ear it was never doing the intended job in the first place.
+
+**General lesson for this project**: an objective proxy metric (here, ASR transcript fidelity)
+can only detect the failure modes it is structurally capable of representing. A proxy that
+cannot represent duration, stress placement, or pitch contour will silently pass an intervention
+that fails on exactly that axis. Every "clean STT round-trip" finding in this document and in
+`m4-sentiment-results.md` should be read as "did not corrupt words/segmentation," never as "did
+what the tag/notation claims to do" — the two are different questions, and the doubled-vowel
+case is the concrete proof that they can disagree.
+
+### 3.8 Practical conclusion: stress marking is NECESSARY, not optional, for this book
+
+Because §3.6 establishes that an unmarked homograph is resolved by the model **guessing**, and
+that guess is **not always correct**, stress-mark placement is a correctness requirement for a
+Russian-language book on this backend, not a nice-to-have quality improvement. A homograph left
+unmarked does not fail safely (it does not, say, default to the more common reading) — it is
+non-deterministic per the owner's own listening, which means the same unmarked chapter text
+could plausibly render a wrong-meaning word on one generation and a right-meaning word on
+another. The only notation confirmed to reliably move stress to the intended syllable, by both
+the objective STT check (§3.3) and the owner's ear (§3.6), is the apostrophe. Pipeline support
+for apostrophe-as-stress-mark is implemented in `src/audiobook.py` (see the module-level
+comment above `RUSSIAN_VOWELS_LOWER`) and documented for the scenario author in
+`docs/guides/audiobook_guide.md`.
+
+This conclusion is scoped honestly: it rests on 3 homograph pairs and 6 notations, not a survey
+of Russian stress behavior in general (see the Honesty note at the top of this document and
+§6 below).
+
 ## 4. The 34-of-43-tag inventory: groups A/B/C
 
 (Covers only the 21 emotion + 10 prosody + 3 style tags. The 9 `sfx:*` tags are not in this
@@ -317,21 +397,66 @@ against duration.
 | B | style:singing | +9.9 | +2 | +300 | -0.22 | -23.0 | +0.92 |
 | C | style:whispering | +0.8 | -1 | -540 | -0.45 | -27.4 | +2.16 |
 
-**Headline finding: all four `speed_*` prosody tags are Group C.** Words-per-second — the metric
-built specifically to detect a tempo change — sits within ±0.11 wps of neutral for every one of
-them, and `speed_very_fast` (-0.08 wps, +0.32s duration) and `speed_very_slow` (+0.02 wps,
--0.08s duration) both move in the **wrong direction** from what their names promise. This
-matches `PROMPTING.md`'s own tip that `speed_very_slow` "only slows the model to roughly ~5s,"
-suggesting these tags are weakly implemented or get overridden by other decoding factors at
-`temperature=1.0` — but this document only measures the effect, not why. `<|prosody:pause|>`
-(Group B) also shows *more* total pause time (1940ms) than `<|prosody:long_pause|>` (1640ms,
-Group A) despite the name implying the reverse — flagged, not resolved, pending a listen to
-`prosody_pause.wav` / `prosody_long_pause.wav` for actual pause placement/length.
+**Headline finding (revised 2026-08-25, see §4.1a): all four `speed_*` prosody tags are Group
+C on the objective metric, but this is a weak/inconsistent effect, not a confirmed no-op.**
+Words-per-second — the metric built specifically to detect a tempo change — sits within ±0.11
+wps of neutral for every one of them, and `speed_very_fast` (-0.08 wps, +0.32s duration) and
+`speed_very_slow` (+0.02 wps, -0.08s duration) both move in the **wrong direction** from what
+their names promise on this particular carrier text. This matches `PROMPTING.md`'s own tip that
+`speed_very_slow` "only slows the model to roughly ~5s," suggesting these tags are weakly
+implemented or get overridden by other decoding factors at `temperature=1.0` — but this document
+only measures the effect, not why. `<|prosody:pause|>` (Group B) also shows *more* total pause
+time (1940ms) than `<|prosody:long_pause|>` (1640ms, Group A) despite the name implying the
+reverse — flagged, not resolved, pending a listen to `prosody_pause.wav` /
+`prosody_long_pause.wav` for actual pause placement/length.
 
 `style:whispering` (Group C) reconfirms the pre-existing finding from
 `m4-sentiment-results.md`: energy is *higher*, not lower, than neutral (+3.5 dB in this run's
 carrier text), and pitch spread is essentially unchanged (+0.8 Hz) — consistent evidence across
 two independent generations that this tag is a near no-op.
+
+### 4.1 Owner's listening verdict on emotion tags (2026-08-25) — SUBJECTIVE, human judgment
+
+The owner listened to the emotion-tag clips from this inventory and reported:
+
+> «эмоции вроде различимы и работают»
+
+This is quoted verbatim per the same convention as §3.6. Scoped precisely, per the owner's own
+qualifier «вроде» (moderate confidence, not a categorical claim):
+
+- This covers **emotion tags as a group**, from listening across the inventory — a broader
+  statement than the earlier, stronger confirmation in `m4-sentiment-results.md` §6 ("грусть
+  действительно грустная"), which was about the single `sadness`/`elation` pair specifically.
+- «вроде» is doing real work here: this is a cautious, moderate-confidence confirmation, not
+  "emotions work reliably." It should not be strengthened into a stronger claim than the owner
+  made.
+- It corroborates **Group A** above (15 emotion tags with a clear, direction-consistent
+  objective signal): the ear and the metric agree on the group most likely to matter, which is
+  useful evidence that the A/B/C triage methodology itself is tracking something real, for
+  future tag checks.
+- It does **not** extend to Group B (`arousal`, `confusion`, `helplessness`, `longing`) or to
+  the two Group C emotions (`anger`, `enthusiasm`) — the owner said nothing about these, and
+  they remain unverified by ear.
+
+### 4.1a Resolving the `speed_slow` contradiction between this document and `m4-sentiment-results.md`
+
+Two independent measurements of `<|prosody:speed_slow|>` disagree on the surface:
+`m4-sentiment-results.md` (T0, single clip, one measurement) found a clean, internally
+consistent tempo drop — duration 8.28s vs. 6.96s neutral, tempo 1.57 vs. 1.87 words/s (-16%).
+This document's inventory run (§4 table above) found `speed_slow` in Group C — ΔTempo only
+-0.03 wps, essentially indistinguishable from neutral on this document's carrier text.
+
+The owner's listening verdict resolves this rather than leaving it as an unexplained
+discrepancy: *«медленный голос не всегда сильно медленнее»* — "the slow voice isn't always much
+slower." **The correct reading is not that one measurement is wrong and the other right; it is
+that the tag's effect on tempo is real but weak and inconsistent across carrier text/generation
+runs** — strong enough for T0's single clip and carrier to show a clean -16% tempo delta, weak
+enough for this document's inventory carrier and generation to land within noise of neutral.
+This is a materially different conclusion from "no-op" (which `style:whispering`, confirmed
+inert on two independent measurements, actually is): `speed_slow` is a tag with SOME effect that
+one run can catch and another can miss, not a tag with no effect at all. Both measurement
+documents are corrected to state this rather than the sharper "Group C / near-zero" framing that
+implied the tag simply does nothing.
 
 ## 5. Priority listening list
 
@@ -340,12 +465,17 @@ nothing here is committed). The 8 highest-priority items, condensed:
 
 1. `03_style/style_whispering.wav` vs neutral — confirmed-suspect pustyshka.
 2. `02_prosody/prosody_speed_slow.wav` vs neutral — near-zero measured tempo change.
+   **Resolved 2026-08-25 by owner listening: not a no-op, effect is real but weak/inconsistent
+   — see §4.1a.**
 3. `02_prosody/prosody_speed_very_fast.wav` vs neutral — measured tempo change is *backwards*.
 4. `01_emotion/emotion_sadness.wav` vs neutral — sanity-check clip: largest, most direction-consistent Group A signal.
 5. `04_stress/stress_zamok_acute_1_castle.wav` vs `..._acute_2_lock.wav` — does stress notation
-   actually shift meaning?
+   actually shift meaning? **Resolved 2026-08-25 by owner listening for the apostrophe notation
+   specifically — see §3.6.** Acute/capital/doubled-vowel notations were also covered by the
+   same listening pass; see §3.6 for their individual verdicts.
 5b. `04_stress/stress_zamok_plus_1_castle.wav` vs `..._plus_2_lock.wav` — the notation with a
-   confirmed STT-transcript corruption elsewhere.
+   confirmed STT-transcript corruption elsewhere. **Resolved 2026-08-25: owner confirms this
+   notation is unreliable — see §3.6.**
 6. `05_final_intonation/boundary_1_complete_thought.wav` vs `..._2_continuing_thought.wav` —
    **the segmentation-defect question**: does our own chunk-per-chunk generation leave sentences
    sounding cut off.
@@ -365,17 +495,27 @@ nothing here is committed). The 8 highest-priority items, condensed:
   one-shot placement semantics from `PROMPTING.md` (`<|sfx:tag|>onomatopoeia, then the line`,
   no reopening across a chunk boundary) actually match what the model produces at a real chunk
   boundary, not just what `src/audiobook.py`'s `chunk_sentences()` was coded to do.
-- **No tag's emotional/stylistic identity was confirmed by ear in this document.** Groups A/B/C
-  are an objective triage only, exactly as scoped by the owner.
+- **Update 2026-08-25**: the two items below this note that concerned tag identity/stress-shift
+  by ear are now partially addressed by the owner's listening (§3.6, §4.1) — updated in place
+  rather than deleted, so the original scoping of this document (objective-only) stays visible.
+- **Emotion tag identity was confirmed by ear only in aggregate and only cautiously** (§4.1,
+  «эмоции вроде различимы и работают») — this covers Group A as a set; Group B and the two
+  Group C emotions remain unverified by ear. No *individual* emotion beyond `sadness`/`elation`
+  (confirmed separately in `m4-sentiment-results.md`) has an individual by-ear confirmation.
 - **Terminal-contour F0 slope is a noisy proxy** (§2.4); the segmentation-boundary question
   (§2.3), which is the one about our own code, is explicitly left to a human listener rather
-  than decided from the metric.
-- **Stress-shift itself (does the meaning actually change) is unverified** for all 3 homograph
-  pairs and all 6 notations — Russian ASR cannot detect stress placement, so only a human
-  listen can answer it (§3.4).
+  than decided from the metric — still unresolved as of this update.
+- **Stress-shift itself (does the meaning actually change) is now verified for the apostrophe
+  notation, by the owner's ear** (§3.6: «апостроф дает ударение») **— but only for the 3
+  homograph pairs and 6 notations actually tested here, not as a general claim about Russian
+  stress.** The other notations now have owner verdicts too (§3.6): doubled-vowel is confirmed
+  NOT a stress mechanism (vowel-length effect only), `+` and capital-letter are confirmed
+  unreliable, acute accent was not separately called out by the owner and remains without an
+  individual verdict.
 - **Duration/energy-per-syllable was not computed** for the stress probe (would have been a
   cheaper objective proxy for stress placement than nothing, but was time-boxed out of this
-  pass).
+  pass) — moot for the apostrophe notation now that a human listen has answered the question
+  directly, but still true for any future notation this document has not covered.
 - **The atlas "fabric" carrier sentence is unusable as constructed** — garbled across every
   notation including the control — and its stress-notation results are excluded from the
   verdict rather than misreported as evidence against any notation.
