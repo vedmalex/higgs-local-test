@@ -119,9 +119,17 @@ zero-cost vocoder would move the long case only from 82.87 s to ≈79.75 s. That
 pre-declared "<15% → don't touch the vocoder" threshold. MAX additionally has to place
 `ConvTranspose1d` on the CPU inside a GPU graph (upstream, both Metal and CUDA); MLX does not.
 If the vocoder is ever rewritten, it goes on MLX, not MAX. M0–M3's artifacts stay in active use
-(`m3_block_reference.py`'s FP64 oracle, `m3_divergence.py:149`'s `compare()`). Reopens only if a
-real cross-platform requirement returns **and** the upstream fixes land. Full reasoning, reuse
-inventory, and reopen conditions: [`docs/research/mojo-max/m4-conclusion.md`](docs/research/mojo-max/m4-conclusion.md).
+(`m3_block_reference.py`'s FP64 oracle, `m3_divergence.py:149`'s `compare()`).
+
+**This closure is at the pipeline's *current* AR-loop/vocoder cost ratio, not permanent.** It
+reopens if **either**: (a) a real cross-platform requirement returns **and** the upstream MAX fixes
+land; **or** (b) **the AR loop is sped up by ≥4x** relative to the measured baseline above — at
+that point `codec_decode`'s fixed ~3.1 s cost crosses back above the plan's own pre-declared 15%
+closure threshold (RTF ≈ 1.07), and the vocoder track must be reopened on its own merits. Condition
+(b) does not require condition (a), and it is squarely in the range M4's batching/quantization
+tracks are targeting — an independent audit (2026-08-25) added this condition explicitly rather
+than leaving it implicit. Full reasoning, reuse inventory, and both reopen conditions:
+[`docs/research/mojo-max/m4-conclusion.md`](docs/research/mojo-max/m4-conclusion.md).
 
 - Notebook (Colab T4 only, deliberately minimal — no TTS/STT/Qwen stack install): [`notebooks/mojo_max_m0_t4.ipynb`](notebooks/mojo_max_m0_t4.ipynb)
 - Open directly in Colab: <a href="https://colab.research.google.com/github/vedmalex/higgs-local-test/blob/main/notebooks/mojo_max_m0_t4.ipynb" target="_blank" rel="noopener noreferrer"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>

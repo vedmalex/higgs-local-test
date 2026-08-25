@@ -49,13 +49,14 @@ arbitrary position, so a single generation call can shift emotion/prosody/style 
 This is the entire reason the project stays on Higgs rather than switching to the faster,
 already-working Qwen3-TTS backend for anything beyond flat narration.
 
-**0.2 Audiobook arithmetic (for BOTH measured RTF values — see §3, M4-T1b for why there are two).**
-At RTF 4.26 (this plan's own PR #95 measurement): a 10-hour audiobook needs ≈43 hours of machine
-time. At RTF 6.56 (the pre-existing `logs/tts_basic.log` figure for the same text fixture): ≈66
-hours. **Neither number is treated as final** — M4-T1b exists specifically to resolve which one
-this project should plan against. Both land in the "impractical" tier (§2: RTF > 3), and both
-require a 3–4.4x speedup before a full book is practical on this machine. This is the central
-arithmetic problem M4's optimization lane exists to attack.
+**0.2 Audiobook arithmetic (for BOTH measured RTF values — see §3; the gap between them is now
+explained, see the updated M4-T1b below, not left open).** At RTF 4.26 (this plan's own PR #95
+measurement): a 10-hour audiobook needs ≈43 hours of machine time. At RTF 6.56 (the pre-existing
+`logs/tts_basic.log` figure for the same text fixture): ≈66 hours. Both land in the "impractical"
+tier (§2: RTF > 3), and both require a 3–4.4x speedup before a full book is practical on this
+machine — plan against the range, not a single point estimate, since which end of it is closer to
+steady state does not change which optimization lane to pursue. This is the central arithmetic
+problem M4's optimization lane exists to attack.
 
 **0.3 The decoder is already MLX on GPU.** Nothing about the vocoder needs porting to run on
 Metal — it already does. The MLX-Audio probe recorded 10/10 PASSED, but that is a correctness
@@ -327,24 +328,41 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   active in the background. The measured long-case RTF of **4.26 does not match** the previously
   logged **6.56** for the nominally same fixture (`logs/tts_basic.log`). Plausible contributing
   causes are named (background load, added `mx.eval()` sync points, package-version drift, natural
-  AR-sampling-length variance) but **the number was not adjusted or tuned to match** — the gap is
-  reported open, and M4-T1b (below) exists to actually resolve it rather than guess at it.
+  AR-sampling-length variance) but **the number was not adjusted or tuned to match** — the gap was
+  reported open at the time. **Update (2026-08-25, independent audit):** the gap now has a named
+  leading explanation — `src/tts_test.py` (the source of the 6.56 figure) has no warm-up call,
+  while this profiler discards a ~39 s warm-up before measuring; see the updated M4-T1b entry below
+  and `m4-stage-profile-results.md`'s "Discrepancy" section for the full argument.
   Consequently, §0.5's "the AR loop dominates" moves from an inference drawn from code structure
   to a **measured fact**, and the corresponding line is removed from §8 ("what this plan does not
   claim").
 
-- [ ] **M4-T1b. Re-run M4-T1's profile on an idle machine.** The 4.26-vs-6.56 discrepancy is not
-  cosmetic: it's the difference between a ≈43-hour and a ≈66-hour full-book run (§0.2), which
-  matters for every downstream speedup-target calculation in this plan. Close Docker Desktop, IDE
-  language servers, and any other background load; confirm `uptime`'s load average is near
-  baseline-idle before running; re-run `m4_stage_profile.py` unchanged and compare against both
-  prior numbers.
-  *Done when:* a clean-load run's RTF is recorded and reconciled against 4.26 and 6.56 — either it
-  lands close to one of them (identifying which was the anomaly) or a third number requires its
-  own explanation.
-  *Files:* reuses `docs/research/mojo-max/m4_stage_profile.py`; appends a section to
-  `m4-stage-profile-results.md`.
-  *Devices:* M1, idle.
+- [x] **M4-T1b. Re-run M4-T1's profile on an idle machine to resolve the 4.26-vs-6.56 gap.**
+  **SUPERSEDED — the gap is explained, 2026-08-25, not by a clean re-run but by an independent audit
+  of the existing measurement.** Original framing: the discrepancy is not cosmetic — it's the
+  difference between a ≈43-hour and a ≈66-hour full-book run (§0.2) — so re-run on an idle machine
+  and reconcile.
+  **What actually resolved it:** the audit found that `src/tts_test.py:52-54` (the source of the
+  6.56 figure in `logs/tts_basic.log`) has **no warm-up call**, while `m4_stage_profile.py`
+  deliberately discards a warm-up before its measured cases. That discarded warm-up cost 39.094 s
+  for a phrase whose steady-state cost is ~3-4 s — roughly 35 s of one-time MLX graph/kernel compile
+  overhead that `tts_basic.log`'s cold, single call paid in full and `m4_stage_profile.py`'s
+  short/long numbers do not. This is large enough to explain most or all of the RTF gap without
+  needing a controlled re-run to isolate it. See
+  [`../mojo-max/m4-stage-profile-results.md`](../mojo-max/m4-stage-profile-results.md)'s
+  "Discrepancy with the previously recorded RTF 6.56" section for the full argument, including why
+  measuring with a discarded warm-up is the methodologically correct choice for M4's actual
+  decision (steady-state cost, not one-time cost, is what a 10-hour-audiobook budget amortizes
+  against) and why the sign of the gap, if anything, reinforces rather than weakens the
+  vocoder-track closure.
+  **This task is retired as originally scoped** — "re-run to resolve the discrepancy" is no longer
+  a blocking open question, since the discrepancy has an explanation, not just a workaround. The
+  idea of a controlled idle-machine re-run is **not discarded**, but its purpose changes: it would
+  now serve as a **stability check** (confirm the short/long stage-share numbers hold under less
+  background load) rather than as the thing this plan's downstream speedup-target math was waiting
+  on. If pursued later, do it as a non-blocking follow-up, not a gate.
+  *Files:* `docs/research/mojo-max/m4-stage-profile-results.md` (audit note added, 2026-08-25).
+  *Devices:* N/A (analysis of existing data, no re-run performed).
   *Tier:* **sonnet**, size **S**.
 
 ### Lane 2 — the slow, real chapter (starts now, in parallel with Lane 1)
@@ -592,9 +610,12 @@ honesty          a partial or failing stage is written up as partial or failing.
 - The MLX-Audio probe's 10/10 PASSED measured correctness only, not speed or sentiment
   ([`../mojo-max/m4-mlx-probe-results.md`](../mojo-max/m4-mlx-probe-results.md)).
 - The result of this plan is not production-grade.
-- Which of the two measured RTF values (4.26 vs. 6.56, §0.2) is the "real" one for planning
-  purposes — that is exactly what M4-T1b exists to resolve, and until it does, this plan reports
-  arithmetic for both rather than picking one.
+- Which of the two measured RTF values (4.26 vs. 6.56, §0.2) is the exact "real" number for a
+  clean-idle-machine steady state — the gap between them now has a named, evidenced leading
+  explanation (cold-start/compile overhead in the un-warmed `tts_basic.log` run, see the updated
+  M4-T1b), but a controlled re-run to pin the precise steady-state figure was not performed. This
+  plan continues to report arithmetic for both rather than picking one, since both land in the same
+  "impractical, needs a 3-4.4x speedup" planning tier regardless.
 
 (Note, unlike M3's equivalent section: "the AR loop dominates wall time" has been **removed** from
 this list — per §0.5/M4-T1, that is now a measured fact, not an unverified premise.)

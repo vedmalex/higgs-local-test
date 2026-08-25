@@ -9,7 +9,9 @@ already exists in this repository.
 doing?" is now ANSWERED, and the answer is "technically yes on Apple GPU, but not worth doing" —
 because the decoder is already MLX-native on the GPU, and because `codec.decode` was measured at
 1.78–3.76% of wall time, capping the entire vocoder lane's achievable win at ~4%. The track is
-closed as completed research, not abandoned as a failure.**
+closed as completed research, not abandoned as a failure — closed at the pipeline's *current*
+AR-loop/vocoder cost ratio, not closed permanently: see §4's explicit reopen conditions, including
+one tied to the AR-loop speedups other M4 tracks are already pursuing.**
 
 ---
 
@@ -162,7 +164,12 @@ their validity but their *relevance*.
 
 ## 4. Reopen conditions
 
-The track reopens only if **both** hold:
+**Updated 2026-08-25 (independent audit of `m4-stage-profile-results.md`):** the track reopens if
+**either** of two independent conditions holds — the cross-platform/upstream pair below, **or** a
+third, separate condition tied to the AR-loop speedup that M4's other tracks (batching,
+quantization) are explicitly pursuing:
+
+**A. Cross-platform requirement returns, and upstream MAX defects are fixed — both must hold:**
 
 1. A real cross-platform requirement returns — i.e. this project must actually run the decoder on
    non-Apple hardware, reversing the deferral in `m3-t4-blocked-results.md` §5; **and**
@@ -171,8 +178,24 @@ The track reopens only if **both** hold:
    `sm_75`), and `ops.conv2d_transpose` working on GPU (#6563 / #6726), removing the forced CPU
    placement.
 
-A speedup argument alone does **not** reopen it: §1.2's ~4% ceiling caps that lane regardless of
-how good MAX's kernels become.
+**B. OR — independently of A — the AR loop is sped up by ≥4x relative to the measured baseline:**
+
+§1.2's ~4% ceiling is not a permanent property of this pipeline; it is a ratio, computed at the AR
+loop's *currently measured* cost. `codec_decode` is a fixed ~3.119 s per generation call (long
+case). If the AR loop (`ar_prefill` + `ar_backbone_steps`, currently ~78 s for that same case) is
+accelerated **≥4x** — which is precisely what M4's batching and quantization tracks are aiming
+for — the vocoder's share of wall time crosses back above the plan's own pre-declared 15% closure
+threshold (`m4-plan.md` §2: solving `codec_decode / wall = 0.15` at a fixed 3.119 s decode gives
+`wall ≈ 20.8 s`, i.e. RTF ≈ 1.07, roughly a 4-6x AR-loop speedup from the measured baseline). At
+that point the vocoder track must be reopened on its own merits, regardless of whether condition A
+ever holds.
+
+**A speedup argument alone does not reopen the track below the ≥4x threshold** — a smaller AR-loop
+speedup still leaves the vocoder under 15% of wall time, and §1.2's ceiling still caps that lane's
+value. It is specifically an AR-loop speedup **in the range M4 is already targeting** that changes
+this calculus, which is why condition B is recorded explicitly rather than left as an unstated
+assumption. See [`m4-stage-profile-results.md`](m4-stage-profile-results.md) ("This closure is
+conditional on the current AR/vocoder cost ratio, not permanent") for the full arithmetic.
 
 ---
 
