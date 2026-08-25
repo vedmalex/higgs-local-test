@@ -1,0 +1,470 @@
+{
+  "id": "stress",
+  "title": "Ударение: омографы замок/стоит/атлас, 6 нотаций",
+  "priority": 4,
+  "description": "output/m4_tags/04_stress/ — 22 клипа, 3 пары омографов (замок/стоит/атлас) x до 6 нотаций ударения. Владелец уже дал устный вердикт по этим клипам (issue #57, PR #110): апостроф после ударной гласной работает надёжно; двойная гласная, `+` и заглавная буква — ненадёжны; немаркированное слово не гарантирует правильное ударение. Этот набор существует, чтобы записать тот же вердикт на диск воспроизводимо, а не только пересказом.",
+  "tasks": [
+    {
+      "id": "stress-zamok-acute-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (крепость)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_acute_1_castle.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "acute",
+          "meaning": "castle"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-zamok-acute-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (запирающее устройство)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_acute_2_lock.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "acute",
+          "meaning": "lock"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-zamok-apostrophe-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (крепость)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_apostrophe_1_castle.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "apostrophe",
+          "meaning": "castle"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-zamok-apostrophe-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (запирающее устройство)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_apostrophe_2_lock.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "apostrophe",
+          "meaning": "lock"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-zamok-capital-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (крепость)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_capital_1_castle.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "capital",
+          "meaning": "castle"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-zamok-capital-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (запирающее устройство)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_capital_2_lock.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "capital",
+          "meaning": "lock"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-zamok-doubled-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (крепость)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_doubled_1_castle.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "doubled",
+          "meaning": "castle"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-zamok-doubled-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (запирающее устройство)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_doubled_2_lock.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "doubled",
+          "meaning": "lock"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-zamok-none-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (крепость)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_none_1_castle.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "none",
+          "meaning": "castle"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-zamok-none-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (запирающее устройство)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_none_2_lock.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "none",
+          "meaning": "lock"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-zamok-plus-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (крепость)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_plus_1_castle.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "plus",
+          "meaning": "castle"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-zamok-plus-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «замок» должно означать «замок (запирающее устройство)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_zamok_plus_2_lock.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "zamok",
+          "notation": "plus",
+          "meaning": "lock"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-stoit-acute-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «стоит» должно означать «стоит (имеет цену)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_stoit_acute_1_costs.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "stoit",
+          "notation": "acute",
+          "meaning": "costs"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-stoit-acute-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «стоит» должно означать «стоит (находится/стоит на месте)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_stoit_acute_2_stands.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "stoit",
+          "notation": "acute",
+          "meaning": "stands"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-stoit-doubled-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «стоит» должно означать «стоит (имеет цену)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_stoit_doubled_1_costs.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "stoit",
+          "notation": "doubled",
+          "meaning": "costs"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-stoit-doubled-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «стоит» должно означать «стоит (находится/стоит на месте)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_stoit_doubled_2_stands.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "stoit",
+          "notation": "doubled",
+          "meaning": "stands"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-stoit-plus-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «стоит» должно означать «стоит (имеет цену)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_stoit_plus_1_costs.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "stoit",
+          "notation": "plus",
+          "meaning": "costs"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-stoit-plus-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «стоит» должно означать «стоит (находится/стоит на месте)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_stoit_plus_2_stands.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "stoit",
+          "notation": "plus",
+          "meaning": "stands"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-atlas-acute-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «атлас» должно означать «атлас (сборник карт)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_atlas_acute_1_book.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "atlas",
+          "notation": "acute",
+          "meaning": "book"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-atlas-acute-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «атлас» должно означать «атлас (блестящая ткань)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_atlas_acute_2_fabric.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "atlas",
+          "notation": "acute",
+          "meaning": "fabric"
+        },
+        "correct_answer": "Второй слог"
+      }
+    },
+    {
+      "id": "stress-atlas-none-1",
+      "type": "single_rating",
+      "question": "В этом клипе слово «атлас» должно означать «атлас (сборник карт)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_atlas_none_1_book.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "atlas",
+          "notation": "none",
+          "meaning": "book"
+        },
+        "correct_answer": "Первый слог"
+      }
+    },
+    {
+      "id": "stress-atlas-none-2",
+      "type": "single_rating",
+      "question": "В этом клипе слово «атлас» должно означать «атлас (блестящая ткань)». Где стоит ударение?",
+      "options": [
+        "Первый слог",
+        "Второй слог",
+        "Не уверен(а)"
+      ],
+      "clips": {
+        "A": "output/m4_tags/04_stress/stress_atlas_none_2_fabric.wav"
+      },
+      "hidden": {
+        "A": {
+          "word": "atlas",
+          "notation": "none",
+          "meaning": "fabric"
+        },
+        "correct_answer": "Второй слог"
+      }
+    }
+  ]
+}

@@ -47,6 +47,18 @@ GitHub Issues are the canonical surface for task state and development history. 
 - `notebooks/model_prefetch_to_drive.ipynb`: downloads every model this project needs (Higgs TTS 3/STT, Whisper processor, Qwen3-TTS/ASR MLX weights) through Colab's network instead of the local machine's, packs each into a `.tar` (preserving the Hugging Face cache's blob/snapshot symlink layout, which Drive's FUSE mount does not preserve on loose files), and uploads it to `MyDrive/higgs-benchmark/model-cache/`. Extract locally with `tar -xf <name>.tar -C ~/.cache/huggingface/hub/`. Workaround for a local network too unstable for multi-gigabyte HF downloads even with `scripts/download_models.sh`'s retry loop.
 - `notebooks/mojo_max_m2_t4.ipynb`: standalone Colab T4 runner for issue #57's M2 correctness prototypes (`docs/research/mojo-max/m2_*_prototype.py`) — same minimal-install convention as the M0 T4 notebook, plus `higgs_colab_benchmark.ipynb`'s Google Drive workspace + unconditional-disconnect pattern: each prototype's result is written to Drive right after it runs (not just `/content`), and the final cell always calls `runtime.unassign()` in a `try`/`finally`.
 - `skills-lock.json`: pins the official Modular agent skills used for issue #57's Mojo/MAX research (`import-model`, `debug-model`, `serve-model`, `benchmark-model`, `profile-model`, `eval-model`, `mojo-syntax`, `mojo-gpu-fundamentals`, `mojo-python-interop`, `closure_migration`, `new-modular-project`). Restore them into `.agents/`/`.claude/skills` (both gitignored, regenerated like `node_modules`) with `npx skills experimental_install`; a fresh `npx skills add modular/skills` also works but may pick up newer skill revisions than the lockfile pins.
+- `src/sentiment_survey/`: local stdlib-only (`http.server`, no Flask/framework) blind-listening
+  survey app for the M4 sentiment-integrity gate (issue #57). `server.py` serves a small
+  single-page UI; `catalog.py` auto-discovers task sets by scanning `output/m4_tag_catalog/`,
+  `output/m4_tags/`, `output/m4t0_*`, `output/m4_boundary_check/` (never mixing clips from
+  different generation runs into one comparison) and cross-references `docs/guides/
+  tag_reference.md` (parsed by `tag_reference.py`) for what each tag is supposed to do and
+  what's already been confirmed by ear; `task_sets/*.json` holds the hand-curated sets (stress
+  homographs, final intonation, emotion-vs-emotion) that aren't simple directory scans. Clip
+  identity is hidden from the browser (opaque per-clip ids, revealed only after an answer is
+  submitted) and every answer is written to `output/sentiment_survey_results/` immediately via
+  atomic temp-file + `os.replace`, so an interrupted session is resumable and never corrupts the
+  results file. Run via `make sentiment-survey`; see `docs/guides/sentiment_survey_guide.md`.
 - `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
 
 Keep TTS and STT environments and processes isolated. Do not introduce a shared daemon or module that holds both models in memory.

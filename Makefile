@@ -1,4 +1,4 @@
-.PHONY: setup info download-models tts stt benchmark clean-output upload-gdrive download-gdrive
+.PHONY: setup info download-models tts stt benchmark clean-output upload-gdrive download-gdrive sentiment-survey
 
 setup:
 	./scripts/bootstrap.sh
@@ -27,3 +27,13 @@ download-gdrive:
 
 clean-output:
 	find output logs -type f ! -name .gitkeep -delete
+
+# Local blind-listening survey app for Higgs sentiment/tag verification (issue #57).
+# Stdlib-only (no model load, no GPU) -- safe to run while a benchmark or generation
+# job is using the GPU. Opens a browser tab; Ctrl+C stops the server.
+sentiment-survey:
+	@if [ -x .venv-tts/bin/python3 ]; then \
+		.venv-tts/bin/python3 src/sentiment_survey/server.py; \
+	else \
+		python3 src/sentiment_survey/server.py; \
+	fi

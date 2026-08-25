@@ -35,6 +35,7 @@ make benchmark        # TTS then STT, sequentially
 make upload-gdrive    # upload samples/, output/, and notebooks/ to Google Drive
 make download-gdrive FOLDER_ID=<id> # download results from Google Drive
 make clean-output
+make sentiment-survey # local blind-listening survey app (issue #57 sentiment gate)
 ```
 
 `make download-models` (`scripts/download_models.sh`) retries each model through a flaky
@@ -149,6 +150,7 @@ upstream references, and status: [`docs/research/mojo-max/m3-t4-blocked-results.
 
 - **Voice Cloning Guide & Reference Texts**: [`docs/guides/voice_cloning_guide.md`](docs/guides/voice_cloning_guide.md) — rules for recording clean 7–12s audio samples, phonetically balanced text templates, and voice profile export.
 - **Audiobook Production Guide**: [`docs/guides/audiobook_guide.md`](docs/guides/audiobook_guide.md) — the `[{"speaker": ..., "text": ...}]` screenplay JSON DSL, run through `src/audiobook.py --screenplay-file ...` (the same sentence-splitting/chunking/tag-reopening/resumable-manifest engine used for plain text, not a separate pipeline), incremental per-line regeneration via a speaker+text content hash, pause insertion, and chapter stitching. Multi-voice `speaker` is accepted and threaded through the manifest but **not wired to voice cloning yet** — every line still renders in the model's one default voice (see the guide's sec. 3a for why, including the RTF 7.73 vs. 6.56 cloning-is-slower measurement).
+- **Sentiment/Tag Blind-Listening Survey**: [`docs/guides/sentiment_survey_guide.md`](docs/guides/sentiment_survey_guide.md) — `make sentiment-survey` starts a local stdlib-only web app that plays clip pairs blind (tag identity hidden until you answer), records every answer to disk immediately, and is resumable across sessions. Auto-discovers task sets from `output/m4_tag_catalog/`, `output/m4_tags/`, `output/m4t0_*`, and `output/m4_boundary_check/`, prioritized: unheard sfx/env first, then metrics-disputed tags, then everything else. This is the tool the M4 sentiment-integrity gate (`docs/research/audiobook/m4-plan.md` §2/§3) runs on.
 
 ## Status
 
