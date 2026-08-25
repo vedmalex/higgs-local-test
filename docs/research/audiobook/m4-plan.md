@@ -388,15 +388,22 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 
 ### Lane 1 — optimization
 
-- [ ] **M4-T2. Measure the existing batching implementation at batch sizes 2 and 4.** This is a
-  measurement of code that already exists (`continuous_batching.py`), not new development. **Do
-  not test batch size 8**: ≈11.9 GB of resident weights on a 16 GB machine leaves too little
-  headroom for KV-cache growth at that size (§0.6's memory arithmetic) — state this as a known
-  constraint going in, not a surprise discovered via OOM. If batch sizes 2/4 hit memory pressure
-  anyway, a quantized KV-cache is the fallback enabler (it raises the batch ceiling; it does not
-  by itself deliver a speedup — see the rejected-levers table below).
+- [x] **M4-T2. Measure the existing batching implementation at batch sizes 2 and 4.** DONE —
+  measured, [`m4-batching-results.md`](m4-batching-results.md). This is a measurement of code that
+  already exists (`continuous_batching.py`), not new development. **The "do not test batch size 8"
+  guidance below turned out to be conservative for this benchmark's short-sentence material**: the
+  machine was freed up before this run and batch 8 was measured too, on the instruction to find the
+  actual memory ceiling rather than assume it; `peak_footprint` stayed flat (~11.7-11.9 GiB) across
+  1/2/4/8 with no upward trend, because these short segments' `BatchKVCache` growth is small next to
+  the ~11.4 GB weight footprint — the ceiling was NOT found within this range, and this result is
+  explicitly caveated in the results doc as untested for paragraph-length segments, where KV-cache
+  growth would be larger. If batch sizes 2/4 hit memory pressure anyway, a quantized KV-cache is the
+  fallback enabler (it raises the batch ceiling; it does not by itself deliver a speedup — see the
+  rejected-levers table below).
   *Done when:* wall-time-per-utterance at batch 2 and 4 is measured against the batch-1 baseline
-  and checked against the >=1.5x threshold (§2).
+  and checked against the >=1.5x threshold (§2). **Result: batch 2 = 1.14x (does not clear),
+  batch 4 = 1.91x (clears), batch 8 = 3.40x (clears, best measured config; aggregate RTF 1.14,
+  practical tier for a 10-hour book at ≈11.4 machine-hours).**
   *Files:* new measurement script under `docs/research/audiobook/`.
   *Devices:* M1.
   *Tier:* **sonnet**, size **S** (measurement, not development).
