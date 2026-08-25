@@ -324,7 +324,8 @@ button.secondary:hover { border-color: var(--accent); }
   margin-right: 1rem;
   font-size: 0.95rem;
 }
-.cast-field input[type="text"] {
+.cast-field input[type="text"],
+.cast-field select {
   width: 100%;
   font: inherit;
   padding: 0.5rem 0.7rem;
@@ -334,6 +335,24 @@ button.secondary:hover { border-color: var(--accent); }
   color: var(--fg);
   margin-top: 0.3rem;
 }
+.cast-role-new { margin-top: 0.4rem; }
+.cast-role-chosen { display: block; margin: 0.5rem 0; }
+.cast-roles-panel {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.7rem;
+  background: var(--card-bg);
+  border-radius: 8px;
+}
+.cast-roles-panel ul { margin: 0.3rem 0; padding-left: 1.1rem; }
+.cast-roles-panel .link-btn { font-size: 0.82rem; padding: 0; }
+.cast-role-create {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.cast-role-create input[type="text"] { flex: 1; margin-top: 0; }
 
 .note-field {
   margin-top: 1rem;

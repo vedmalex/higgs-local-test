@@ -291,6 +291,151 @@ def atomic_write(path: Path, content: str) -> None:
     os.replace(tmp, path)
 
 
+# --------------------------------------------------------------------------- #
+# Voice-casting roles (issue #57/#118 follow-up, owner: "давай для выбора
+# роли будем давать возможность создавать новый и выбирать из существующих,
+# пусть будет несколько голосов на роль"). A role is a first-class entity
+# independent of any answer, so it can exist with zero candidates -- the
+# owner explicitly wants to see "куда ещё можно добавить голос", including
+# roles nobody has been assigned to yet. That requirement is exactly why
+# roles cannot live only inside answers.jsonl (a role with no candidate
+# record would be invisible), so they get their own small file next to
+# answers.jsonl in the same results directory: same lifecycle, same
+# gitignore treatment, same atomic-write discipline as everything else this
+# app writes, and it lives with the data it describes rather than in
+# source-controlled task_sets/ (roles are the owner's runtime casting
+# decisions, not an authored task definition).
+# --------------------------------------------------------------------------- #
+
+def roles_path(set_id: str) -> Path:
+    d = RESULTS_DIR / set_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "roles.json"
+
+
+def _load_roles_raw(set_id: str) -> list[dict]:
+    path = roles_path(set_id)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return data.get("roles", []) if isinstance(data, dict) else []
+
+
+def _save_roles_raw(set_id: str, roles: list[dict]) -> None:
+    atomic_write(roles_path(set_id), json.dumps({"roles": roles}, ensure_ascii=False, indent=2) + "\n")
+
+
+def _record_role(rec: dict) -> str | None:
+    """The role a voice_casting answer record belongs to, honestly bridging
+    old and new schema. Records written before this change have no `role`
+    key at all -- only `name` + `selected` (issue #57/#118, PR #134/#137).
+    A `selected` legacy record's `name` IS its role under the new model
+    (the owner's one named voice, "чтец" on voice-cast-02, becomes the
+    first candidate of a role also named "чтец") -- this fallback means
+    that migration needs no write to answers.jsonl at all, old records are
+    just read differently, nothing about them changes on disk."""
+    role = rec.get("role")
+    if role:
+        return role
+    if rec.get("selected") and rec.get("name"):
+        return rec["name"]
+    return None
+
+
+def _ensure_roles_seeded(set_id: str) -> list[dict]:
+    """Bootstrap roles.json the first time it's needed for a set, from any
+    legacy named+selected answers already on disk (see _record_role()) --
+    so "чтец" (the owner's one pre-existing named voice) becomes a real,
+    listed role without anyone re-entering it, the moment roles are first
+    read after this upgrade. A no-op once roles.json exists."""
+    if roles_path(set_id).exists():
+        return _load_roles_raw(set_id)
+    seen: dict[str, dict] = {}
+    for rec in load_answers(set_id).values():
+        role = _record_role(rec)
+        if role and role not in seen:
+            seen[role] = {
+                "name": role,
+                "created_at": rec.get("timestamp") or "",
+                "source": "legacy-migrated",
+            }
+    roles = list(seen.values())
+    if roles:
+        # Only write roles.json into a set's results directory when there's
+        # something to seed -- _handle_summary() calls roles_with_counts()
+        # for every set (voice_casting or not), and an empty roles.json in
+        # every other set's output/ directory would just be clutter with no
+        # role to protect from being "invisible" (the reason roles.json
+        # exists at all -- see load_roles()'s docstring).
+        _save_roles_raw(set_id, roles)
+    return roles
+
+
+def load_roles(set_id: str) -> list[dict]:
+    """Every role that currently exists for this set (including ones with
+    zero candidates), seeded/migrated on first access. Each entry:
+    {"name", "created_at", "source"}."""
+    return _ensure_roles_seeded(set_id)
+
+
+def create_role(set_id: str, name: str, source: str = "manual") -> list[dict]:
+    """Register a role if it doesn't already exist (by name, case-sensitive
+    -- role names are short, owner-typed, meant to be read, not slugified).
+    Idempotent: creating an already-existing role is a no-op, not an error,
+    so assigning a candidate to a brand-new role name can call this
+    unconditionally without a separate existence check racing the caller."""
+    roles = load_roles(set_id)
+    if any(r["name"] == name for r in roles):
+        return roles
+    roles = roles + [{"name": name, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "source": source}]
+    _save_roles_raw(set_id, roles)
+    return roles
+
+
+def roles_with_counts(set_id: str) -> list[dict]:
+    """load_roles() plus, per role, how many current (latest-per-task)
+    candidates it has and whether one has been marked the chosen final
+    voice -- this is the view the owner asked for: "видно, куда ещё можно
+    добавить голос", including roles with candidate_count == 0."""
+    roles = load_roles(set_id)
+    answers = load_answers(set_id)
+    by_role: dict[str, list[dict]] = {r["name"]: [] for r in roles}
+    for rec in answers.values():
+        role = _record_role(rec)
+        if role is None:
+            continue
+        by_role.setdefault(role, [])
+        by_role[role].append(rec)
+    out = []
+    for r in roles:
+        candidates = by_role.get(r["name"], [])
+        chosen = next((c for c in candidates if c.get("role_chosen")), None)
+        out.append({
+            "name": r["name"],
+            "created_at": r.get("created_at", ""),
+            "source": r.get("source", "manual"),
+            "candidate_count": len(candidates),
+            "candidate_task_ids": [c["task_id"] for c in candidates],
+            "chosen_task_id": chosen["task_id"] if chosen else None,
+        })
+    # A role referenced by an answer but somehow missing from roles.json
+    # (shouldn't happen via the API, but defensive against hand-edited
+    # files) still gets shown rather than silently dropping candidates.
+    for role_name, candidates in by_role.items():
+        if role_name not in {r["name"] for r in roles} and candidates:
+            chosen = next((c for c in candidates if c.get("role_chosen")), None)
+            out.append({
+                "name": role_name, "created_at": "", "source": "orphaned",
+                "candidate_count": len(candidates),
+                "candidate_task_ids": [c["task_id"] for c in candidates],
+                "chosen_task_id": chosen["task_id"] if chosen else None,
+            })
+    return out
+
+
 def _answer_value(rec: dict) -> tuple:
     """The part of a record that constitutes "the actual decision" — used to
     tell a genuine correction (owner picked a different option) apart from a
@@ -307,7 +452,7 @@ def _answer_value(rec: dict) -> tuple:
     history, not gate bookkeeping."""
     if rec.get("type") == "voice_casting":
         return (rec.get("gender"), rec.get("age_bucket"), rec.get("selected"), rec.get("name"),
-                rec.get("pleasantness"), rec.get("room_feel"))
+                rec.get("pleasantness"), rec.get("room_feel"), rec.get("role"), rec.get("role_chosen"))
     return (rec.get("answer_label"), rec.get("answer_role"))
 
 
@@ -689,6 +834,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/sets/") and path.endswith("/tasks"):
                 set_id = path[len("/api/sets/"):-len("/tasks")]
                 self._handle_task_list(set_id)
+            elif path.startswith("/api/sets/") and path.endswith("/roles"):
+                set_id = path[len("/api/sets/"):-len("/roles")]
+                self._handle_roles_list(set_id)
             elif "/task/" in path and path.startswith("/api/sets/"):
                 rest = path[len("/api/sets/"):]
                 set_id, task_id = rest.split("/task/", 1)
@@ -710,6 +858,9 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/sets/") and path.endswith("/answer"):
                 set_id = path[len("/api/sets/"):-len("/answer")]
                 self._handle_answer(set_id)
+            elif path.startswith("/api/sets/") and path.endswith("/roles"):
+                set_id = path[len("/api/sets/"):-len("/roles")]
+                self._handle_roles_create(set_id)
             else:
                 self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
         except BrokenPipeError:
@@ -778,6 +929,7 @@ class Handler(BaseHTTPRequestHandler):
                 "has_note": bool((rec.get("note") or "").strip()) if rec else False,
                 "selected": bool(rec.get("selected")) if rec else False,
                 "name": rec.get("name") if rec else None,
+                "role": _record_role(rec) if rec else None,
             })
         self._send_json({
             "set_id": set_id,
@@ -786,6 +938,44 @@ class Handler(BaseHTTPRequestHandler):
             "answered": len(answers),
             "tasks": items,
         })
+
+    def _handle_roles_list(self, set_id: str):
+        """Issue #57/#118 follow-up: "видно, куда ещё можно добавить
+        голос" -- every role, including ones with zero candidates so far,
+        plus how many candidates each has and whether one is marked chosen.
+        Also returns `suggested`: role names derived from this chapter's
+        own manifest (catalog.suggest_roles_from_chapter114e0()) that
+        aren't already real roles -- one-click "create from suggestion",
+        never auto-created without the owner acting on it."""
+        ts = TASK_SETS.get(set_id)
+        if ts is None:
+            self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown set {set_id!r}")
+            return
+        roles = roles_with_counts(set_id)
+        existing_names = {r["name"] for r in roles}
+        suggested = []
+        if set_id == "voice_casting_chapter114e0":
+            suggested = [s for s in catalog.suggest_roles_from_chapter114e0() if s not in existing_names]
+        self._send_json({"set_id": set_id, "roles": roles, "suggested": suggested})
+
+    def _handle_roles_create(self, set_id: str):
+        ts = TASK_SETS.get(set_id)
+        if ts is None:
+            self._send_error_json(HTTPStatus.NOT_FOUND, f"unknown set {set_id!r}")
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid JSON body")
+            return
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "role name must not be empty")
+            return
+        roles = create_role(set_id, name)
+        self._send_json({"ok": True, "roles": roles_with_counts(set_id)})
 
     def _handle_task_detail(self, set_id: str, task_id: str):
         """One task by id (not just 'the next unanswered one'), so the
@@ -910,19 +1100,29 @@ class Handler(BaseHTTPRequestHandler):
         """
         gender = body.get("gender")
         age_bucket = body.get("age_bucket")
-        name = str(body.get("name") or "").strip()
-        # A typed name IS the "keep this voice" decision -- issue #57/#118
-        # follow-up: only 1 of 70 segments got a name under the old
-        # checkbox-then-name-field flow, and the most likely reason is that
-        # the checkbox was an extra, easy-to-skip step. One action now:
-        # type a name to select, clear it to un-select. `selected` stays in
-        # the record (downstream consumers -- docs/guides/audiobook_guide.md
-        # §2b -- already filter on it) but is derived, not a separate input.
-        selected = bool(name)
+        # Role, not a per-segment name (issue #57/#118 follow-up: "роль —
+        # самостоятельная сущность, а голоса к ней кандидаты, и кандидатов
+        # может быть несколько"). Empty = this segment isn't a candidate for
+        # anything right now. A non-empty role that doesn't exist yet in
+        # roles.json is created on the spot -- typing a brand-new role name
+        # while assigning IS "create new" from the owner's own phrasing
+        # ("создавать новый и выбирать из существующих"), no separate
+        # two-step flow needed for that common case (an explicit empty-role
+        # creation endpoint still exists for "make the role first, find a
+        # candidate later" -- see _handle_roles_create()).
+        role = str(body.get("role") or "").strip()
+        role_chosen = bool(body.get("role_chosen")) and bool(role)
+        # `name`/`selected` kept populated (role duplicated into `name`) so
+        # every existing downstream reader of the old schema (cast_selected_total,
+        # docs/guides/audiobook_guide.md §2b's illustrative bridge script)
+        # keeps working unchanged -- not a second incompatible mechanism,
+        # the same one field under an additional, more accurate name.
+        selected = bool(role)
+        name = role if selected else None
         # Both optional (issue #57/#118 follow-up) -- see VALID_PLEASANTNESS/
         # VALID_ROOM_FEEL above for why. Absent/null is a valid "not
         # answered yet", not an error, so adding one to an already-answered
-        # segment never requires re-entering gender/age/name too.
+        # segment never requires re-entering gender/age/role too.
         pleasantness = body.get("pleasantness")
         room_feel = body.get("room_feel")
 
@@ -939,7 +1139,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid room_feel {room_feel!r}")
             return
 
-        answer_label = f"{gender}/{age_bucket}" + (f" → «{name}»" if selected else "")
+        if role:
+            create_role(set_id, role)  # idempotent -- see create_role()
+
+        answer_label = f"{gender}/{age_bucket}" + (f" → роль «{role}»" if role else "")
+        if role_chosen:
+            answer_label += " (выбран)"
         if pleasantness is not None:
             answer_label += f", приятность {pleasantness}"
         if room_feel is not None:
@@ -954,8 +1159,10 @@ class Handler(BaseHTTPRequestHandler):
             "answer_role": None,
             "gender": gender,
             "age_bucket": age_bucket,
+            "role": role or None,
+            "role_chosen": role_chosen,
             "selected": selected,
-            "name": name if selected else None,
+            "name": name,
             "pleasantness": pleasantness,
             "room_feel": room_feel,
             "measured_f0_hz": task.get("measured_f0_hz"),
@@ -994,18 +1201,14 @@ class Handler(BaseHTTPRequestHandler):
         gradeable = [r for r in answers.values() if r.get("type") != "voice_casting"]
         cast = [r for r in answers.values() if r.get("type") == "voice_casting"]
         cast_selected = [r for r in cast if r.get("selected")]
-        # Roster of already-named voices (issue #57/#118 follow-up) -- shown
-        # in the UI next to the naming field so naming isn't done into a
-        # void; sorted by task_id for a stable order.
-        cast_roster = sorted(
-            (
-                {"task_id": r["task_id"], "name": r["name"], "gender": r.get("gender"),
-                 "age_bucket": r.get("age_bucket")}
-                for r in cast_selected
-            ),
-            key=lambda x: x["task_id"],
-        )
         pleasantness_rated = [r for r in cast if r.get("pleasantness") not in (None, "unsure")]
+        # Roles (issue #57/#118 follow-up, "роль — самостоятельная
+        # сущность"): every role including ones with zero candidates, so
+        # the owner can see where a voice is still needed, not just what's
+        # already cast. See roles_with_counts()/load_roles().
+        roles = roles_with_counts(set_id)
+        roles_with_candidates = [r for r in roles if r["candidate_count"] > 0]
+        roles_with_chosen = [r for r in roles if r["chosen_task_id"]]
 
         fresh = [r for r in gradeable if not r.get("skipped_prior")]
         skipped = sum(1 for r in gradeable if r.get("skipped_prior"))
@@ -1054,7 +1257,10 @@ class Handler(BaseHTTPRequestHandler):
             # candidate dictor. Not part of the gate above.
             "cast_total": len(cast),
             "cast_selected_total": len(cast_selected),
-            "cast_roster": cast_roster,
+            "roles_total": len(roles),
+            "roles_with_candidates_total": len(roles_with_candidates),
+            "roles_with_chosen_total": len(roles_with_chosen),
+            "roles": roles,
             "cast_pleasantness_rated_total": len(pleasantness_rated),
             "cast_pleasantness_mean": (
                 round(sum(int(r["pleasantness"]) for r in pleasantness_rated) / len(pleasantness_rated), 2)

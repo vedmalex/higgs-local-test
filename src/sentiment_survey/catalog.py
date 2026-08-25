@@ -441,6 +441,31 @@ def build_emotion_matched_text_set() -> dict | None:
     }
 
 
+# Issue #57/#118 follow-up ("роль — самостоятельная сущность"): a role
+# needs a meaningful name, not a segment number. This is the one place
+# where a suggestion is derived from data instead of typed by hand -- the
+# manifest's own `speaker` field (structured, produced by the DSL/
+# screenplay pipeline, issue #114), never free-text mining of the segment
+# prose itself (fragile, and not attempted here). chapter-114-e0 is
+# currently single-speaker narration end to end, so today this yields
+# exactly one suggestion; a future multi-speaker chapter's distinct
+# `speaker` values will flow through the same path without code changes.
+_SPEAKER_ROLE_LABELS = {"narrator": "Рассказчик"}
+
+
+def suggest_roles_from_chapter114e0() -> list[str]:
+    manifest_path = REPO_ROOT / "output" / "chapter-114-e0" / "manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    speakers = {s.get("speaker") for s in manifest.get("segments", []) if s.get("speaker")}
+    labels = sorted({_SPEAKER_ROLE_LABELS.get(s, s) for s in speakers})
+    return labels
+
+
 def build_voice_casting_set() -> dict | None:
     """output/chapter-114-e0/manifest.json — issue #57/#118 follow-up: Higgs
     pins no voice/seed across generations, so each of this chapter's 70

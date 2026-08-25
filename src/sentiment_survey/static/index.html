@@ -83,10 +83,19 @@
               <label><input type="radio" name="vc-room" value="noticeable"> Заметно комнаты / гулко</label>
               <label><input type="radio" name="vc-room" value="unsure"> Не уверен(а)</label>
             </fieldset>
-            <div id="vc-name-field" class="cast-field">
-              <label for="vc-name">Имя диктора (необязательно — заполните, чтобы отобрать голос для книги):</label>
-              <input type="text" id="vc-name" placeholder="например: narrator, krishna, parikshit">
-              <p id="vc-roster" class="cast-roster"></p>
+            <div id="vc-role-field" class="cast-field">
+              <label for="vc-role-select">Роль (необязательно — этот сегмент как кандидат в дикторы роли):</label>
+              <select id="vc-role-select">
+                <option value="">— не назначено —</option>
+                <option value="__new__">+ Новая роль…</option>
+              </select>
+              <input type="text" id="vc-role-new" class="cast-role-new" placeholder="Название роли, например: рассказчик, мудрецы, царь Парикшит" hidden>
+              <label class="cast-select cast-role-chosen"><input type="checkbox" id="vc-role-chosen"> Выбран как основной голос для этой роли</label>
+              <div id="vc-roles-panel" class="cast-roles-panel"></div>
+              <div class="cast-role-create">
+                <input type="text" id="vc-new-empty-role" placeholder="Название новой (пока пустой) роли">
+                <button id="vc-create-role-btn" class="secondary" type="button">Создать роль</button>
+              </div>
             </div>
           </div>
 

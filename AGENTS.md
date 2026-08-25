@@ -66,17 +66,24 @@ GitHub Issues are the canonical surface for task state and development history. 
   and degrades to "no pitch analysis" rather than crashing when numpy is absent, keeping the rest
   of the app stdlib-only. A `voice_casting_chapter114e0` set (issue #118) plays each of
   `output/chapter-114-e0/`'s 70 segments (each read by an effectively-random voice, since Higgs
-  pins no seed/reference across generations) and lets the owner tag gender/rough age/name and
-  mark a segment as a kept dictor candidate — deliberately NOT blind (nothing to hide) and kept
-  out of every blind-gate statistic; its `answers.jsonl` IS the casting result
-  `docs/guides/audiobook_guide.md` §2a reads to call `register_voice()` (a separate, deliberately
-  manual, model-loading step this app does not perform). `m4_prosody_metrics.py` (and `pitch.py`'s
-  cache) also measures spectral centroid/tilt, 5-8kHz sibilance ratio, sub-300Hz proximity ratio,
-  and a reverberation-decay proxy per clip, shown alongside gender/age/an optional 5-step
-  pleasantness rating (the one thing worth asking a human, per the owner) and an optional room-feel
-  question (kept human on purpose, but always shown next to the measured decay number). All new
-  casting fields are optional so extending the schema never invalidates or requires redoing the
-  70-segment pass already recorded. Run via `make sentiment-survey`; see
+  pins no seed/reference across generations) and lets the owner tag gender/rough age/an optional
+  5-step pleasantness rating — deliberately NOT blind (nothing to hide) and kept out of every
+  blind-gate statistic. Casting is role-centric: a role (`output/sentiment_survey_results/
+  voice_casting_chapter114e0/roles.json`, atomic like `answers.jsonl`, kept separate so an empty
+  role — no candidate found yet — is still listable) is a named target an owner creates or picks
+  from a dropdown, and any number of segments can be assigned to it as candidates
+  (`server.roles_with_counts()`); `role_chosen` marks one candidate as the actual pick for
+  `docs/guides/audiobook_guide.md` §2a/§2b's `register_voice()` bridge (a separate, deliberately
+  manual, model-loading step this app does not perform) — a role with unchosen candidates isn't
+  a ready reference yet. The app's one pre-existing named voice ("чтец") is read as its own role
+  via a fallback (`server._record_role()`) with no answers.jsonl rewrite. `m4_prosody_metrics.py`
+  (and `pitch.py`'s cache) also measures spectral centroid/tilt, 5-8kHz sibilance ratio, sub-300Hz
+  proximity ratio, and a reverberation-decay proxy per clip, shown alongside the pleasantness
+  rating and an optional room-feel question (kept human on purpose, but always shown next to the
+  measured decay number). All casting fields are optional so extending the schema never
+  invalidates or requires redoing the 70-segment pass already recorded, and returning to an
+  already-cast segment shows the same always-editable form (no "Исправить ответ" gate, since
+  there's no blindness to protect there). Run via `make sentiment-survey`; see
   `docs/guides/sentiment_survey_guide.md`.
 - `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
 - `scripts/model_cache_lib.py` / `scripts/model_drive_sync.py`: the local-cache-to-Drive half of model sync (the reverse of the notebook above, which only ever writes Drive from the internet). `model_cache_lib.py` holds the one HF-cache tar-packing recipe (symlink-preserving); `model_drive_sync.py reconcile` diffs local cache vs Drive vs `model_catalog.json` (also flags anything on disk but missing from the catalog entirely), `plan` previews an upload run's size with nothing sent, `upload --model <name>` packs and pushes one entry (size-compared against Drive first, never overwrites a differing archive without `--force`), and `refresh-catalog` re-stamps `status`/`notes`/`verified` from what `reconcile` observed.
