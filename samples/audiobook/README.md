@@ -1,0 +1,115 @@
+# Audiobook fixtures (issue #114)
+
+Reusable text fixtures for `src/audiobook.py` full-chapter runs, and a draft of the
+input contract for the future audiobook-preparation skill (issue #114, stage A). Kept
+long-term for documentation and skill development, not only for the Э0 measurement run
+that first produced them — commit the text, never the generated audio (gitignored).
+
+## Layout
+
+```
+raw/                 verbatim copies of the source markdown, byte-for-byte
+  sb-1-16.md
+  sb-1-19.md
+  sb-1-1-1.md
+prepared/             output of prepare.py -- ready to feed to src/audiobook.py
+  sb-1-16.txt
+  sb-1-19.txt
+  sb-1-1-1.txt                    narration text only (Перевод + Комментарий)
+  sb-1-1-1.verse.txt              ## Текст block, diacritics KEPT (pronunciation experiment)
+  sb-1-1-1.verse-plain.txt        same verse, diacritics stripped (A/B comparison)
+  diacritics-experiment-ru.txt    both verse forms + a commentary sentence, with labels
+  chapter-e0-narration.txt        sb-1-19.txt + sb-1-1-1.txt concatenated -- the actual
+                                   Э0 full-chapter fixture (4214 words, ~30 min of speech)
+prepare.py            the extraction script -- raw/ -> prepared/, mechanical, re-runnable
+README.md             this file
+```
+
+## Provenance
+
+| Prepared from | Source path | Copied | `contentHash` (source YAML) | `title` (source YAML) |
+|---|---|---|---|---|
+| `raw/sb-1-16.md` | `/Users/vedmalex/work/BhaktiVaibhava/ШБ/Песнь1/16.md` | 2026-08-25 | `5e6d16a4a78424bd79bcba51feb4501d20ae77bcbe537c2d710824651a0b27e4` | Шримад-Бхагаватам: Песнь Первая: ГЛАВА ШЕСТНАДЦАТАЯ: Как Парикшит встретил век Кали |
+| `raw/sb-1-19.md` | `/Users/vedmalex/work/BhaktiVaibhava/ШБ/Песнь1/19.md` | 2026-08-25 | `3117c10fe002547330db44590d481b418e3cd050158065d562761c8ad8795399` | Шримад-Бхагаватам: Песнь Первая: ГЛАВА ДЕВЯТНАДЦАТАЯ: Появление Шукадевы Госвами |
+| `raw/sb-1-1-1.md` | `/Users/vedmalex/work/BhaktiVaibhava/ШБ/Песнь1/01/01.01.01.md` | 2026-08-25 | `1bd117424800a090283ff89b771f562289291921d8cee28cdca610f9ddd6d787` | Шримад-бхагаватам 1.1.1 |
+
+The `contentHash` lets a future reader confirm whether the BhaktiVaibhava source has
+since changed; it is the source repo's own hash, not computed here.
+
+## What each fixture is for (so nobody has to guess later)
+
+- **`sb-1-16.txt` / `sb-1-19.txt`** — dialogue-narrative chapters with explicit speaker
+  labels (`Сута Госвами сказал:`, `Шаунака Риши спросил:`, `Дхарма ... спросил:`,
+  `Мудрецы сказали:`, `Царь сказал:`). Material for speech-attribution testing and a
+  future multi-voice narration pass; only `sb-1-19.txt` is used in the Э0 chapter run
+  (both together would run ~50 min, longer than needed once the verse-commentary
+  material — see below — was added; `sb-1-16.txt` is kept as an equally valid,
+  currently-unused alternative).
+- **`sb-1-1-1.txt`** — dialogue-free prose (a verse commentary), the material the
+  project owner asked for specifically to judge intonation, breath, and paragraph
+  rhythm without any speaker-switching. This one source file is also the most complete
+  example of the raw format: it contains all four content types a chapter can have,
+  including the two kinds that must NOT be narrated (word-by-word gloss, verse links).
+- **`sb-1-1-1.verse.txt`** — the `## Текст` Sanskrit verse, Cyrillic transliteration
+  with its native combining diacritics kept intentionally. Not narration prose; a
+  dedicated pronunciation/legibility experiment (does the model read it at all, does it
+  vocalize the diacritic marks, does the diacritic change how a Sanskrit word is
+  stressed).
+- **`sb-1-1-1.verse-plain.txt`** — the same verse with the transliteration's own
+  diacritics mechanically stripped (see `prepare.py::strip_sanskrit_diacritics`), for a
+  direct A/B listening comparison against `sb-1-1-1.verse.txt`.
+- **`chapter-e0-narration.txt`** — the actual audio-generation input for the Э0
+  full-chapter run: `sb-1-19.txt` then `sb-1-1-1.txt`, in that order.
+
+## Input-contract draft (for the future audiobook-preparation skill, issue #114 stage A)
+
+This is what `prepare.py` actually does, stated as rules rather than narrated, because
+a skill needs a contract it can be tested against, not a description of one run.
+
+**Always dropped:**
+- The YAML frontmatter block between the leading `---` markers (`telegraphUrl`,
+  `accessToken`, `contentHash`, `publishedAt`, ...).
+- The `## Навигация` section (bare links to sibling chapters/sections).
+- The `## Пословный перевод` section (word-by-word gloss) — never narrated in a real
+  audiobook.
+- Every verse-anchor markdown link, e.g. `[1](19/01.19.01.md)` or
+  `[9-10](16/01.16.09-10.md)` — removed as one unit (visible number AND `.md` target).
+  Left in place, the TTS model reads the file path aloud.
+- A same-page footnote link, e.g. `[(Б.-г., 4.7),1](#)`.
+- Markdown emphasis markers `**bold**` / `*italic*` — marker only, words kept.
+- The `***` horizontal-rule marker.
+
+**Always kept, as plain narration text:**
+- Speaker labels (`Сута Госвами сказал:`, `Мудрецы сказали:`) — this project stage does
+  not build a screenplay/speaker structure, and a narrator reads these aloud too.
+- Editorial bracketed asides (`[Царь Парикшит думал:]`, `[Ганга, у которой постился
+  царь]`) — brackets stripped, inner words kept, so nothing sounds like a stage
+  direction.
+- Sanskrit diacritics inside narration prose (`## Перевод`, `## Комментарий`) — native
+  transliteration signal, not an added mark; stripping it is a separate, explicit,
+  opt-in experiment, never the default for narration text.
+- Paragraph order exactly as in the source.
+
+**Verification, enforced automatically by `prepare.py`:** the prepared output must
+contain none of `](`, literal `.md`, `[`, `]`, `*`, and no line may start with `#`.
+
+## Diacritics vs. stress marks — a real ambiguity, not resolved here
+
+This corpus's Sanskrit transliteration reuses **U+0301 COMBINING ACUTE ACCENT** for
+`ш́` (palatalized sibilant), the *same code point* this project has previously discussed
+using for Russian stress marks. See
+`docs/research/audiobook/m4-full-chapter-results.md` for how this played out on the
+actual TTS run (whether the model vocalizes it, whether it collides with any future
+acute-based stress-mark pipeline). `prepare.py::strip_sanskrit_diacritics` documents
+this collision inline where it lists U+0301 among the marks it strips.
+
+## Regenerating
+
+```bash
+cd samples/audiobook
+python3 prepare.py raw/sb-1-16.md prepared/sb-1-16.txt --kind dialogue
+python3 prepare.py raw/sb-1-19.md prepared/sb-1-19.txt --kind dialogue
+python3 prepare.py raw/sb-1-1-1.md prepared/sb-1-1-1.txt --kind verse-commentary \
+    --emit-verse --emit-verse-plain
+cat prepared/sb-1-19.txt prepared/sb-1-1-1.txt > prepared/chapter-e0-narration.txt
+```
