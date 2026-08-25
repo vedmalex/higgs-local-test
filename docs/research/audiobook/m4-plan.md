@@ -1,9 +1,12 @@
 # M4 plan — audiobook production track (issue #57)
 
 Date: 2026-08-25. Milestone M4 of issue #57. **This is a planning document.** Except where a task
-is explicitly marked done below (M4-T1, with real numbers and a merged PR), nothing in this plan
-has been executed. Per repo policy (`AGENTS.md`) a box is ticked only after the thing has actually
-been RUN and its real output recorded in a results doc.
+is explicitly marked done below (M4-T1, S0, M4-M1), nothing in this plan has been executed. Per
+repo policy (`AGENTS.md`) a box is ticked only after the thing has actually been RUN and its real
+output recorded in a results doc. (M4-M1 is the one exception by construction: it is a
+judgement/write-up task with no run of its own — it is ticked because its deliverable,
+[`../mojo-max/m4-conclusion.md`](../mojo-max/m4-conclusion.md), exists and rests entirely on
+M4-T1's already-recorded measurement.)
 
 Prior milestones: [`../mojo-max/m0-results.md`](../mojo-max/m0-results.md) through
 [`../mojo-max/m3-plan.md`](../mojo-max/m3-plan.md) (Mojo/MAX vocoder porting — see §5 for how this
@@ -452,7 +455,8 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
 
 ## 5. Track M — Mojo/MAX closure
 
-- [ ] **M1. Close the Mojo/MAX track on a MEASURED basis.** Readiness criterion: "the
+- [x] **M1. Close the Mojo/MAX track on a MEASURED basis. DONE — written up 2026-08-25,
+  [`../mojo-max/m4-conclusion.md`](../mojo-max/m4-conclusion.md).** Readiness criterion: "the
   `codec.decode` share of wall time is measured and below 15%" — **satisfied**, per M4-T1: 1.78%
   (short) / 3.76% (long), both far under the 15% threshold declared in advance (§2). If this had
   come back >= 15%, the track would **not** close and the question would reopen — it did not.
