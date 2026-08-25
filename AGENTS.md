@@ -73,6 +73,7 @@ GitHub Issues are the canonical surface for task state and development history. 
   manual, model-loading step this app does not perform). Run via `make sentiment-survey`; see
   `docs/guides/sentiment_survey_guide.md`.
 - `scripts/gdrive_sync.py`: uploads/downloads `samples/`, `output/`, and `notebooks/` to/from Google Drive (`make upload-gdrive`, `make download-gdrive FOLDER_ID=<id>`). It authenticates via the local `gcloud` CLI (`gcloud auth print-access-token`, optionally scoped with `--account=<email>`) or an explicit `GDRIVE_ACCESS_TOKEN` env var — there is no separate `gdrive` binary in this project. An agent may use this existing `gcloud` authentication directly for Drive file operations (list/upload/download) without prompting the user to log in again, as long as a credentialed account is already present (`gcloud auth list`).
+- `scripts/model_cache_lib.py` / `scripts/model_drive_sync.py`: the local-cache-to-Drive half of model sync (the reverse of the notebook above, which only ever writes Drive from the internet). `model_cache_lib.py` holds the one HF-cache tar-packing recipe (symlink-preserving); `model_drive_sync.py reconcile` diffs local cache vs Drive vs `model_catalog.json` (also flags anything on disk but missing from the catalog entirely), `plan` previews an upload run's size with nothing sent, `upload --model <name>` packs and pushes one entry (size-compared against Drive first, never overwrites a differing archive without `--force`), and `refresh-catalog` re-stamps `status`/`notes`/`verified` from what `reconcile` observed.
 
 Keep TTS and STT environments and processes isolated. Do not introduce a shared daemon or module that holds both models in memory.
 
@@ -91,6 +92,7 @@ The local network is too slow/unstable for multi-gigabyte Hugging Face downloads
 1. Check `notebooks/model_catalog.json` and Drive first: `python3 scripts/gdrive_sync.py list --path higgs-benchmark/model-cache`. If it's already there, `tar -xf <name>.tar -C ~/.cache/huggingface/hub/` and stop.
 2. If it's missing from both, add an entry to `model_catalog.json` (`fetch_now: true`, repo_id pinned). A download over a few GB: tell the owner and get a go-ahead before adding the entry.
 3. Ask the owner to run `notebooks/model_prefetch_to_drive.ipynb` in Colab (never run it yourself). Then extract the resulting `.tar` locally.
+4. Reverse direction (a model already local but never uploaded): `python3 scripts/model_drive_sync.py reconcile` to see the gap, then `upload --model <name>` to pack and push it (never overwrites an existing Drive archive without `--force`). Get the owner's go-ahead before uploading anything beyond one small verification model — see `docs/guides/model_downloads_guide.md`.
 
 See `docs/guides/model_downloads_guide.md`.
 

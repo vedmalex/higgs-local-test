@@ -17,7 +17,7 @@
     "with `python3 scripts/gdrive_sync.py list --path higgs-benchmark/model-cache` and",
     "`ls ~/.cache/huggingface/hub/` before trusting them for a download decision."
   ],
-  "verified": "2026-08-25 via scripts/gdrive_sync.py list --path higgs-benchmark/model-cache and local hub cache listing",
+  "verified": "2026-08-25 via scripts/model_drive_sync.py reconcile",
   "models": [
     {
       "name": "higgs-tts-3-4b",
@@ -47,13 +47,16 @@
       "name": "whisper-large-v3-processor",
       "repo_id": "openai/whisper-large-v3",
       "revision": null,
-      "allow_patterns": ["*.json", "*.txt"],
+      "allow_patterns": [
+        "*.json",
+        "*.txt"
+      ],
       "role": "WhisperProcessor tokenizer/feature-extractor only (scripts/download_models.sh); the actual Whisper-derived encoder weights this project uses live inside higgs-audio-v3-stt, not here",
       "license": "MIT",
       "size_gb": 0.004,
       "status": "local+drive",
       "fetch_now": false,
-      "notes": "Do not switch this to a full snapshot_download() -- pulls ~24.7 GB of unused weight formats (see notebook cell 4)."
+      "notes": "Do not switch this to a full snapshot_download() -- pulls ~24.7 GB of unused weight formats (see notebook cell 4). On Drive as whisper-large-v3-processor.tar (4.23 MB)."
     },
     {
       "name": "qwen3-tts-0.6b-base",
