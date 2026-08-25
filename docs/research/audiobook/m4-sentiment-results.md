@@ -1,15 +1,18 @@
-# M4-T0 — Sentiment/style/prosody tag baseline: objective evidence, verdict pending on the owner's ear
+# M4-T0 — Sentiment/style/prosody tag baseline: objective evidence + owner verdict (PASSED)
 
 Date: 2026-08-25. Refs #57. Hardware: Apple M1, 16 GB unified memory, macOS, native arm64,
 `.venv-tts` (MLX-Audio). Blocking gate per
 [`m4-plan.md`](m4-plan.md) §3, M4-T0: "can sadness and elation be told apart"; everything in M4
 that assumes sentiment tags actually work (T4, T6, Lane 2) is contingent on this passing.
+**Update, same date: the owner has now given the blind-listening verdict this gate was waiting
+on — see §6. Emotions are distinguishable and `sadness` genuinely sounds sad (gate PASSED on
+substance); `style:whispering` is not usable as whispering (see §6b); F0 median is flagged as an
+unreliable proxy for this checkpoint (see §6c).**
 
-This is not that final verdict. Per the task's own framing, "sounds like sadness" is a
-judgment call that belongs to the project owner, not to an agent. What follows is the objective
-material for that judgment: exact tags used (pulled from the real checkpoint's `tokenizer.json`,
-not typed from memory), the generated clips, an STT check for the literal-tag-readout failure
-mode already on record in `README.md:245`, and prosodic measurements.
+Sections 1-5 below are the objective material that was prepared *for* that judgment: exact tags
+used (pulled from the real checkpoint's `tokenizer.json`, not typed from memory), the generated
+clips, an STT check for the literal-tag-readout failure mode already on record in
+`README.md:245`, and prosodic measurements. §6 records the owner's actual verdict.
 
 ## 0. Tags used (verified against the real checkpoint)
 
@@ -130,7 +133,10 @@ Expected if the tags work: sadness lower/narrower F0 and slower than elation.
 
 **Read**: two of four signals (F0 spread, pausing) point the expected way; the tempo gap is
 small; and the F0 median comparison is internally inconsistent (sadness *above* the neutral
-baseline, not below it). This is a mixed result, not a clean pass.
+baseline, not below it). This is a mixed result, not a clean pass. **(Update, §6c: the owner's
+blind verdict says `sadness` genuinely sounds sad — the F0-median signal here is now understood as
+a misleading proxy for this checkpoint, not evidence the emotion failed. Trust the F0-spread and
+pause signals instead.)**
 
 ### whispering vs. neutral
 
@@ -207,7 +213,75 @@ All five clips (`output/m4t0_{neutral,sadness,elation,whispering,speed_slow}.wav
 `output/`-gitignored, and not committed to this branch — only this report and the small analysis
 script are.
 
-## 6. Files
+## 6. Owner's verdict (SUBJECTIVE — blind listening check, 2026-08-25)
+
+Per this project's own rule (§5 above, and `m4-plan.md` §3 M4-T0), the emotion/style call belongs
+to the project owner's ear, not to an agent. The owner listened to the clips referenced in §5
+("For the owner's listening check, compare first") and gave two verbatim verdicts, the second
+sharpening the first:
+
+> «по звуку, он различим, и эмоции тоже, только шепот звучит как тихий звук»
+
+> «сэднесс и эталон различимы, и грусть действительно грустная» (owner's own phrasing of the
+> tags by ear; "эталон" here is `elation`)
+
+This is a **subjective human judgment**, not a metric, and is recorded as such. Three separate
+claims are contained across the two statements, and none should be stretched past what was
+actually said:
+
+**(a) Emotions are distinguishable by ear, and `sadness` is not just different from `elation` —
+it sounds like actual sadness.** The first statement established the pair is distinguishable
+("он различим, и эмоции тоже"); the second is a stronger, more specific claim: "грусть
+действительно грустная" — sadness genuinely sounds sad, i.e. the tag produces the *semantically
+correct* emotion, not merely *a* different-sounding reading of the same sentence. This is a
+materially stronger pass of the M4-T0 gate (§3: "can sadness and elation be told apart blind?")
+than "distinguishable" alone would have been — the gate is **PASSED on substance, not just on
+form**. Note what the owner did *not* say: no claim of "excellent" or "production quality" was
+made, no claim about `elation` sounding correctly joyful (only that it is distinguishable from
+`sadness`). Do not upgrade this verdict beyond what was said. Only 4 of the 34 tags in the
+checkpoint (§0 above) have been checked at all; `sadness`/`elation`/`whispering`/`speed_slow` are
+the extent of the evidence — this verdict says nothing about the other 30 tags.
+
+**(b) `<|style:whispering|>` does not produce whispering — it produces quieter speech.** The
+owner's description ("шепот звучит как тихий звук" — "the whisper sounds like a quiet sound")
+matches the objective metrics in §3 exactly: energy dropped only ~3 dB relative to neutral
+(-31.9 dB vs. -28.8 dB) while the F0 median was **identical to the neutral baseline to one decimal
+place** (162.2 Hz for both). A real whisper is breathy, voiceless phonation with a destroyed
+fundamental — not simply quieter voiced speech. The unchanged F0 median, which §4's Limitations
+section had flagged as suspicious on its own (identical medians across two independent
+generations), is now explained by the owner's verdict rather than left as an open anomaly: the tag
+is not producing whisper phonation, so there is no reason for F0 to move at all — it is behaving
+like a volume control, not a phonation-mode switch.
+
+This is **not** "the tag does nothing." It changed energy (~3 dB) and pause structure (3 pauses /
+1060 ms vs. neutral's 2 / 460 ms, per §3) — something in generation responded to the tag. What it
+did not do is produce the whisper *quality* of speech the tag name promises. The precise claim:
+`<|style:whispering|>` is measurably distinguishable from neutral but is **not usable as a
+substitute for actual whispered narration** in this project's intended sense.
+
+**(c) Methodological finding: F0 median is a bad proxy for this model's Russian sentiment
+synthesis; F0 spread and pause duration are not.** §3 flagged as a mixed/inconsistent result that
+`sadness`'s F0 median (195.1 Hz) sits *above* the untagged neutral baseline (162.2 Hz) — read at
+the time as "the wrong direction for sadness." The owner's verdict that `sadness` genuinely sounds
+sad directly contradicts that reading: the emotion is correct on the ear, so the F0-median signal
+that looked wrong was **misleading, not the emotion**. The two metrics that *did* point the
+expected direction in §3 are corroborated by this verdict: F0 std/variability (sadness 41.7 Hz vs.
+elation's 94.3 Hz — flatter delivery for sadness) and pause duration (sadness 1260 ms total vs.
+elation's 580 ms — more/longer pauses for sadness). **Consequence for the M4-T4 quantization
+sentiment-integrity gate's objective proxy** (`m4-plan.md` §3, M4-T4: "F0 range, pause duration,
+speaking rate"): treat F0 median as unreliable for this checkpoint/language and do not use it as a
+pass/fail signal — it would have raised a false alarm here and could again. F0 spread (range/std)
+and pause duration are the proxies with owner-verdict-corroborated validity; prefer them.
+
+**Net effect on M4:** the blocking gate is cleared, and cleared on substance (sadness sounds
+genuinely sad, not merely different) — the optimization branch (batching → quantization, Lane 1 of
+`m4-plan.md` §1) is unblocked, since there is now a real, semantically-correct sentiment baseline
+worth preserving under quantization. Separately, `whispering` is downgraded from "one of the four
+probed tags" to "known not fit for purpose"; see `m4-plan.md`'s updated §0.4/M4-T5 for the
+practical consequence for audiobook tag choice and for the other 30 unverified tags, and §3/M4-T4
+for the F0-median proxy caution.
+
+## 7. Files
 
 - Clips: `output/m4t0_neutral.wav`, `output/m4t0_sadness.wav`, `output/m4t0_elation.wav`,
   `output/m4t0_whispering.wav`, `output/m4t0_speed_slow.wav` (gitignored, local only)

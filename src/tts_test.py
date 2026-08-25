@@ -11,6 +11,11 @@ from mlx_audio.audio_io import write as audio_write
 from mlx_audio.tts.utils import load
 
 MODEL_ID = "bosonai/higgs-tts-3-4b"
+# Per issue #57 M4-T0 (owner blind-listening verdict, docs/research/audiobook/m4-sentiment-
+# results.md §6): `emotion`/`prosody` tags below are confirmed audibly distinguishable.
+# `<|style:whispering|>` is confirmed NOT to produce whispering — it renders as quieter speech,
+# not breathy/voiceless phonation. Kept here only to exercise the control-tag code path, not as a
+# demonstrated-working whisper example.
 CONTROL_TEXT = """<|emotion:contentment|><|prosody:speed_slow|>Начнём спокойно и внимательно. <|prosody:pause|> Теперь голос становится выразительнее. <|emotion:enthusiasm|><|prosody:expressive_high|>Это важная и радостная проверка! <|prosody:long_pause|><|style:whispering|>А теперь тихое завершение."""
 
 
