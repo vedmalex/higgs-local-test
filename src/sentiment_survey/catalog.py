@@ -441,10 +441,89 @@ def build_emotion_matched_text_set() -> dict | None:
     }
 
 
+def build_voice_casting_set() -> dict | None:
+    """output/chapter-114-e0/manifest.json — issue #57/#118 follow-up: Higgs
+    pins no voice/seed across generations, so each of this chapter's 70
+    segments happens to be read by its own, effectively-random voice (median
+    F0 measured 83.9-203.4 Hz across them, see issue #118). What looked like
+    a defect turns out to be a ready-made pool of candidate narrators — this
+    builder turns it into a listen-and-tag task per segment: gender, rough
+    age bucket, and (if the owner wants to keep this voice) a name.
+
+    Deliberately NOT a blind task: `answer_kind == "voice_cast"` routes
+    build_task_view()/the frontend to a dedicated non-blind form (transcript
+    and measured pitch shown up front, no reveal step) and keeps this task
+    type out of every blind-gate statistic in _handle_summary() -- there is
+    no ground truth to hide or grade here, only a casting decision.
+
+    The resulting answers.jsonl IS the casting result the audiobook engine
+    needs (no second output file): each `selected: true` record's `name`,
+    `hidden.output_path` (a segment WAV under output/chapter-114-e0/), and
+    `hidden.segment_text` (a ready `ref_text`) are exactly the three inputs
+    `register_voice(name, wav_path, ref_text)` (docs/guides/
+    audiobook_guide.md) takes -- registration itself needs the model loaded
+    and stays a deliberate, separate step this builder does not perform.
+    """
+    manifest_path = REPO_ROOT / "output" / "chapter-114-e0" / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    segments = manifest.get("segments", [])
+    if not segments:
+        return None
+
+    tasks = []
+    for seg in sorted(segments, key=lambda s: s.get("index", 0)):
+        output_path = seg.get("output_path")
+        text = seg.get("text", "")
+        idx = seg.get("index")
+        if output_path is None or idx is None:
+            continue
+        wav_path = manifest_path.parent / output_path
+        if not wav_path.is_file():
+            continue
+        task = {
+            "id": f"voice-cast-{idx:02d}",
+            "type": "voice_casting",
+            "answer_kind": "voice_cast",
+            "question": (
+                f"Сегмент {idx + 1} из {len(segments)}. Определите на слух пол и примерный "
+                "возраст диктора этого фрагмента (грубо — молодой/средний/пожилой, не годы). "
+                "Если голос стоит оставить для книги — дайте ему имя."
+            ),
+            "clips": {"A": _rel(wav_path)},
+            "hidden": {
+                "segment_index": idx,
+                "output_path": output_path,
+                "segment_text": text,
+                "manifest_speaker": seg.get("speaker"),
+            },
+        }
+        tasks.append(task)
+    if not tasks:
+        return None
+    return {
+        "id": "voice_casting_chapter114e0",
+        "title": "Отбор голосов — output/chapter-114-e0/ (70 сегментов)",
+        "priority": 1,
+        "description": (
+            "output/chapter-114-e0/ — голос не закреплён между генерациями, поэтому 70 "
+            "сегментов этой главы прочитаны 70 разными (по сути случайными) голосами, от "
+            "низкого мужского до высокого женского (issue #118). Задача — отобрать и назвать "
+            "дикторов (рассказчик, персонажи) для последующего клонирования по эталонной "
+            "записи; не слепая проверка, отбор."
+        ),
+        "tasks": tasks,
+    }
+
+
 def build_all_dynamic_sets() -> list[dict]:
     sets = list(build_catalog_sets())
     for builder in (build_m4_tags_second_run_set, build_m4t0_set, build_boundary_check_set,
-                     build_emotion_matched_text_set):
+                     build_emotion_matched_text_set, build_voice_casting_set):
         doc = builder()
         if doc:
             sets.append(doc)

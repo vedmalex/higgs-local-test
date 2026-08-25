@@ -54,8 +54,14 @@ RESULTS_DIR = REPO_ROOT / "output" / "sentiment_survey_results"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8877
 
-VALID_ANSWER_KINDS = {"differ", "which", "which_matches_ref"}
-VALID_TYPES = {"pair_compare", "single_rating", "triple_compare"}
+VALID_ANSWER_KINDS = {"differ", "which", "which_matches_ref", "voice_cast"}
+VALID_TYPES = {"pair_compare", "single_rating", "triple_compare", "voice_casting"}
+
+# Voice casting (issue #57/#118 follow-up) is NOT a blind-listening task:
+# there is no ground truth to hide, so gender/age/transcript are shown
+# up front, and these answers must never enter the blind grading gate.
+VALID_GENDERS = {"male", "female", "unclear"}
+VALID_AGE_BUCKETS = {"young", "middle", "old", "unclear"}
 
 # Sentinel answer text for "I already know the verdict from a previous session
 # (docs/guides/tag_reference.md, m4-sentiment-results.md, ...) — don't make me
@@ -245,7 +251,16 @@ def _answer_value(rec: dict) -> tuple:
     same-answer resubmission (owner only added or edited a free-text note).
     Deliberately excludes `note`: writing down an observation about what was
     heard doesn't change what was answered, so it must not affect blindness
-    bookkeeping (issue #57 follow-up, "заметка слепоту не ломает")."""
+    bookkeeping (issue #57 follow-up, "заметка слепоту не ломает").
+
+    Voice-casting tasks (issue #57/#118 follow-up) have no answer_label/role
+    at all -- their decision lives in gender/age_bucket/selected/name, so
+    revision/correction bookkeeping compares those instead. This task type
+    is never blind to begin with (see build_task_view/_handle_answer), so
+    is_correction/answered_after_reveal here are just an honest revision
+    history, not gate bookkeeping."""
+    if rec.get("type") == "voice_casting":
+        return (rec.get("gender"), rec.get("age_bucket"), rec.get("selected"), rec.get("name"))
     return (rec.get("answer_label"), rec.get("answer_role"))
 
 
@@ -438,6 +453,16 @@ def build_task_view(ts: TaskSet, task: dict) -> dict:
         view["response_mode"] = "choose_clip"
         non_ref_labels = [s["label"] for s in slots if s["role"] != "REF"]
         view["options"] = non_ref_labels + ["Не могу сказать"]
+    elif answer_kind == "voice_cast":
+        # Voice casting (issue #57/#118 follow-up) is not blind: there is no
+        # tag/emotion to hide, so the transcript and measured pitch are
+        # shown up front, and the browser gets a dedicated form instead of
+        # an options list.
+        view["response_mode"] = "voice_cast"
+        view["options"] = []
+        view["transcript"] = task.get("hidden", {}).get("segment_text", "")
+        view["measured_f0_hz"] = task.get("measured_f0_hz")
+        return view  # no SKIP_LABEL / prior-verdict machinery applies here
     else:
         view["response_mode"] = "fixed_options"
         view["options"] = list(task.get("options", ["Да", "Нет", "Не уверен(а)"]))
@@ -637,12 +662,14 @@ class Handler(BaseHTTPRequestHandler):
                 "index": idx,
                 "id": task["id"],
                 "question": task["question"],
+                "type": task.get("type"),
                 "answered": rec is not None,
                 "is_correction": bool(rec.get("is_correction")) if rec else False,
                 "answered_after_reveal": bool(rec.get("answered_after_reveal")) if rec else False,
                 "matches_expected": rec.get("matches_expected") if rec else None,
                 "skipped_prior": bool(rec.get("skipped_prior")) if rec else False,
                 "has_note": bool((rec.get("note") or "").strip()) if rec else False,
+                "selected": bool(rec.get("selected")) if rec else False,
             })
         self._send_json({
             "set_id": set_id,
@@ -712,13 +739,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.BAD_REQUEST, "unknown or missing task_id")
             return
 
-        chosen_label = body.get("answer_label", "")
-        chosen_role = body.get("answer_role")  # only meaningful for choose_clip mode
         listen_ms = int(body.get("listen_ms", 0) or 0)
         # Free-text observation, optional. Never required to submit an
         # answer, and adding/editing it alone does not touch is_correction /
         # answered_after_reveal — see _answer_value()/append_answer().
         note = str(body.get("note") or "").strip()
+
+        if task.get("answer_kind") == "voice_cast":
+            self._handle_voice_cast_answer(set_id, ts, task, task_id, body, note, listen_ms)
+            return
+
+        chosen_label = body.get("answer_label", "")
+        chosen_role = body.get("answer_role")  # only meaningful for choose_clip mode
         skipped_prior = chosen_label == SKIP_LABEL
 
         if skipped_prior:
@@ -759,6 +791,62 @@ class Handler(BaseHTTPRequestHandler):
             "total": len(ts.tasks),
         })
 
+    def _handle_voice_cast_answer(self, set_id, ts, task, task_id, body, note, listen_ms):
+        """Voice casting (issue #57/#118 follow-up): not a blind-listening
+        answer at all -- gender/age/name/selected, no correct_answer, no
+        matches_expected, and (via _answer_value()) a correction here is
+        never mistaken for a broken-blindness event. Persisted through the
+        SAME append-only answers.jsonl/append_answer() machinery as every
+        other task -- this file *is* the casting result the engine can read
+        (see docs/guides/audiobook_guide.md, "Voice casting -> register_voice").
+        """
+        gender = body.get("gender")
+        age_bucket = body.get("age_bucket")
+        selected = bool(body.get("selected"))
+        name = str(body.get("name") or "").strip()
+
+        if gender not in VALID_GENDERS:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid gender {gender!r}")
+            return
+        if age_bucket not in VALID_AGE_BUCKETS:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, f"invalid age_bucket {age_bucket!r}")
+            return
+        if selected and not name:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "selected=true requires a non-empty name")
+            return
+
+        answer_label = f"{gender}/{age_bucket}" + (f" → «{name}»" if selected else "")
+        record = {
+            "task_id": task_id,
+            "set_id": set_id,
+            "type": task["type"],
+            "answer_kind": task.get("answer_kind"),
+            "question": task["question"],
+            "answer_label": answer_label,
+            "answer_role": None,
+            "gender": gender,
+            "age_bucket": age_bucket,
+            "selected": selected,
+            "name": name if selected else None,
+            "measured_f0_hz": task.get("measured_f0_hz"),
+            "note": note,
+            "listen_ms": listen_ms,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "hidden": task.get("hidden", {}),
+            "correct_answer": None,
+            "matches_expected": None,
+            "skipped_prior": False,
+            "pitch_warning": None,  # not a comparison task -- see pitch.py
+        }
+        answers = append_answer(set_id, record)
+        self._send_json({
+            "ok": True,
+            "reveal": None,  # nothing was ever hidden for this task type
+            "matches_expected": None,
+            "answered": len(answers),
+            "total": len(ts.tasks),
+        })
+
     def _handle_summary(self, set_id: str):
         ts = TASK_SETS.get(set_id)
         if ts is None:
@@ -766,8 +854,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         answers = load_answers(set_id)
         total = len(ts.tasks)
-        fresh = [r for r in answers.values() if not r.get("skipped_prior")]
-        skipped = len(answers) - len(fresh)
+        # Voice casting (issue #57/#118 follow-up) is not a blind-listening
+        # task -- it has no correct_answer/matches_expected to begin with,
+        # and a re-cast is never a "broken blindness" event (nothing was
+        # ever hidden). Keep it entirely out of the blind-gate accounting
+        # below rather than relying on every filter individually excluding
+        # it by accident.
+        gradeable = [r for r in answers.values() if r.get("type") != "voice_casting"]
+        cast = [r for r in answers.values() if r.get("type") == "voice_casting"]
+        cast_selected = [r for r in cast if r.get("selected")]
+
+        fresh = [r for r in gradeable if not r.get("skipped_prior")]
+        skipped = sum(1 for r in gradeable if r.get("skipped_prior"))
         # Corrections resubmitted after the first answer's reveal are no
         # longer blind (see append_answer's docstring) — the M4 gate must
         # count them separately, not silently fold them into the blind tally.
@@ -800,7 +898,13 @@ class Handler(BaseHTTPRequestHandler):
             "graded_correct": correct,
             "differ_pairs_total": len(differ_pairs),
             "differ_pairs_distinguished": differed,
-            "gate_threshold_note": "M4-план требует >= 8 слепых пар и провал при >6 неразличённых из 8 (docs/research/audiobook/m4-plan.md, §2). Ответы, данные после раскрытия меток (исправления) или на парах с несовпадающей высотой голоса, в эту статистику не входят.",
+            "gate_threshold_note": "M4-план требует >= 8 слепых пар и провал при >6 неразличённых из 8 (docs/research/audiobook/m4-plan.md, §2). Ответы, данные после раскрытия меток (исправления) или на парах с несовпадающей высотой голоса, в эту статистику не входят. Отбор голосов (voice_casting) в эту статистику не входит вовсе — это не слепая проверка.",
+            # Voice casting (issue #57/#118 follow-up): a separate, non-blind
+            # tally. cast_total counts every segment judged so far;
+            # cast_selected_total counts how many were actually named as a
+            # candidate dictor. Not part of the gate above.
+            "cast_total": len(cast),
+            "cast_selected_total": len(cast_selected),
             "answers": list(answers.values()),
         })
 

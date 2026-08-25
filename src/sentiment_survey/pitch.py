@@ -263,6 +263,12 @@ def annotate_pitch_warnings(docs: list[dict]) -> dict:
     one (see server.py's summary handler for how the mismatched bucket is
     kept separate from the graded/differ_pairs statistics).
 
+    Also stamps `measured_f0_hz` (a plain float or None, not a dict) on any
+    task with exactly one clip -- single-clip tasks (e.g. voice casting,
+    issue #57/#118 follow-up) aren't a comparison and get no pitch_warning,
+    but the same already-computed F0 is worth surfacing directly rather than
+    measuring it a second time elsewhere.
+
     Returns the threshold report (see build_threshold_report()) for
     logging/documentation.
     """
@@ -270,7 +276,7 @@ def annotate_pitch_warnings(docs: list[dict]) -> dict:
     seen = set()
     for doc in docs:
         for task in doc.get("tasks", []):
-            if task.get("type") not in _COMPARISON_TYPES:
+            if not task.get("clips"):
                 continue
             for rel in task.get("clips", {}).values():
                 abs_path = (REPO_ROOT / rel).resolve()
@@ -281,6 +287,13 @@ def annotate_pitch_warnings(docs: list[dict]) -> dict:
     index = build_f0_index(all_paths)
     report = build_threshold_report(list(index.values()))
     threshold = report["threshold_hz"]
+
+    for doc in docs:
+        for task in doc.get("tasks", []):
+            clips = task.get("clips", {})
+            if len(clips) == 1:
+                (only_path,) = clips.values()
+                task["measured_f0_hz"] = index.get(str((REPO_ROOT / only_path).resolve()))
 
     for doc in docs:
         for task in doc.get("tasks", []):

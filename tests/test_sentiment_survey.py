@@ -27,6 +27,7 @@ import server  # noqa: E402
 import pitch  # noqa: E402
 
 OUTPUT_PRESENT = (REPO_ROOT / "output" / "m4_tag_catalog" / "neutral_baseline.wav").is_file()
+CHAPTER114E0_PRESENT = (REPO_ROOT / "output" / "chapter-114-e0" / "manifest.json").is_file()
 
 try:
     import numpy  # noqa: F401
@@ -781,6 +782,154 @@ class TestPitchWarningSummaryIntegration(unittest.TestCase):
                       if r["task_id"] == self.task_id and not r.get("pitch_warning")
                       and r.get("correct_answer") is not None}
         self.assertEqual(graded_ids, set(), "a pitch-mismatched task must not count toward graded_total")
+
+
+class TestVoiceCastingBuilder(unittest.TestCase):
+    """Requirement (issue #57/#118 follow-up, owner: "давай добавим тогда в
+    инструмент и отбор голосов из этих 70 сегментов"): voice casting is not
+    a blind task -- gender/age/name, no ground truth."""
+
+    def test_returns_none_when_manifest_absent(self):
+        orig_root = catalog.REPO_ROOT
+        catalog.REPO_ROOT = Path(tempfile.mkdtemp())
+        try:
+            self.assertIsNone(catalog.build_voice_casting_set())
+        finally:
+            catalog.REPO_ROOT = orig_root
+
+    @unittest.skipUnless(CHAPTER114E0_PRESENT, "output/chapter-114-e0/manifest.json not present in this checkout")
+    def test_builds_one_task_per_segment_with_transcript_and_no_ground_truth(self):
+        doc = catalog.build_voice_casting_set()
+        self.assertIsNotNone(doc)
+        self.assertEqual(doc["id"], "voice_casting_chapter114e0")
+        self.assertEqual(len(doc["tasks"]), 70)
+        for task in doc["tasks"]:
+            self.assertEqual(task["type"], "voice_casting")
+            self.assertEqual(task["answer_kind"], "voice_cast")
+            self.assertNotIn("correct_answer", task["hidden"])
+            self.assertTrue(task["hidden"]["segment_text"])
+            self.assertTrue(Path(REPO_ROOT / task["clips"]["A"]).is_file())
+        ids = [t["id"] for t in doc["tasks"]]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate task ids")
+
+
+@unittest.skipUnless(CHAPTER114E0_PRESENT and NUMPY_PRESENT,
+                      "needs both output/chapter-114-e0/ and numpy")
+class TestVoiceCastingOverHTTP(unittest.TestCase):
+    """End-to-end: casting a segment round-trips gender/age/name/selected,
+    is excluded from every blind-gate statistic, and a real HTTP client
+    sees the transcript and measured F0 up front (not blind)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._orig_results_dir = server.RESULTS_DIR
+        cls.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = cls.tmp_dir
+        cls.httpd = server.ThreadingHTTPServer((server.HOST, 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.set_id = "voice_casting_chapter114e0"
+        assert cls.set_id in server.TASK_SETS, "voice_casting set failed to load"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        server.RESULTS_DIR = cls._orig_results_dir
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def _post_json(self, path, obj):
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=5)
+        try:
+            data = json.dumps(obj).encode("utf-8")
+            conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    def test_task_view_is_not_blind(self):
+        status, detail = self._get(f"/api/sets/{self.set_id}/task/voice-cast-00")
+        self.assertEqual(status, 200)
+        task = detail["task"]
+        self.assertEqual(task["response_mode"], "voice_cast")
+        self.assertTrue(task["transcript"])  # shown up front, no reveal step
+
+    def test_invalid_gender_rejected(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-01", "gender": "robot", "age_bucket": "middle",
+            "selected": False, "listen_ms": 0,
+        })
+        self.assertEqual(status, 400)
+
+    def test_selected_without_name_rejected(self):
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-01", "gender": "male", "age_bucket": "middle",
+            "selected": True, "name": "", "listen_ms": 0,
+        })
+        self.assertEqual(status, 400)
+
+    def test_cast_and_name_round_trips_and_is_machine_readable(self):
+        status, ans = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": "voice-cast-02", "gender": "female", "age_bucket": "young",
+            "selected": True, "name": "sita", "note": "звонкий, чёткий", "listen_ms": 5000,
+        })
+        self.assertEqual(status, 200)
+
+        rec = server.load_answers(self.set_id)["voice-cast-02"]
+        self.assertEqual(rec["gender"], "female")
+        self.assertEqual(rec["age_bucket"], "young")
+        self.assertTrue(rec["selected"])
+        self.assertEqual(rec["name"], "sita")
+        self.assertEqual(rec["note"], "звонкий, чёткий")
+        # This IS the casting result the engine reads -- output_path/segment_text
+        # must be present and machine-usable as register_voice() inputs.
+        self.assertTrue(rec["hidden"]["output_path"])
+        self.assertTrue(rec["hidden"]["segment_text"])
+        self.assertIsNone(rec["correct_answer"])
+        self.assertIsNone(rec["matches_expected"])
+
+        status, detail = self._get(f"/api/sets/{self.set_id}/task/voice-cast-02")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["previous_answer"]["name"], "sita")
+
+    def test_recast_does_not_pollute_blind_gate_stats(self):
+        task_id = "voice-cast-03"
+        self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "gender": "male", "age_bucket": "old",
+            "selected": False, "listen_ms": 0,
+        })
+        # Owner changes their mind on a re-listen.
+        status, _ = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "gender": "male", "age_bucket": "middle",
+            "selected": True, "name": "narrator", "listen_ms": 0,
+        })
+        self.assertEqual(status, 200)
+
+        status, summary = self._get(f"/api/sets/{self.set_id}/summary")
+        self.assertEqual(status, 200)
+        # Voice casting must never appear in the blind-gate buckets, cast or
+        # not, corrected or not.
+        self.assertEqual(summary["graded_total"], 0)
+        self.assertEqual(summary["differ_pairs_total"], 0)
+        self.assertEqual(summary["pitch_unreliable_total"], 0)
+        self.assertEqual(summary["answered_after_reveal"], 0,
+                          "a voice-casting recast must never be counted as a blind-gate correction")
+        self.assertGreaterEqual(summary["cast_total"], 1)
+        self.assertGreaterEqual(summary["cast_selected_total"], 1)
+        # The task's own revision history is still honestly tracked, just
+        # not folded into the blind "answered_after_reveal" bucket meaning.
+        latest = server.load_answers(self.set_id)[task_id]
+        self.assertTrue(latest["is_correction"])
 
 
 if __name__ == "__main__":
