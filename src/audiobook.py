@@ -349,6 +349,15 @@ VALID_TAGS = {
     "<|sfx:sniff|>",
 }
 
+# Deliberately NOT in VALID_TAGS (Refs #57): the tokenizer's `added_tokens` also carries
+# `<|env:music|>` (id 151702), `<|env:noise|>` (id 151703), and a standalone `<|chatml|>`
+# (id 151724). None of these three appear anywhere in the checkpoint's PROMPTING.md --
+# no syntax, no example, no mention. They may be internal training-time scaffolding for
+# background-audio labeling rather than a usable prompt-time control, but that is a guess,
+# not a verified fact -- using an undocumented tag on a real book run would be a blind bet.
+# Open question, not yet investigated: what (if anything) do `env:music`/`env:noise` do to
+# generation, and is it worth a controlled probe? See m4-tag-inventory-results.md.
+
 # Per PROMPTING.md (bosonai/higgs-tts-3-4b, verified against the cached snapshot):
 # "pause" / "long_pause" are INLINE, one-shot effects at an exact position in a
 # sentence -- they are not a sustained state and must never be reopened as one.

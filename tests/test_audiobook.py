@@ -509,6 +509,17 @@ class TestF11TagValidation(unittest.TestCase):
         for tag in ab.VALID_TAGS:
             ab.validate_control_tags(f"проверка {tag} тега")  # must not raise
 
+    def test_undocumented_env_and_chatml_tokens_are_rejected(self):
+        # <|env:music|> (id 151702) and <|env:noise|> (id 151703) exist in the
+        # tokenizer's added_tokens but are entirely undocumented in PROMPTING.md -- no
+        # syntax, no example, no mention. Deliberately NOT in VALID_TAGS (see the comment
+        # above it in src/audiobook.py) until their actual effect is investigated, so they
+        # must still be rejected like any other invented/unknown tag.
+        with self.assertRaises(ValueError):
+            ab.validate_control_tags("Текст с <|env:music|> тегом.")
+        with self.assertRaises(ValueError):
+            ab.validate_control_tags("Текст с <|env:noise|> тегом.")
+
     def test_sfx_tags_are_recognized_and_correctly_categorized(self):
         expected_sfx = {
             "<|sfx:cough|>", "<|sfx:laughter|>", "<|sfx:crying|>", "<|sfx:screaming|>",
