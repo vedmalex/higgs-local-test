@@ -238,6 +238,84 @@ class TestCorrectionHistory(unittest.TestCase):
         self.assertTrue(answers["catalog-env-noise"]["is_correction"])
 
 
+class TestFreeTextNotes(unittest.TestCase):
+    """Free-text observation field (issue #57 follow-up): optional, editable
+    via the same append/revision mechanism as a correction, but must NOT by
+    itself flip is_correction / answered_after_reveal -- only an actual
+    change of answer does that (see server._answer_value())."""
+
+    def setUp(self):
+        self._orig_results_dir = server.RESULTS_DIR
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        server.RESULTS_DIR = self.tmp_dir
+
+    def tearDown(self):
+        server.RESULTS_DIR = self._orig_results_dir
+
+    def _base_record(self, task_id="t1", answer_label="Да", note=""):
+        return {
+            "task_id": task_id, "answer_label": answer_label, "answer_role": None,
+            "note": note, "correct_answer": None, "matches_expected": None,
+            "type": "single_rating", "listen_ms": 0, "timestamp": "x", "hidden": {},
+        }
+
+    def test_note_saved_and_read_back(self):
+        server.append_answer("demo", self._base_record(note="фон гуляет"))
+        answers = server.load_answers("demo")
+        self.assertEqual(answers["t1"]["note"], "фон гуляет")
+
+    def test_note_only_edit_does_not_mark_correction_or_non_blind(self):
+        server.append_answer("demo", self._base_record(note=""))
+        server.append_answer("demo", self._base_record(note="голос между фрагментами разный"))
+        answers = server.load_answers("demo")
+        latest = answers["t1"]
+        self.assertEqual(latest["note"], "голос между фрагментами разный")
+        self.assertEqual(latest["revision"], 2)
+        self.assertFalse(latest["is_correction"], "same answer + new note must not count as a correction")
+        self.assertFalse(latest["answered_after_reveal"], "a note-only edit must not leave the blind bucket")
+
+        history = server.load_answer_history("demo")
+        self.assertEqual(len(history), 2, "both revisions must survive on disk")
+        self.assertEqual(history[0]["note"], "")
+
+    def test_note_change_combined_with_answer_change_is_still_a_correction(self):
+        server.append_answer("demo", self._base_record(answer_label="Да", note=""))
+        server.append_answer("demo", self._base_record(answer_label="Нет", note="передумал, послушав внимательнее"))
+        latest = server.load_answers("demo")["t1"]
+        self.assertTrue(latest["is_correction"])
+        self.assertTrue(latest["answered_after_reveal"])
+        self.assertEqual(latest["note"], "передумал, послушав внимательнее")
+
+    def test_empty_note_does_not_break_answer(self):
+        # No "note" key at all in the submitted record (client omitted it).
+        rec = self._base_record()
+        del rec["note"]
+        answers = server.append_answer("demo", rec)
+        self.assertEqual(answers["t1"]["answer_label"], "Да")
+        self.assertNotIn("note", answers["t1"])  # append_answer doesn't invent one
+
+    def test_old_record_without_note_field_reads_as_empty_string(self):
+        d = self.tmp_dir / "legacy"
+        d.mkdir()
+        old_line = json.dumps({
+            "task_id": "catalog-env-noise", "answer_label": "Да", "type": "single_rating",
+            "listen_ms": 0, "timestamp": "x", "hidden": {}, "correct_answer": None,
+            "matches_expected": None,
+        }, ensure_ascii=False)
+        (d / "answers.jsonl").write_text(old_line + "\n", encoding="utf-8")
+        answers = server.load_answers("legacy")
+        self.assertEqual(answers["catalog-env-noise"].get("note", ""), "")
+
+        # Adding a note on top of a legacy (note-less) record works and is
+        # correctly recognized as a note-only edit (answer unchanged).
+        server.append_answer("legacy", self._base_record(
+            task_id="catalog-env-noise", answer_label="Да", note="шёпот звучит как тихий звук"))
+        latest = server.load_answers("legacy")["catalog-env-noise"]
+        self.assertEqual(latest["note"], "шёпот звучит как тихий звук")
+        self.assertFalse(latest["is_correction"])
+        self.assertFalse(latest["answered_after_reveal"])
+
+
 @unittest.skipUnless(OUTPUT_PRESENT, "output/ audio fixtures not present in this checkout (gitignored)")
 class TestNavigationOverHTTP(unittest.TestCase):
     """End-to-end check that the actual HTTP server (issue #57 follow-up:
@@ -357,6 +435,47 @@ class TestNavigationOverHTTP(unittest.TestCase):
         graded_task_ids = {r["task_id"] for r in summary["answers"]
                             if r["task_id"] == task_id and not r.get("answered_after_reveal")}
         self.assertEqual(graded_task_ids, set(), "the corrected answer must not be double counted as blind")
+
+    def test_note_round_trips_and_note_only_edit_stays_in_blind_bucket(self):
+        task_id = "final-boundary-complete"
+        status, ans1 = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "answer_label": "Утверждение (точка)", "listen_ms": 400,
+            "note": "шёпот звучит как тихий звук",
+        })
+        self.assertEqual(status, 200)
+
+        # Navigate away and back: the note must come back with the answer.
+        status, detail = self._get(f"/api/sets/{self.set_id}/task/{task_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["previous_answer"]["note"], "шёпот звучит как тихий звук")
+        self.assertFalse(detail["previous_answer"]["answered_after_reveal"])
+
+        # Edit the note only (same answer_label), as the "Сохранить заметку"
+        # button does client-side.
+        status, ans2 = self._post_json(f"/api/sets/{self.set_id}/answer", {
+            "task_id": task_id, "answer_label": "Утверждение (точка)", "listen_ms": 0,
+            "note": "шёпот звучит как тихий звук; фон гуляет",
+        })
+        self.assertEqual(status, 200)
+
+        latest = server.load_answers(self.set_id)[task_id]
+        self.assertEqual(latest["note"], "шёпот звучит как тихий звук; фон гуляет")
+        self.assertEqual(latest["revision"], 2)
+        self.assertFalse(latest["is_correction"], "editing only the note must not register as a correction")
+        self.assertFalse(latest["answered_after_reveal"], "editing only the note must not leave the blind bucket")
+
+        history = server.load_answer_history(self.set_id)
+        task_history = [r for r in history if r["task_id"] == task_id]
+        self.assertEqual(len(task_history), 2, "the original note-bearing answer must survive on disk")
+        self.assertEqual(task_history[0]["note"], "шёпот звучит как тихий звук")
+
+        # The summary's blind bucket must still include this task (note edit
+        # is not a correction), unlike the answered_after_reveal task above.
+        status, summary = self._get(f"/api/sets/{self.set_id}/summary")
+        self.assertEqual(status, 200)
+        graded_task_ids = {r["task_id"] for r in summary["answers"]
+                            if r["task_id"] == task_id and not r.get("answered_after_reveal")}
+        self.assertEqual(graded_task_ids, {task_id})
 
 
 if __name__ == "__main__":

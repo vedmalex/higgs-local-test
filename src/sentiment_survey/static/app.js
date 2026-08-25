@@ -94,8 +94,9 @@ function renderSidebar() {
     else if (t.answered) cls += " answered";
     row.className = cls;
     const mark = t.skipped_prior ? "–" : t.answered ? "✓" : "·";
+    const noteMark = t.has_note ? '<span class="row-note" title="Есть заметка">📝</span>' : "";
     row.innerHTML = `<span class="row-mark">${mark}</span><span class="row-idx">${idx + 1}.</span>`
-      + `<span class="row-q">${escapeHtml(truncate(t.question, 60))}</span>`;
+      + `<span class="row-q">${escapeHtml(truncate(t.question, 60))}</span>${noteMark}`;
     row.title = t.answered
       ? (t.is_correction ? "Отвечено (исправлено) — нажмите, чтобы открыть" : "Отвечено — нажмите, чтобы открыть")
       : "Не отвечено — нажмите, чтобы открыть";
@@ -178,6 +179,31 @@ function renderAnswered(d) {
     html += "</dl>";
   }
   el("answered-body").innerHTML = html;
+  el("answered-note").value = rec.note || "";
+}
+
+async function saveNoteOnly() {
+  const d = state.currentDetail;
+  const rec = d.previous_answer;
+  if (!rec) return;
+  const body = {
+    task_id: d.task.id,
+    answer_label: rec.answer_label,
+    listen_ms: 0,
+    note: el("answered-note").value,
+  };
+  if (rec.answer_role != null) body.answer_role = rec.answer_role;
+  await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  // Same answer, just a note change — stay on this task and refresh in
+  // place rather than showing the reveal card (nothing new was revealed).
+  await refreshTaskList();
+  const data = await api(`/api/sets/${encodeURIComponent(state.currentSetId)}/task/${encodeURIComponent(d.task.id)}`);
+  state.currentDetail = data;
+  renderCurrentTask();
 }
 
 function renderTaskForm(task) {
@@ -189,6 +215,10 @@ function renderTaskForm(task) {
 
   el("task-question").textContent = task.question;
   el("prior-hint").hidden = !task.has_prior_verdict || state.editMode;
+  // Carry the previous note forward into the answer-form textarea so
+  // correcting the answer doesn't silently drop what was already written.
+  const priorNote = (state.currentDetail.previous_answer && state.currentDetail.previous_answer.note) || "";
+  el("task-note").value = priorNote;
 
   const slotsEl = el("task-slots");
   slotsEl.innerHTML = "";
@@ -254,6 +284,7 @@ async function submitAnswer(task, optionLabel) {
     task_id: task.id,
     answer_label: optionLabel,
     listen_ms: totalListenMs(),
+    note: el("task-note").value,
   };
   if (task.response_mode === "choose_clip" && !isSkip) {
     body.answer_role = labelToRole(task, optionLabel);
@@ -266,10 +297,10 @@ async function submitAnswer(task, optionLabel) {
   updateProgress(result.answered, result.total);
   const isLastTask = state.currentDetail.next_id == null;
   await refreshTaskList();
-  renderReveal(result.reveal, result.matches_expected, isSkip, isLastTask);
+  renderReveal(result.reveal, result.matches_expected, isSkip, isLastTask, body.note);
 }
 
-function renderReveal(reveal, matches, wasSkip, isLastTask) {
+function renderReveal(reveal, matches, wasSkip, isLastTask, note) {
   el("task-card").hidden = true;
   el("answered-card").hidden = true;
   const revealCard = el("reveal-card");
@@ -288,6 +319,9 @@ function renderReveal(reveal, matches, wasSkip, isLastTask) {
   }
   if (reveal.prior_verdict) {
     html += `<div class="prior-verdict"><strong>Более ранний вердикт:</strong> ${escapeHtml(reveal.prior_verdict)}</div>`;
+  }
+  if (note && note.trim()) {
+    html += `<p><strong>Ваша заметка:</strong> «${escapeHtml(note.trim())}»</p>`;
   }
   body.innerHTML = html;
   el("next-btn").textContent = isLastTask ? "Итоги набора →" : "Далее →";
@@ -345,6 +379,7 @@ el("edit-answer-btn").addEventListener("click", () => {
   state.editMode = true;
   renderCurrentTask();
 });
+el("save-note-btn").addEventListener("click", () => saveNoteOnly());
 el("sidebar-toggle").addEventListener("click", () => {
   const sidebar = el("task-sidebar");
   const collapsed = sidebar.classList.toggle("collapsed");

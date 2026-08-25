@@ -253,6 +253,42 @@ button.primary {
   font-weight: 600;
 }
 
+button.secondary {
+  font-size: 0.9rem;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+button.secondary:hover { border-color: var(--accent); }
+
+.note-field {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--border);
+}
+.note-field label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+.note-field textarea {
+  width: 100%;
+  font: inherit;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  resize: vertical;
+  margin-bottom: 0.5rem;
+}
+
+.row-note { margin-left: 0.3rem; }
+
 .reveal h3 { margin-top: 0; }
 .reveal .match-ok { color: var(--ok); font-weight: 700; }
 .reveal .match-bad { color: var(--bad); font-weight: 700; }
