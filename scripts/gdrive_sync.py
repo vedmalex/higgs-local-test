@@ -103,8 +103,10 @@ def create_folder(name: str, parent_id: Optional[str], token: str) -> str:
         return json.loads(resp.read())["id"]
 
 
-def get_or_create_folder(name: str, parent_id: Optional[str], token: str) -> str:
-    """Find an existing folder by name or create it if absent."""
+def find_folder(name: str, parent_id: Optional[str], token: str) -> Optional[str]:
+    """Find an existing folder by name under parent_id. Returns None if absent -- unlike
+    get_or_create_folder, never creates anything, so it is safe for read-only lookups
+    (e.g. checking whether a model archive is already on Drive before deciding to fetch it)."""
     query = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         query += f" and '{parent_id}' in parents"
@@ -120,7 +122,26 @@ def get_or_create_folder(name: str, parent_id: Optional[str], token: str) -> str
                 return files[0]["id"]
     except urllib.error.HTTPError:
         pass
+    return None
 
+
+def resolve_path(path: str, token: str) -> Optional[str]:
+    """Resolve a slash-separated Drive path (e.g. 'higgs-benchmark/model-cache') to a folder
+    ID, walking one segment at a time from root. Returns None as soon as any segment is
+    missing -- read-only, never creates a folder."""
+    parent_id: Optional[str] = None
+    for segment in [s for s in path.split("/") if s]:
+        parent_id = find_folder(segment, parent_id, token)
+        if parent_id is None:
+            return None
+    return parent_id
+
+
+def get_or_create_folder(name: str, parent_id: Optional[str], token: str) -> str:
+    """Find an existing folder by name or create it if absent."""
+    found = find_folder(name, parent_id, token)
+    if found:
+        return found
     return create_folder(name, parent_id or "root", token)
 
 
@@ -310,7 +331,12 @@ def main() -> None:
 
     # list command
     p_list = subparsers.add_parser("list", help="List files in a Google Drive folder")
-    p_list.add_argument("--folder-id", required=True, help="Google Drive folder ID")
+    p_list.add_argument("--folder-id", help="Google Drive folder ID")
+    p_list.add_argument(
+        "--path",
+        help="Slash-separated Drive path from root instead of --folder-id "
+        "(e.g. 'higgs-benchmark/model-cache') -- resolved read-only, never creates folders",
+    )
     p_list.add_argument("--token", help="Explicit OAuth2 token")
     p_list.add_argument("--account", help="Specific gcloud account email")
 
@@ -347,8 +373,17 @@ def main() -> None:
         print(f"\nDownload complete: {count} new/updated files in {dest_dir}")
 
     elif args.command == "list":
-        files = list_files(args.folder_id, token)
-        print(f"Files in folder {args.folder_id} ({len(files)} items):")
+        folder_id = args.folder_id
+        if args.path:
+            folder_id = resolve_path(args.path, token)
+            if folder_id is None:
+                print(f"Path not found on Drive: {args.path}")
+                sys.exit(1)
+        elif not folder_id:
+            p_list.error("one of --folder-id or --path is required")
+        files = list_files(folder_id, token)
+        label = args.path or folder_id
+        print(f"Files in folder {label} ({len(files)} items):")
         for f in files:
             size = f"{int(f.get('size', 0)) / (1024 * 1024):.2f} MB" if "size" in f else "<dir>"
             print(f"  - {f['name']} ({size}) [id: {f['id']}]")
