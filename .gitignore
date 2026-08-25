@@ -7,6 +7,10 @@ logs/*
 samples/reference.wav
 samples/reference.txt
 samples/stt_ru.wav
+# Refs #57: registered voice references (encoded codes + transcript, docs/guides/
+# audiobook_guide.md sec. 2/2a) -- derived from generated/user audio, regenerated on demand
+# via --save-voice-as or register_voice(), never committed (same policy as samples/reference.*).
+voices/
 # Исходные записи для эталона: пользовательское аудио в Git не хранится.
 samples/*.m4a
 samples/*.mp3

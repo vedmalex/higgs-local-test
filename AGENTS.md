@@ -44,7 +44,7 @@ GitHub Issues are the canonical surface for task state and development history. 
 - `samples/`: committed text fixtures and instructions; user audio is ignored.
 - `output/` and `logs/`: generated artifacts; only `.gitkeep` files are tracked.
 - `notebooks/mojo_max_m0_t4.ipynb`: standalone Colab T4 runner for issue #57's M0 hardware probe (`docs/research/mojo-max/m0_smoke_test.mojo`). Deliberately separate from `higgs_colab_benchmark.ipynb` — it only installs `pixi`/`modular` and runs the probe, so it can be checked quickly without pulling in the TTS/STT/Qwen stack.
-- `notebooks/model_prefetch_to_drive.ipynb`: downloads every model this project needs (Higgs TTS 3/STT, Whisper processor, Qwen3-TTS/ASR MLX weights) through Colab's network instead of the local machine's, packs each into a `.tar` (preserving the Hugging Face cache's blob/snapshot symlink layout, which Drive's FUSE mount does not preserve on loose files), and uploads it to `MyDrive/higgs-benchmark/model-cache/`. Extract locally with `tar -xf <name>.tar -C ~/.cache/huggingface/hub/`. Workaround for a local network too unstable for multi-gigabyte HF downloads even with `scripts/download_models.sh`'s retry loop.
+- `notebooks/model_prefetch_to_drive.ipynb`: fetches `notebooks/model_catalog.json` (the project's single model inventory — every model used, tried, or considered, each with a `fetch_now` flag) and downloads the entries flagged `true` through Colab's network instead of the local machine's, packs each into a `.tar` (preserving the Hugging Face cache's blob/snapshot symlink layout, which Drive's FUSE mount does not preserve on loose files), and uploads it to `MyDrive/higgs-benchmark/model-cache/`. Extract locally with `tar -xf <name>.tar -C ~/.cache/huggingface/hub/`. Workaround for a local network too unstable for multi-gigabyte HF downloads even with `scripts/download_models.sh`'s retry loop. Add a model by editing `model_catalog.json`, not the notebook. See "Model downloads" below and `docs/guides/model_downloads_guide.md`.
 - `notebooks/mojo_max_m2_t4.ipynb`: standalone Colab T4 runner for issue #57's M2 correctness prototypes (`docs/research/mojo-max/m2_*_prototype.py`) — same minimal-install convention as the M0 T4 notebook, plus `higgs_colab_benchmark.ipynb`'s Google Drive workspace + unconditional-disconnect pattern: each prototype's result is written to Drive right after it runs (not just `/content`), and the final cell always calls `runtime.unassign()` in a `try`/`finally`.
 - `skills-lock.json`: pins the official Modular agent skills used for issue #57's Mojo/MAX research (`import-model`, `debug-model`, `serve-model`, `benchmark-model`, `profile-model`, `eval-model`, `mojo-syntax`, `mojo-gpu-fundamentals`, `mojo-python-interop`, `closure_migration`, `new-modular-project`). Restore them into `.agents/`/`.claude/skills` (both gitignored, regenerated like `node_modules`) with `npx skills experimental_install`; a fresh `npx skills add modular/skills` also works but may pick up newer skill revisions than the lockfile pins.
 - `src/sentiment_survey/`: local stdlib-only (`http.server`, no Flask/framework) blind-listening
@@ -83,6 +83,16 @@ Keep TTS and STT environments and processes isolated. Do not introduce a shared 
 - Do not install an unrelated package named like `boson_multimodal`. Prefer the helper code bundled with the pinned STT checkpoint.
 - Do not request BF16 on M1 unless complete inference has been demonstrated for the exact code and package versions.
 - MPS support means successful end-to-end inference, not merely `torch.backends.mps.is_available()` or model loading.
+
+## Model downloads
+
+The local network is too slow/unstable for multi-gigabyte Hugging Face downloads. Never run `snapshot_download`/`from_pretrained` for a new multi-GB model directly on this machine.
+
+1. Check `notebooks/model_catalog.json` and Drive first: `python3 scripts/gdrive_sync.py list --path higgs-benchmark/model-cache`. If it's already there, `tar -xf <name>.tar -C ~/.cache/huggingface/hub/` and stop.
+2. If it's missing from both, add an entry to `model_catalog.json` (`fetch_now: true`, repo_id pinned). A download over a few GB: tell the owner and get a go-ahead before adding the entry.
+3. Ask the owner to run `notebooks/model_prefetch_to_drive.ipynb` in Colab (never run it yourself). Then extract the resulting `.tar` locally.
+
+See `docs/guides/model_downloads_guide.md`.
 
 ## Memory and data safety
 

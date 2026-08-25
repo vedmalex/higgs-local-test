@@ -1,0 +1,24 @@
+{
+  "id": "voice_consistency",
+  "title": "Закрепление голоса эталоном (issue #57)",
+  "priority": 1,
+  "description": "output/voice_consistency_survey/ -- один и тот же набор из 8 разных предложений главы 114 (E0), не смежных, ни одно не совпадает с текстом самого эталона. 'without_reference' -- та же генерация, что во всей главе сейчас (без эталона, голос выбирается заново на каждый сегмент). 'with_reference' -- та же генерация, но с --voice-name narrator_e0: эталон -- сегмент 36 главы 114 (медиана тона 131.9 Гц, ближе всего к медиане по главе 129.0 Гц среди сегментов без внутренних пауз >=150мс). Измерено объективно: без эталона медиана тона по восьми клипам колеблется 94.5-196.7 Гц (stdev 43.6), с эталоном -- 120.3-141.2 Гц (stdev 6.1) -- разброс сократился примерно в 5 раз. Вопрос владельцу: слышно ли это как \"один и тот же голос\" против \"разные голоса\", а не только числа.",
+  "tasks": [
+    {
+      "id": "voice-consistency-which-is-one-voice",
+      "type": "pair_compare",
+      "answer_kind": "which",
+      "question": "В каком из двух клипов на всём протяжении звучит ОДИН и тот же голос диктора, а не несколько разных голосов подряд?",
+      "options": ["A", "B", "Оба одним голосом", "Оба разными голосами", "Не уверен(а)"],
+      "clips": {
+        "A": "output/voice_consistency_survey/without_reference.wav",
+        "B": "output/voice_consistency_survey/with_reference.wav"
+      },
+      "hidden": {
+        "A": {"variant": "without_reference -- no voice reference, current chapter-114-e0 behavior"},
+        "B": {"variant": "with_reference -- --voice-name narrator_e0 (chapter-114-e0 segment 36 as reference)"},
+        "correct_answer": "B"
+      }
+    }
+  ]
+}
