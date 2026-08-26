@@ -123,6 +123,31 @@ class TestTaskSetJSONFilesValidate(unittest.TestCase):
                 self.assertTrue(ts.tasks)
 
 
+class TestWhichKindNeedsSomethingToChooseBetween(unittest.TestCase):
+    """answer_kind 'which'/'which_matches_ref' means "pick a clip", so it needs at
+    least two clips to pick between.
+
+    Putting it on a one-clip single_rating task makes the UI render clip buttons
+    instead of the task's own text options: the owner gets asked which clip, with
+    one clip on offer, and the recorded answer is a meaningless role. That happened
+    to voice_reference_compare's room/manner questions — six answers thrown away.
+    Working single_rating sets (final_intonation) carry no answer_kind at all.
+    """
+
+    def test_no_which_task_offers_fewer_than_two_clips(self):
+        offenders = []
+        for path in sorted((SURVEY_DIR / "task_sets").glob("*.json")):
+            with path.open(encoding="utf-8") as fh:
+                doc = json.load(fh)
+            for t in doc["tasks"]:
+                if t.get("answer_kind") not in ("which", "which_matches_ref"):
+                    continue
+                if len(t.get("clips", {})) < 2:
+                    offenders.append(f"{path.name}:{t['id']} is answer_kind "
+                                     f"{t['answer_kind']!r} with {len(t.get('clips', {}))} clip(s)")
+        self.assertEqual(offenders, [], "a 'which' task needs >= 2 clips:\n" + "\n".join(offenders))
+
+
 class TestCorrectAnswerIsARoleForWhichTasks(unittest.TestCase):
     """For answer_kind 'which'/'which_matches_ref', hidden.correct_answer must be a
     ROLE KEY of that task's clips ("A"/"B"/"REF"), never display text.
