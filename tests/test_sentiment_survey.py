@@ -123,6 +123,35 @@ class TestTaskSetJSONFilesValidate(unittest.TestCase):
                 self.assertTrue(ts.tasks)
 
 
+class TestCorrectAnswerIsARoleForWhichTasks(unittest.TestCase):
+    """For answer_kind 'which'/'which_matches_ref', hidden.correct_answer must be a
+    ROLE KEY of that task's clips ("A"/"B"/"REF"), never display text.
+
+    compute_matches_expected() compares it against the role the owner picked, so a
+    correct_answer written as display text ("Клип B") can never match any role and
+    marks every answer wrong — which is exactly what happened to
+    voice_reference_compare: four correct answers in a row recorded as misses.
+    The slot order is shuffled per process anyway, so display positions are not a
+    stable thing to write down.
+    """
+
+    def test_every_which_task_expects_a_real_role(self):
+        offenders = []
+        for path in sorted((SURVEY_DIR / "task_sets").glob("*.json")):
+            with path.open(encoding="utf-8") as fh:
+                doc = json.load(fh)
+            for t in doc["tasks"]:
+                if t.get("answer_kind") not in ("which", "which_matches_ref"):
+                    continue
+                expected = (t.get("hidden") or {}).get("correct_answer")
+                if expected is None:
+                    continue  # a selection/preference task with no ground truth
+                if expected not in t.get("clips", {}):
+                    offenders.append(f"{path.name}:{t['id']} expects {expected!r}, "
+                                     f"clips are {sorted(t.get('clips', {}))}")
+        self.assertEqual(offenders, [], "correct_answer must be a clip role key:\n" + "\n".join(offenders))
+
+
 class TestMissingClipDoesNotTakeDownTheApp(unittest.TestCase):
     """A missing wav in ONE set must not make the whole app unloadable.
 
