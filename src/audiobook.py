@@ -124,6 +124,10 @@ from typing import Optional
 
 import numpy as np
 
+# Refs #57 (M6, 8-bit quantization): default TTS model, overridable per-run with --model
+# (an HF repo id like this default, or a local converted checkpoint directory such as
+# `models/higgs-tts-3-4b-8bit` -- see scripts/quantize_higgs_tts.py). The 8-bit checkpoint
+# is an ADDITIONAL option, opt-in only; the default here stays the full-precision model.
 MODEL_ID = "bosonai/higgs-tts-3-4b"
 
 # ---------------------------------------------------------------------------
@@ -488,6 +492,53 @@ def _reopen_prefix(active: dict[str, Optional[str]], sentence: str) -> str:
             continue
         prefix_parts.append(tag)
     return "".join(prefix_parts)
+
+
+# Sentence-final punctuation, used to tell a genuine sentence boundary from a chunk that
+# was cut mid-sentence by _force_split_long_sentence() (Refs #57). Assembly needs this to
+# pick a join pause: the model's own pause at a mid-clause comma measured ~100 ms
+# (docs/research/audiobook/m4-midsentence-split-results.md), while a real sentence end
+# earns the full `silence_ms`.
+SENTENCE_FINAL_PUNCT = ".!?…"
+
+
+def ends_mid_sentence(text: str) -> bool:
+    """True when `text` does not end on sentence-final punctuation.
+
+    Chunks normally end where a sentence ends, so this is False for almost all of them.
+    It is True exactly for the pieces `_force_split_long_sentence()` produces when one
+    sentence exceeds max_chars on its own -- those end on `;`, `,`, a space, or a hard
+    character cut, and the next chunk continues the same sentence.
+
+    Closing quotes/brackets after the punctuation are stepped over, so `...конец!»` and
+    `...конец."` both read as a real sentence end.
+    """
+    stripped = text.rstrip()
+    while stripped and stripped[-1] in '»"\')]':
+        stripped = stripped[:-1].rstrip()
+    if not stripped:
+        return False
+    return stripped[-1] not in SENTENCE_FINAL_PUNCT
+
+
+# mlx_audio's Higgs v3 `generate`/`batch_generate` default to fade_in_ms=30, fade_out_ms=15
+# (model.py `_apply_fades`): the first 30 ms of every segment is multiplied by a 0->1 ramp.
+# Standalone that only prevents a click; in a stitched chapter it EATS THE FIRST PHONEME --
+# 30 ms is the length of a plosive or half a fricative, so a segment starting on "Шри" or
+# "Махараджа" loses its attack. The owner heard exactly this ("первая буква фрагмента
+# проглатывается") once the voice reference made the seams audible at all; measured on
+# chapter-114-e2's own segments, the opening envelope rises linearly across ~30 ms and only
+# then reaches its plateau (docs/research/audiobook/, join diagnostics).
+#
+# We insert our own silence between segments, so a long fade buys us nothing. Keep a short
+# one: enough to avoid a discontinuity click when a segment starts loud, too short to damp a
+# consonant. NOT zero -- head amplitudes up to 0.42 were measured at segment starts, and
+# jumping from silence straight to that is an audible click.
+# mlx_audio's own defaults, i.e. what every run generated before we started passing
+# these used. A manifest without a `fades_ms` field was written by such a run.
+MLX_AUDIO_LEGACY_FADES_MS = [30.0, 15.0]
+DEFAULT_FADE_IN_MS = 5.0
+DEFAULT_FADE_OUT_MS = 5.0
 
 
 def _force_split_long_sentence(sentence: str, max_chars: int) -> list[str]:
@@ -975,6 +1026,9 @@ def build_manifest(
     max_chars: int,
     tag_scope: str,
     voice_reference: Optional["VoiceReference"] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
+    model_id: str = MODEL_ID,
 ) -> dict:
     # Auto-detected, not author-set (Refs #57): the author of a screenplay/chapter has no
     # other way to tell a later reader/tool whether stress marks were already placed in the
@@ -985,13 +1039,16 @@ def build_manifest(
     # single bool, so a mostly-marked chapter with a few misses is visible as such.
     full_text = "\n".join(c.text for c in chunks)
     return {
-        "model": MODEL_ID,
+        "model": model_id,
         "max_chars": max_chars,
         "tag_scope": tag_scope,
         # Refs #57: the voice reference is a property of the whole run, not of any one
         # segment -- see VoiceReference's docstring for why this must invalidate resume on
         # mismatch the same way model/max_chars/tag_scope already do (load_or_create_manifest).
         "voice_reference": voice_reference.manifest_id() if voice_reference else None,
+        # Refs #57: baked into every wav at generation time and NOT part of the segment
+        # hash, so it must invalidate resume too -- see load_or_create_manifest.
+        "fades_ms": [round(float(fade_in_ms), 3), round(float(fade_out_ms), 3)],
         "created": time.time(),
         "stress_marks_detected": count_stress_marks(full_text),
         "ambiguous_apostrophes_detected": count_ambiguous_apostrophes(full_text),
@@ -1036,15 +1093,25 @@ def load_or_create_manifest(
     max_chars: int,
     tag_scope: str,
     voice_reference: Optional["VoiceReference"] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
+    model_id: str = MODEL_ID,
 ) -> dict:
     if manifest_path.exists():
         manifest = _load_manifest_with_recovery(manifest_path)
 
         # F7: compare the settings that change every segment's text, and name exactly
         # which one differs instead of a blanket "text doesn't match" error.
+        # Refs #57 (M6): `model` is compared as a plain string, which works whether it is
+        # an HF repo id or a local converted-checkpoint path (e.g.
+        # `models/higgs-tts-3-4b-8bit`) -- the two never compare equal to each other, so
+        # resuming a chapter started with the full model under the 8-bit one (or vice
+        # versa) is refused exactly like every other settings mismatch below. Mixing
+        # segments from two different models in one chapter is the same class of bug as
+        # mixing voice references or fade lengths (see those checks below).
         mismatches = []
-        if manifest.get("model") != MODEL_ID:
-            mismatches.append(f"model: manifest={manifest.get('model')!r} vs current={MODEL_ID!r}")
+        if manifest.get("model") != model_id:
+            mismatches.append(f"model: manifest={manifest.get('model')!r} vs current={model_id!r}")
         if manifest.get("max_chars") != max_chars:
             mismatches.append(
                 f"max_chars: manifest={manifest.get('max_chars')!r} vs current={max_chars!r}"
@@ -1066,10 +1133,29 @@ def load_or_create_manifest(
                 f"voice_reference: manifest={manifest.get('voice_reference')!r} vs "
                 f"current={current_ref_id!r}"
             )
+        # Refs #57: the fade lengths are baked into every wav on disk at generation time
+        # (mlx_audio multiplies the first fade_in_ms of the audio by a 0->1 ramp before we
+        # ever see it), and they are NOT part of the segment hash, which keys only on
+        # speaker+text. So a resume under different fades would silently reuse segments
+        # whose onsets were damaged by the old value and mix them with correctly-generated
+        # ones -- the chapter would end up uneven with no visible cause. Worse, the damage
+        # is irrecoverable after the fact: at 16-bit the first samples quantize to 0/-1/5,
+        # so dividing the ramp back out cannot restore the consonant it swallowed.
+        current_fades = [round(float(fade_in_ms), 3), round(float(fade_out_ms), 3)]
+        # A manifest with no `fades_ms` predates this field, which means it was generated
+        # before we passed fades at all -- so mlx_audio's own defaults applied. That is a
+        # fact about when it was written, not a guess, so name them rather than treating
+        # the absence as "unknown" and waving the run through.
+        manifest_fades = manifest.get("fades_ms", MLX_AUDIO_LEGACY_FADES_MS)
+        if manifest_fades != current_fades:
+            shown = ("отсутствует в манифесте, значит прежнее поведение mlx_audio "
+                     f"{MLX_AUDIO_LEGACY_FADES_MS}" if "fades_ms" not in manifest
+                     else repr(manifest_fades))
+            mismatches.append(f"fades_ms: manifest={shown} vs current={current_fades!r}")
         if mismatches:
             raise RuntimeError(
                 "Existing manifest was built with different settings, which changes every "
-                "segment's text -- refusing to resume blindly: " + "; ".join(mismatches)
+                "segment's audio -- refusing to resume blindly: " + "; ".join(mismatches)
             )
 
         # F7: reuse any segment whose own text is unchanged (keyed by content hash), no
@@ -1104,7 +1190,9 @@ def load_or_create_manifest(
         save_manifest(manifest, manifest_path)
         return manifest
 
-    manifest = build_manifest(chunks, max_chars, tag_scope, voice_reference=voice_reference)
+    manifest = build_manifest(chunks, max_chars, tag_scope, voice_reference=voice_reference,
+                              fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
+                              model_id=model_id)
     save_manifest(manifest, manifest_path)
     return manifest
 
@@ -1228,6 +1316,8 @@ def _generate_single_segment(
     manifest_path: Path,
     ref_audio_codes=None,
     ref_text: Optional[str] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> tuple[bool, Optional[str]]:
     """Generate one segment via `model.generate()` with retry/backoff (F5) and per-segment
     audio-sanity validation (F6). Mutates `entry` in place and calls `save_manifest` after
@@ -1256,6 +1346,8 @@ def _generate_single_segment(
                     max_new_tokens=max_new_tokens,
                     ref_audio_codes=ref_audio_codes,
                     ref_text=ref_text,
+                    fade_in_ms=fade_in_ms,
+                    fade_out_ms=fade_out_ms,
                 )
             )
             generation_seconds = time.perf_counter() - started
@@ -1301,6 +1393,8 @@ def _generate_batch_group(
     manifest_path: Path,
     ref_audio_codes=None,
     ref_text: Optional[str] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> list[tuple[int, dict, bool, Optional[str]]]:
     """Generate every entry in `group` (list of `(seg_i, entry)`, len <= --batch-size)
     through `model.batch_generate()`, with a self-narrowing fallback on failure.
@@ -1358,6 +1452,7 @@ def _generate_batch_group(
             model, entry, out_path, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
             ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+            fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
         )
         return [(seg_i, entry, ok, err)]
 
@@ -1379,6 +1474,7 @@ def _generate_batch_group(
             for r in model.batch_generate(
                 texts=texts, temperature=temperature, max_new_tokens=max_new_tokens,
                 ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+                fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
             ):
                 result_by_pos[r.sequence_idx] = r
             if len(result_by_pos) != len(remaining_now):
@@ -1436,6 +1532,7 @@ def _generate_batch_group(
             model, remaining[mid:], base_dir, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
             ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+            fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
         )
         if remaining[mid:]
         else []
@@ -1456,6 +1553,8 @@ def generate_segments(
     batch_size: int = 1,
     ref_audio_codes=None,
     ref_text: Optional[str] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> dict:
     """Generate every pending segment, writing progress to disk after each one.
 
@@ -1513,6 +1612,7 @@ def generate_segments(
                 model, entry, out_path, temperature, max_new_tokens, max_retries,
                 retry_base_delay, manifest, manifest_path,
                 ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+                fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
             )
             if not succeeded:
                 if not continue_on_error:
@@ -1549,6 +1649,7 @@ def generate_segments(
             model, group, base_dir, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
             ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+            fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
         )
         for _seg_i, entry, succeeded, last_error in outcomes:
             if not succeeded:
@@ -1580,6 +1681,7 @@ def assemble_chapter(
     allow_gaps: bool = False,
     gap_silence_ms: int = 1000,
     speaker_change_silence_ms: Optional[int] = None,
+    mid_sentence_silence_ms: Optional[int] = None,
 ) -> dict:
     """Stream-assemble the chapter from per-segment WAVs (F3, F13).
 
@@ -1625,6 +1727,9 @@ def assemble_chapter(
     prev_tail: Optional[np.ndarray] = None
     prev_index: Optional[int] = None
     prev_speaker: Optional[str] = None
+    # Whether the previously written segment's text was cut mid-sentence (see
+    # ends_mid_sentence). False before the first segment: nothing precedes it.
+    prev_ends_mid_sentence: bool = False
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(output_path), "wb") as out:
@@ -1651,6 +1756,7 @@ def assemble_chapter(
                 prev_tail = None  # no meaningful edge to join across a gap
                 prev_index = entry["index"]
                 prev_speaker = None  # speaker on the far side of a gap is unknown here
+                prev_ends_mid_sentence = False  # a gap is not a mid-sentence continuation
                 continue
 
             audio, sr = read_wav(base_dir / entry["output_path"])
@@ -1702,6 +1808,15 @@ def assemble_chapter(
                 )
                 this_speaker = entry.get("speaker")
                 effective_silence_ms = silence_ms
+                # A chunk cut mid-sentence continues into the next one, so the full
+                # `silence_ms` reads as an unnatural hesitation there -- the owner heard
+                # this seam in the blind midsentence_split probe. Measured: the model's
+                # own pause at that comma was ~100 ms vs. the 200 ms default (n=1,
+                # m4-midsentence-split-results.md).
+                if mid_sentence_silence_ms is not None and prev_ends_mid_sentence:
+                    effective_silence_ms = mid_sentence_silence_ms
+                # A speaker change is the stronger signal and wins over both: a new
+                # speaker starting mid-sentence still deserves the speaker-change pause.
                 if (
                     speaker_change_silence_ms is not None
                     and prev_speaker is not None
@@ -1722,6 +1837,7 @@ def assemble_chapter(
             prev_tail = audio[-edge_n:] if len(audio) >= edge_n else audio
             prev_index = entry["index"]
             prev_speaker = entry.get("speaker")
+            prev_ends_mid_sentence = ends_mid_sentence(entry.get("text", ""))
             del audio, clipped, pcm  # release this segment's memory before the next one
 
         if sample_rate is None:
@@ -1738,6 +1854,7 @@ def assemble_chapter(
         "gaps": gap_reports,
         "silence_ms_between_segments": silence_ms,
         "speaker_change_silence_ms": speaker_change_silence_ms,
+        "mid_sentence_silence_ms": mid_sentence_silence_ms,
         "total_duration_seconds": total_samples / sample_rate if sample_rate else None,
         "join_reports": join_reports,
     }
@@ -1802,7 +1919,44 @@ def main() -> None:
             "format only); defaults to --silence-ms for every join when unset."
         ),
     )
+    parser.add_argument(
+        "--mid-sentence-silence-ms",
+        type=int,
+        default=100,
+        help=(
+            "Pause length before a segment whose predecessor was cut mid-sentence (a long "
+            "sentence split by --max-chars, ending on ',' / ';' / a word rather than '.'). "
+            "The default 200 ms join reads as an unnatural hesitation there -- the model's "
+            "own pause at such a comma measured ~100 ms (n=1, "
+            "docs/research/audiobook/m4-midsentence-split-results.md), and the owner heard "
+            "the seam in a blind test. Pass the same value as --silence-ms to restore the "
+            "old uniform behavior. A speaker change still wins over this."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--fade-in-ms",
+        type=float,
+        default=DEFAULT_FADE_IN_MS,
+        help=(
+            "Fade-in applied to the start of every generated segment. mlx_audio defaults to "
+            "30 ms, which eats the first phoneme when segments are stitched into a chapter: "
+            "30 ms is a plosive or half a fricative, so a segment opening on 'Шри' loses its "
+            "attack. We insert our own silence between segments, so a long fade buys nothing. "
+            f"Default {DEFAULT_FADE_IN_MS} ms -- short enough to keep the consonant, long "
+            "enough to avoid a click when a segment starts loud (head amplitudes up to 0.42 "
+            "were measured). Pass 30 to restore mlx_audio's own default."
+        ),
+    )
+    parser.add_argument(
+        "--fade-out-ms",
+        type=float,
+        default=DEFAULT_FADE_OUT_MS,
+        help=(
+            "Fade-out applied to the end of every generated segment (mlx_audio default 15 ms). "
+            f"Default {DEFAULT_FADE_OUT_MS} ms, same reasoning as --fade-in-ms."
+        ),
+    )
     parser.add_argument(
         "--voice-name",
         type=str,
@@ -1837,6 +1991,19 @@ def main() -> None:
         help="With --ref-audio, also save the encoded reference under voices/<name>.npy+.txt.",
     )
     parser.add_argument("--voices-dir", type=Path, default=VOICES_DIR)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=MODEL_ID,
+        help=(
+            "Refs #57 (M6): TTS model to use -- an HF repo id (default) or a local "
+            "converted checkpoint directory, e.g. models/higgs-tts-3-4b-8bit (see "
+            "scripts/quantize_higgs_tts.py). ADDITIONAL, opt-in option; the default stays "
+            "the full-precision model. A chapter's manifest records the model that "
+            "generated it and refuses to resume under a different one (see "
+            "load_or_create_manifest) -- do not mix models within one chapter."
+        ),
+    )
     args = parser.parse_args()
 
     given = [
@@ -1901,14 +2068,14 @@ def main() -> None:
     if not args.assemble_only:
         from mlx_audio.tts.utils import load
 
-        model = load(MODEL_ID, model_type="higgs_audio_v3")
+        model = load(args.model, model_type="higgs_audio_v3")
 
     voice_reference = None
     if args.voice_name is not None or args.ref_audio is not None:
         if model is None:
             from mlx_audio.tts.utils import load
 
-            model = load(MODEL_ID, model_type="higgs_audio_v3")
+            model = load(args.model, model_type="higgs_audio_v3")
         voice_reference = resolve_voice_reference(
             model, args.voice_name, args.ref_audio, ref_text, args.save_voice_as, args.voices_dir
         )
@@ -1919,6 +2086,9 @@ def main() -> None:
         max_chars=args.max_chars,
         tag_scope=args.tag_scope,
         voice_reference=voice_reference,
+        fade_in_ms=args.fade_in_ms,
+        fade_out_ms=args.fade_out_ms,
+        model_id=args.model,
     )
 
     if not args.assemble_only:
@@ -1951,6 +2121,7 @@ def main() -> None:
             allow_gaps=args.allow_gaps,
             gap_silence_ms=args.gap_silence_ms,
             speaker_change_silence_ms=args.speaker_change_silence_ms,
+            mid_sentence_silence_ms=args.mid_sentence_silence_ms,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
 

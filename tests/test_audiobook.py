@@ -136,7 +136,9 @@ class TestF4AtomicManifest(unittest.TestCase):
             # Now verify the fixed recovery path: a good manifest, a good .bak, then a
             # corrupt primary -- load_or_create_manifest must recover from .bak instead
             # of raising an uncaught JSONDecodeError.
-            good = {"model": ab.MODEL_ID, "max_chars": 1, "tag_scope": "chunk", "segments": []}
+            good = {"model": ab.MODEL_ID, "max_chars": 1, "tag_scope": "chunk",
+                    "fades_ms": [ab.DEFAULT_FADE_IN_MS, ab.DEFAULT_FADE_OUT_MS],
+                    "segments": []}
             manifest_path.write_text(json.dumps(good), encoding="utf-8")
             bak_path = Path(d) / "manifest.json.bak"
             bak_path.write_text(json.dumps(good), encoding="utf-8")
@@ -166,7 +168,8 @@ class TestF5RetryAndContinueOnError(unittest.TestCase):
             self.always_fail = always_fail
             self.calls = 0
 
-        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                     fade_in_ms=None, fade_out_ms=None):
             self.calls += 1
             if self.always_fail or self.calls <= self.fail_times:
                 raise RuntimeError("simulated generation failure")
@@ -222,7 +225,8 @@ class TestF5RetryAndContinueOnError(unittest.TestCase):
             real_generate = model.generate
             calls_per_text = {}
 
-            def flaky_generate(text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+            def flaky_generate(text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                               fade_in_ms=None, fade_out_ms=None):
                 calls_per_text[text] = calls_per_text.get(text, 0) + 1
                 if "падающее" in text:
                     raise RuntimeError("permanent failure for this segment")
@@ -980,6 +984,246 @@ class TestScreenplaySpeakerChangeAssembly(unittest.TestCase):
             self.assertAlmostEqual(result["total_duration_seconds"], 0.3, places=2)
 
 
+class TestFadeInvalidatesResume(unittest.TestCase):
+    """Changing the fades must refuse to resume, like the voice reference does.
+
+    The fades are baked into every wav at generation time and are NOT part of the
+    segment hash (which keys on speaker+text only). Without this guard, re-running
+    with corrected fades would happily reuse every segment whose onset the old fade
+    had already damaged, and the chapter would come out uneven with nothing to point
+    at. The damage cannot be repaired afterwards either: at 16-bit the first samples
+    quantize to 0/-1/5, so dividing the ramp back out yields noise, not the consonant.
+    """
+
+    def _write(self, d, **extra):
+        chunks = ab.chunk_sentences(ab.split_sentences("Одно предложение тут."), max_chars=500)
+        mp = Path(d) / "manifest.json"
+        base = {"model": ab.MODEL_ID, "max_chars": 500, "tag_scope": "chunk",
+                "voice_reference": None, "segments": []}
+        base.update(extra)
+        mp.write_text(json.dumps(base), encoding="utf-8")
+        return chunks, mp
+
+    def test_changed_fades_refuse_to_resume(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks, mp = self._write(d, fades_ms=[30.0, 15.0])
+            with self.assertRaises(RuntimeError) as ctx:
+                ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=5.0, fade_out_ms=5.0)
+            self.assertIn("fades_ms", str(ctx.exception))
+
+    def test_same_fades_resume_fine(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks, mp = self._write(d, fades_ms=[5.0, 5.0])
+            m = ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=5.0, fade_out_ms=5.0)
+            self.assertIn("segments", m)
+
+    def test_missing_field_reads_as_mlx_audios_old_defaults(self):
+        """Not "unknown, wave it through" — such a manifest provably used 30/15."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks, mp = self._write(d)  # no fades_ms at all
+            # resuming with the corrected fades must refuse...
+            with self.assertRaises(RuntimeError) as ctx:
+                ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=5.0, fade_out_ms=5.0)
+            self.assertIn("отсутствует в манифесте", str(ctx.exception))
+            # ...but resuming with the old values it was actually made with must work.
+            m = ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=30.0, fade_out_ms=15.0)
+            self.assertIn("segments", m)
+
+    def test_new_manifest_records_the_fades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks = ab.chunk_sentences(ab.split_sentences("Одно предложение тут."), max_chars=500)
+            m = ab.build_manifest(chunks, max_chars=500, tag_scope="chunk",
+                                  fade_in_ms=7.0, fade_out_ms=3.0)
+            self.assertEqual(m["fades_ms"], [7.0, 3.0])
+
+
+class TestFadeThreadedIntoGeneration(unittest.TestCase):
+    """The fade lengths must actually reach model.generate()/batch_generate().
+
+    mlx_audio defaults to fade_in_ms=30, which multiplies the first 30 ms of every
+    segment by a 0->1 ramp -- long enough to swallow a plosive or half a fricative,
+    so a segment opening on "Шри" loses its attack. The owner heard exactly that once
+    the voice reference removed the per-seam voice change that had been masking it.
+    Measured on chapter-114-e2: with fade 30 the first 40 ms sit at 0.001-0.004, with
+    fade 5 at 0.004-0.056. If these kwargs silently stop being forwarded, the defect
+    comes back inaudibly to the tests, so assert the wiring on both paths.
+    """
+
+    class _RecordingModel:
+        def __init__(self):
+            self.generate_kwargs = []
+            self.batch_kwargs = []
+
+        @staticmethod
+        def _result(text):
+            sr = 24000
+            n = max(1, int(len(text) * 0.05 * sr))
+            return type("R", (), {"audio": np.zeros(n, dtype=np.float64),
+                                  "sample_rate": sr, "sequence_idx": 0})()
+
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None,
+                     ref_text=None, fade_in_ms=None, fade_out_ms=None):
+            self.generate_kwargs.append((fade_in_ms, fade_out_ms))
+            return [self._result(text)]
+
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None,
+                           ref_text=None, fade_in_ms=None, fade_out_ms=None):
+            self.batch_kwargs.append((fade_in_ms, fade_out_ms))
+            for i, t in enumerate(texts):
+                r = self._result(t)
+                r.sequence_idx = i
+                yield r
+
+    def _manifest(self, d, texts):
+        chunks = [ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t)
+                  for i, t in enumerate(texts)]
+        manifest_path = Path(d) / "manifest.json"
+        return ab.build_manifest(chunks, max_chars=500, tag_scope="chunk"), manifest_path
+
+    def test_defaults_are_short_not_mlx_audios_thirty(self):
+        """The whole point of the fix: our default must not be 30 ms."""
+        self.assertLess(ab.DEFAULT_FADE_IN_MS, 30.0)
+        self.assertGreater(ab.DEFAULT_FADE_IN_MS, 0.0,
+                           "not zero either -- a jump from silence to a loud onset clicks")
+
+    def test_unbatched_path_forwards_the_fades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            manifest, mp = self._manifest(d, ["Шри Сута Госвами сказал."])
+            model = self._RecordingModel()
+            ab.generate_segments(model, manifest, mp, batch_size=1,
+                                 fade_in_ms=7.0, fade_out_ms=3.0)
+            self.assertEqual(model.generate_kwargs, [(7.0, 3.0)])
+
+    def test_batched_path_forwards_the_fades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            manifest, mp = self._manifest(d, ["Первый.", "Второй.", "Третий."])
+            model = self._RecordingModel()
+            ab.generate_segments(model, manifest, mp, batch_size=3,
+                                 fade_in_ms=7.0, fade_out_ms=3.0)
+            self.assertEqual(model.batch_kwargs, [(7.0, 3.0)])
+
+    def test_defaults_reach_the_model_when_not_passed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            manifest, mp = self._manifest(d, ["Одна фраза."])
+            model = self._RecordingModel()
+            ab.generate_segments(model, manifest, mp, batch_size=1)
+            self.assertEqual(model.generate_kwargs,
+                             [(ab.DEFAULT_FADE_IN_MS, ab.DEFAULT_FADE_OUT_MS)])
+
+
+class TestMidSentenceJoinSilence(unittest.TestCase):
+    """assemble_chapter's mid_sentence_silence_ms (Refs #57).
+
+    The owner heard the splice seam in a blind test (`midsentence_split` survey set);
+    the measured cause was timing, not pitch -- the fixed 200 ms join is ~2x the model's
+    own ~100 ms pause at the comma a long sentence gets cut on
+    (docs/research/audiobook/m4-midsentence-split-results.md, n=1).
+    """
+
+    def _make_segment(self, d, name, seconds, sr=8000, value=0.2):
+        path = Path(d) / name
+        n = int(seconds * sr)
+        ab.write_wav(path, np.full(n, value, dtype=np.float64), sr)
+
+    def test_ends_mid_sentence_classifies_real_cuts(self):
+        # Cut mid-sentence: what _force_split_long_sentence actually produces.
+        self.assertTrue(ab.ends_mid_sentence("Хотя он и старался скрыть величие,"))
+        self.assertTrue(ab.ends_mid_sentence("первая часть;"))
+        self.assertTrue(ab.ends_mid_sentence("оборван на слове"))
+        # Genuine sentence ends, including closing quotes/brackets after the punctuation.
+        self.assertFalse(ab.ends_mid_sentence("Это конец."))
+        self.assertFalse(ab.ends_mid_sentence("Неужели?"))
+        self.assertFalse(ab.ends_mid_sentence("Очень хорошо!»"))
+        self.assertFalse(ab.ends_mid_sentence('Он сказал: "Хорошо."'))
+        self.assertFalse(ab.ends_mid_sentence("многоточие…"))
+        # Empty/whitespace must not raise and must not claim a continuation.
+        self.assertFalse(ab.ends_mid_sentence("   "))
+
+    def test_mid_sentence_join_uses_the_shorter_pause(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            self._make_segment(d, "seg2.wav", 0.1)
+            manifest = {
+                "segments": [
+                    # seg0 is cut mid-sentence -> the join before seg1 is the short one.
+                    {"index": 0, "status": "done", "output_path": "seg0.wav", "text": "Хотя он и старался,"},
+                    # seg1 ends properly -> the join before seg2 is the normal one.
+                    {"index": 1, "status": "done", "output_path": "seg1.wav", "text": "мудрецы почтили его."},
+                    {"index": 2, "status": "done", "output_path": "seg2.wav", "text": "Следующее предложение."},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=200,
+                mid_sentence_silence_ms=100,
+            )
+            # 0.3s audio + one mid-sentence join (0.1) + one normal join (0.2) = 0.6s.
+            self.assertAlmostEqual(result["total_duration_seconds"], 0.6, places=2)
+            self.assertEqual(result["mid_sentence_silence_ms"], 100)
+
+    def test_unset_keeps_the_old_uniform_behavior(self):
+        """Regression guard: without the flag nothing about assembly changes."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            manifest = {
+                "segments": [
+                    {"index": 0, "status": "done", "output_path": "seg0.wav", "text": "Хотя он и старался,"},
+                    {"index": 1, "status": "done", "output_path": "seg1.wav", "text": "конец."},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=200,
+            )
+            self.assertAlmostEqual(result["total_duration_seconds"], 0.4, places=2)
+
+    def test_speaker_change_wins_over_mid_sentence(self):
+        """A new speaker starting mid-sentence still earns the speaker-change pause."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            manifest = {
+                "segments": [
+                    {"index": 0, "status": "done", "output_path": "seg0.wav",
+                     "text": "Мудрецы сказали,", "speaker": "narrator"},
+                    {"index": 1, "status": "done", "output_path": "seg1.wav",
+                     "text": "О царь!", "speaker": "sages"},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=200,
+                mid_sentence_silence_ms=100,
+                speaker_change_silence_ms=900,
+            )
+            self.assertAlmostEqual(result["total_duration_seconds"], 1.1, places=2)
+
+
 class TestStressApostropheNotation(unittest.TestCase):
     """Refs #57: the owner confirmed by ear (docs/research/audiobook/m4-tag-inventory-results.md
     sec. 3) that an apostrophe placed right after the stressed vowel ("за'мок") is the one
@@ -1111,7 +1355,8 @@ class TestBatchGenerationIntegration(unittest.TestCase):
             n = max(1, int(len(text) * 0.05 * self.SR))
             return np.zeros(n, dtype=np.float64)
 
-        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                     fade_in_ms=None, fade_out_ms=None):
             # Deliberately always succeeds here, even for a `fail_substrings` text -- that
             # knob only makes `batch_generate` produce bad audio for the matching row, so
             # tests can verify the single-segment fallback path actually rescues it.
@@ -1119,7 +1364,8 @@ class TestBatchGenerationIntegration(unittest.TestCase):
             self.generate_ref_kwargs.append((ref_audio_codes, ref_text))
             return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
 
-        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                           fade_in_ms=None, fade_out_ms=None):
             self.batch_calls.append(list(texts))
             self.batch_ref_kwargs.append((ref_audio_codes, ref_text))
             if len(self.batch_calls) <= self.fail_batch_times:
@@ -1500,6 +1746,68 @@ class TestVoiceReferenceManifestInvalidation(unittest.TestCase):
             self.assertIsNone(reloaded["voice_reference"])
 
 
+class TestModelSelectionManifestInvalidation(unittest.TestCase):
+    """Refs #57 (M6, 8-bit quantization): --model is recorded in the manifest header
+    (`model`, default MODEL_ID) exactly like voice_reference/fades_ms above, and resuming
+    under a DIFFERENT model must refuse -- mixing segments generated by the full-precision
+    model and the 8-bit checkpoint in one chapter is the same class of bug as mixing voice
+    references or fade lengths. This must hold for a local checkpoint PATH
+    (e.g. "models/higgs-tts-3-4b-8bit"), not just an HF repo id -- the comparison is a
+    plain string equality, so it works for both without special-casing either."""
+
+    def _chunks(self, texts):
+        return [ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t) for i, t in enumerate(texts)]
+
+    def test_same_model_resumes_without_error(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение."])
+            ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                                        model_id="bosonai/higgs-tts-3-4b")
+            reloaded = ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                                                   model_id="bosonai/higgs-tts-3-4b")
+            self.assertEqual(reloaded["model"], "bosonai/higgs-tts-3-4b")
+
+    def test_default_model_id_is_recorded_when_unspecified(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение."])
+            manifest = ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence")
+            self.assertEqual(manifest["model"], ab.MODEL_ID)
+
+    def test_switching_to_local_quantized_checkpoint_refuses_to_resume(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение."])
+            ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                                        model_id="bosonai/higgs-tts-3-4b")
+            with self.assertRaises(RuntimeError) as ctx:
+                ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                                            model_id="models/higgs-tts-3-4b-8bit")
+            self.assertIn("model", str(ctx.exception))
+            self.assertIn("models/higgs-tts-3-4b-8bit", str(ctx.exception))
+
+    def test_switching_from_local_quantized_checkpoint_also_refuses(self):
+        """Direction matters too: starting a chapter with the 8-bit checkpoint and later
+        resuming under the full model must refuse just as loudly as the reverse."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            manifest_path = Path(d) / "manifest.json"
+            chunks = self._chunks(["Первое предложение."])
+            ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                                        model_id="models/higgs-tts-3-4b-8bit")
+            with self.assertRaises(RuntimeError):
+                ab.load_or_create_manifest(manifest_path, chunks, max_chars=500, tag_scope="sentence",
+                                            model_id="bosonai/higgs-tts-3-4b")
+
+
 class TestVoiceReferenceThreadedIntoGeneration(unittest.TestCase):
     """Refs #57: the resolved reference must reach EVERY segment's model call, in both the
     unbatched (batch_size=1) and batched (batch_size>1) paths -- not just the first
@@ -1518,11 +1826,13 @@ class TestVoiceReferenceThreadedIntoGeneration(unittest.TestCase):
             n = max(1, int(len(text) * 0.05 * self.SR))
             return np.zeros(n, dtype=np.float64)
 
-        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                     fade_in_ms=None, fade_out_ms=None):
             self.generate_ref_kwargs.append((ref_audio_codes, ref_text))
             return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
 
-        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                           fade_in_ms=None, fade_out_ms=None):
             self.batch_ref_kwargs.append((ref_audio_codes, ref_text))
             for idx, t in enumerate(texts):
                 yield type(

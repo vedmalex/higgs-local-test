@@ -1,0 +1,583 @@
+{
+  "id": "reference_candidates",
+  "title": "Отбор эталона голоса: 5 дублей варианта А (issue #118)",
+  "priority": 1,
+  "description": "output/ref_candidates/take1..5 — пять дублей одного и того же текста (вариант А из docs/research/audiobook/reference-voice-text-design.md), сгенерированных нынешним эталоном narrator_e0. Различаются только случайностью выбора при генерации. Задача — выбрать ЦЕЛЬНЫЙ дубль: эталон кодируется однажды и подставляется в каждый сегмент книги, поэтому мелкий изъян разойдётся везде. Измерено объективно: высота всех дублей 128.3-137.5 Гц против 131.9 у эталона — клонирование держит голос. Расходятся они в паузах: у дубля 3 их три на 500 мс, у дубля 1 — шестнадцать на 3960 мс при длительности 29.7 с. По числам лучший — дубль 3, но у него же самый узкий разброс тона (46.8 против 57.5 у эталона), то есть возможна вялость — это числа не решают, нужен слух. Это НЕ слепая проверка: правильных ответов нет, идёт отбор.",
+  "tasks": [
+    {
+      "id": "refcand-1-names",
+      "type": "single_rating",
+      "question": "Дубль 1 из 5. Санскритские имена — Ганги, Шукадеву, Махараджу Парикшита, Кришне. Произнесены верно? Это ворота: если имена звучат плохо, эталон придётся брать из варианта без имён — иначе неудачное произношение станет манерой всей книги. (измерено: высота 128.3 Гц (у нынешнего эталона 131.9), разброс тона 56.4 (у эталона 57.5), пауз 16 на 3960 мс (у эталона 0), реверберация 39.8 мс (у эталона 76.8))",
+      "options": [
+        "Все имена верно",
+        "Есть искажённые имена",
+        "Все искажены",
+        "Не разобрать"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take1/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 1,
+          "variant": "A (с санскритскими именами)",
+          "metrics": {
+            "file": "output/ref_candidates/take1/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.72,
+            "f0_median_hz": 128.3,
+            "f0_min_hz": 65.0,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 335.0,
+            "f0_std_hz": 56.4,
+            "voiced_frame_ratio": 0.755,
+            "mean_energy_db": -30.4,
+            "num_pauses": 16,
+            "total_pause_ms": 3960,
+            "mean_pause_ms": 247.5,
+            "reverb_tail_ms": 39.8,
+            "spectral_centroid_hz": 2100.8,
+            "spectral_tilt_db_per_khz": -4.9,
+            "sibilance_ratio": 0.104,
+            "low_band_ratio": 0.3459
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-1-clean",
+      "type": "single_rating",
+      "question": "Дубль 1 из 5. Цельность записи: запинки, лишние паузы, призвуки, смазанные слова. Эталон войдёт в каждый сегмент книги, поэтому мелкий изъян разойдётся везде.",
+      "options": [
+        "Чисто, годится в эталон",
+        "Мелкие изъяны, терпимо",
+        "Заметные запинки или призвуки",
+        "Негодно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take1/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 1,
+          "metrics": {
+            "file": "output/ref_candidates/take1/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.72,
+            "f0_median_hz": 128.3,
+            "f0_min_hz": 65.0,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 335.0,
+            "f0_std_hz": 56.4,
+            "voiced_frame_ratio": 0.755,
+            "mean_energy_db": -30.4,
+            "num_pauses": 16,
+            "total_pause_ms": 3960,
+            "mean_pause_ms": 247.5,
+            "reverb_tail_ms": 39.8,
+            "spectral_centroid_hz": 2100.8,
+            "spectral_tilt_db_per_khz": -4.9,
+            "sibilance_ratio": 0.104,
+            "low_band_ratio": 0.3459
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-1-prosody",
+      "type": "single_rating",
+      "question": "Дубль 1 из 5. Слышны ли в нём заданные оси: вопросительный подъём (два вопроса), восклицание «Слушай же внимательно!», и смена темпа в конце («сначала неторопливо... потом всё увереннее»)?",
+      "options": [
+        "Все три слышны",
+        "Слышны вопросы и восклицание, темп ровный",
+        "Слышно только частично",
+        "Читает ровно, осей не слышно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take1/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 1,
+          "metrics": {
+            "file": "output/ref_candidates/take1/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.72,
+            "f0_median_hz": 128.3,
+            "f0_min_hz": 65.0,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 335.0,
+            "f0_std_hz": 56.4,
+            "voiced_frame_ratio": 0.755,
+            "mean_energy_db": -30.4,
+            "num_pauses": 16,
+            "total_pause_ms": 3960,
+            "mean_pause_ms": 247.5,
+            "reverb_tail_ms": 39.8,
+            "spectral_centroid_hz": 2100.8,
+            "spectral_tilt_db_per_khz": -4.9,
+            "sibilance_ratio": 0.104,
+            "low_band_ratio": 0.3459
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-2-names",
+      "type": "single_rating",
+      "question": "Дубль 2 из 5. Санскритские имена — Ганги, Шукадеву, Махараджу Парикшита, Кришне. Произнесены верно? Это ворота: если имена звучат плохо, эталон придётся брать из варианта без имён — иначе неудачное произношение станет манерой всей книги. (измерено: высота 129.7 Гц (у нынешнего эталона 131.9), разброс тона 58.0 (у эталона 57.5), пауз 5 на 1220 мс (у эталона 0), реверберация 53.6 мс (у эталона 76.8))",
+      "options": [
+        "Все имена верно",
+        "Есть искажённые имена",
+        "Все искажены",
+        "Не разобрать"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take2/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 2,
+          "variant": "A (с санскритскими именами)",
+          "metrics": {
+            "file": "output/ref_candidates/take2/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 28.32,
+            "f0_median_hz": 129.7,
+            "f0_min_hz": 62.3,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 337.7,
+            "f0_std_hz": 58.0,
+            "voiced_frame_ratio": 0.773,
+            "mean_energy_db": -28.0,
+            "num_pauses": 5,
+            "total_pause_ms": 1220,
+            "mean_pause_ms": 244.0,
+            "reverb_tail_ms": 53.6,
+            "spectral_centroid_hz": 2060.2,
+            "spectral_tilt_db_per_khz": -4.96,
+            "sibilance_ratio": 0.1046,
+            "low_band_ratio": 0.3525
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-2-clean",
+      "type": "single_rating",
+      "question": "Дубль 2 из 5. Цельность записи: запинки, лишние паузы, призвуки, смазанные слова. Эталон войдёт в каждый сегмент книги, поэтому мелкий изъян разойдётся везде.",
+      "options": [
+        "Чисто, годится в эталон",
+        "Мелкие изъяны, терпимо",
+        "Заметные запинки или призвуки",
+        "Негодно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take2/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 2,
+          "metrics": {
+            "file": "output/ref_candidates/take2/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 28.32,
+            "f0_median_hz": 129.7,
+            "f0_min_hz": 62.3,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 337.7,
+            "f0_std_hz": 58.0,
+            "voiced_frame_ratio": 0.773,
+            "mean_energy_db": -28.0,
+            "num_pauses": 5,
+            "total_pause_ms": 1220,
+            "mean_pause_ms": 244.0,
+            "reverb_tail_ms": 53.6,
+            "spectral_centroid_hz": 2060.2,
+            "spectral_tilt_db_per_khz": -4.96,
+            "sibilance_ratio": 0.1046,
+            "low_band_ratio": 0.3525
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-2-prosody",
+      "type": "single_rating",
+      "question": "Дубль 2 из 5. Слышны ли в нём заданные оси: вопросительный подъём (два вопроса), восклицание «Слушай же внимательно!», и смена темпа в конце («сначала неторопливо... потом всё увереннее»)?",
+      "options": [
+        "Все три слышны",
+        "Слышны вопросы и восклицание, темп ровный",
+        "Слышно только частично",
+        "Читает ровно, осей не слышно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take2/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 2,
+          "metrics": {
+            "file": "output/ref_candidates/take2/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 28.32,
+            "f0_median_hz": 129.7,
+            "f0_min_hz": 62.3,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 337.7,
+            "f0_std_hz": 58.0,
+            "voiced_frame_ratio": 0.773,
+            "mean_energy_db": -28.0,
+            "num_pauses": 5,
+            "total_pause_ms": 1220,
+            "mean_pause_ms": 244.0,
+            "reverb_tail_ms": 53.6,
+            "spectral_centroid_hz": 2060.2,
+            "spectral_tilt_db_per_khz": -4.96,
+            "sibilance_ratio": 0.1046,
+            "low_band_ratio": 0.3525
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-3-names",
+      "type": "single_rating",
+      "question": "Дубль 3 из 5. Санскритские имена — Ганги, Шукадеву, Махараджу Парикшита, Кришне. Произнесены верно? Это ворота: если имена звучат плохо, эталон придётся брать из варианта без имён — иначе неудачное произношение станет манерой всей книги. (измерено: высота 131.1 Гц (у нынешнего эталона 131.9), разброс тона 46.8 (у эталона 57.5), пауз 3 на 500 мс (у эталона 0), реверберация 70.8 мс (у эталона 76.8))",
+      "options": [
+        "Все имена верно",
+        "Есть искажённые имена",
+        "Все искажены",
+        "Не разобрать"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take3/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 3,
+          "variant": "A (с санскритскими именами)",
+          "metrics": {
+            "file": "output/ref_candidates/take3/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.12,
+            "f0_median_hz": 131.1,
+            "f0_min_hz": 64.9,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 335.1,
+            "f0_std_hz": 46.8,
+            "voiced_frame_ratio": 0.804,
+            "mean_energy_db": -27.8,
+            "num_pauses": 3,
+            "total_pause_ms": 500,
+            "mean_pause_ms": 166.7,
+            "reverb_tail_ms": 70.8,
+            "spectral_centroid_hz": 1973.0,
+            "spectral_tilt_db_per_khz": -5.09,
+            "sibilance_ratio": 0.0982,
+            "low_band_ratio": 0.344
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-3-clean",
+      "type": "single_rating",
+      "question": "Дубль 3 из 5. Цельность записи: запинки, лишние паузы, призвуки, смазанные слова. Эталон войдёт в каждый сегмент книги, поэтому мелкий изъян разойдётся везде.",
+      "options": [
+        "Чисто, годится в эталон",
+        "Мелкие изъяны, терпимо",
+        "Заметные запинки или призвуки",
+        "Негодно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take3/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 3,
+          "metrics": {
+            "file": "output/ref_candidates/take3/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.12,
+            "f0_median_hz": 131.1,
+            "f0_min_hz": 64.9,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 335.1,
+            "f0_std_hz": 46.8,
+            "voiced_frame_ratio": 0.804,
+            "mean_energy_db": -27.8,
+            "num_pauses": 3,
+            "total_pause_ms": 500,
+            "mean_pause_ms": 166.7,
+            "reverb_tail_ms": 70.8,
+            "spectral_centroid_hz": 1973.0,
+            "spectral_tilt_db_per_khz": -5.09,
+            "sibilance_ratio": 0.0982,
+            "low_band_ratio": 0.344
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-3-prosody",
+      "type": "single_rating",
+      "question": "Дубль 3 из 5. Слышны ли в нём заданные оси: вопросительный подъём (два вопроса), восклицание «Слушай же внимательно!», и смена темпа в конце («сначала неторопливо... потом всё увереннее»)?",
+      "options": [
+        "Все три слышны",
+        "Слышны вопросы и восклицание, темп ровный",
+        "Слышно только частично",
+        "Читает ровно, осей не слышно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take3/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 3,
+          "metrics": {
+            "file": "output/ref_candidates/take3/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.12,
+            "f0_median_hz": 131.1,
+            "f0_min_hz": 64.9,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 335.1,
+            "f0_std_hz": 46.8,
+            "voiced_frame_ratio": 0.804,
+            "mean_energy_db": -27.8,
+            "num_pauses": 3,
+            "total_pause_ms": 500,
+            "mean_pause_ms": 166.7,
+            "reverb_tail_ms": 70.8,
+            "spectral_centroid_hz": 1973.0,
+            "spectral_tilt_db_per_khz": -5.09,
+            "sibilance_ratio": 0.0982,
+            "low_band_ratio": 0.344
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-4-names",
+      "type": "single_rating",
+      "question": "Дубль 4 из 5. Санскритские имена — Ганги, Шукадеву, Махараджу Парикшита, Кришне. Произнесены верно? Это ворота: если имена звучат плохо, эталон придётся брать из варианта без имён — иначе неудачное произношение станет манерой всей книги. (измерено: высота 137.5 Гц (у нынешнего эталона 131.9), разброс тона 54.4 (у эталона 57.5), пауз 4 на 880 мс (у эталона 0), реверберация 55.5 мс (у эталона 76.8))",
+      "options": [
+        "Все имена верно",
+        "Есть искажённые имена",
+        "Все искажены",
+        "Не разобрать"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take4/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 4,
+          "variant": "A (с санскритскими именами)",
+          "metrics": {
+            "file": "output/ref_candidates/take4/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.12,
+            "f0_median_hz": 137.5,
+            "f0_min_hz": 66.3,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 333.7,
+            "f0_std_hz": 54.4,
+            "voiced_frame_ratio": 0.793,
+            "mean_energy_db": -27.5,
+            "num_pauses": 4,
+            "total_pause_ms": 880,
+            "mean_pause_ms": 220.0,
+            "reverb_tail_ms": 55.5,
+            "spectral_centroid_hz": 1969.9,
+            "spectral_tilt_db_per_khz": -5.0,
+            "sibilance_ratio": 0.099,
+            "low_band_ratio": 0.3476
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-4-clean",
+      "type": "single_rating",
+      "question": "Дубль 4 из 5. Цельность записи: запинки, лишние паузы, призвуки, смазанные слова. Эталон войдёт в каждый сегмент книги, поэтому мелкий изъян разойдётся везде.",
+      "options": [
+        "Чисто, годится в эталон",
+        "Мелкие изъяны, терпимо",
+        "Заметные запинки или призвуки",
+        "Негодно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take4/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 4,
+          "metrics": {
+            "file": "output/ref_candidates/take4/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.12,
+            "f0_median_hz": 137.5,
+            "f0_min_hz": 66.3,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 333.7,
+            "f0_std_hz": 54.4,
+            "voiced_frame_ratio": 0.793,
+            "mean_energy_db": -27.5,
+            "num_pauses": 4,
+            "total_pause_ms": 880,
+            "mean_pause_ms": 220.0,
+            "reverb_tail_ms": 55.5,
+            "spectral_centroid_hz": 1969.9,
+            "spectral_tilt_db_per_khz": -5.0,
+            "sibilance_ratio": 0.099,
+            "low_band_ratio": 0.3476
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-4-prosody",
+      "type": "single_rating",
+      "question": "Дубль 4 из 5. Слышны ли в нём заданные оси: вопросительный подъём (два вопроса), восклицание «Слушай же внимательно!», и смена темпа в конце («сначала неторопливо... потом всё увереннее»)?",
+      "options": [
+        "Все три слышны",
+        "Слышны вопросы и восклицание, темп ровный",
+        "Слышно только частично",
+        "Читает ровно, осей не слышно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take4/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 4,
+          "metrics": {
+            "file": "output/ref_candidates/take4/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 29.12,
+            "f0_median_hz": 137.5,
+            "f0_min_hz": 66.3,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 333.7,
+            "f0_std_hz": 54.4,
+            "voiced_frame_ratio": 0.793,
+            "mean_energy_db": -27.5,
+            "num_pauses": 4,
+            "total_pause_ms": 880,
+            "mean_pause_ms": 220.0,
+            "reverb_tail_ms": 55.5,
+            "spectral_centroid_hz": 1969.9,
+            "spectral_tilt_db_per_khz": -5.0,
+            "sibilance_ratio": 0.099,
+            "low_band_ratio": 0.3476
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-5-names",
+      "type": "single_rating",
+      "question": "Дубль 5 из 5. Санскритские имена — Ганги, Шукадеву, Махараджу Парикшита, Кришне. Произнесены верно? Это ворота: если имена звучат плохо, эталон придётся брать из варианта без имён — иначе неудачное произношение станет манерой всей книги. (измерено: высота 130.4 Гц (у нынешнего эталона 131.9), разброс тона 57.3 (у эталона 57.5), пауз 10 на 2280 мс (у эталона 0), реверберация 47.5 мс (у эталона 76.8))",
+      "options": [
+        "Все имена верно",
+        "Есть искажённые имена",
+        "Все искажены",
+        "Не разобрать"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take5/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 5,
+          "variant": "A (с санскритскими именами)",
+          "metrics": {
+            "file": "output/ref_candidates/take5/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 27.8,
+            "f0_median_hz": 130.4,
+            "f0_min_hz": 61.5,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 338.5,
+            "f0_std_hz": 57.3,
+            "voiced_frame_ratio": 0.769,
+            "mean_energy_db": -28.7,
+            "num_pauses": 10,
+            "total_pause_ms": 2280,
+            "mean_pause_ms": 228.0,
+            "reverb_tail_ms": 47.5,
+            "spectral_centroid_hz": 2042.0,
+            "spectral_tilt_db_per_khz": -5.03,
+            "sibilance_ratio": 0.1018,
+            "low_band_ratio": 0.3438
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-5-clean",
+      "type": "single_rating",
+      "question": "Дубль 5 из 5. Цельность записи: запинки, лишние паузы, призвуки, смазанные слова. Эталон войдёт в каждый сегмент книги, поэтому мелкий изъян разойдётся везде.",
+      "options": [
+        "Чисто, годится в эталон",
+        "Мелкие изъяны, терпимо",
+        "Заметные запинки или призвуки",
+        "Негодно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take5/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 5,
+          "metrics": {
+            "file": "output/ref_candidates/take5/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 27.8,
+            "f0_median_hz": 130.4,
+            "f0_min_hz": 61.5,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 338.5,
+            "f0_std_hz": 57.3,
+            "voiced_frame_ratio": 0.769,
+            "mean_energy_db": -28.7,
+            "num_pauses": 10,
+            "total_pause_ms": 2280,
+            "mean_pause_ms": 228.0,
+            "reverb_tail_ms": 47.5,
+            "spectral_centroid_hz": 2042.0,
+            "spectral_tilt_db_per_khz": -5.03,
+            "sibilance_ratio": 0.1018,
+            "low_band_ratio": 0.3438
+          }
+        }
+      }
+    },
+    {
+      "id": "refcand-5-prosody",
+      "type": "single_rating",
+      "question": "Дубль 5 из 5. Слышны ли в нём заданные оси: вопросительный подъём (два вопроса), восклицание «Слушай же внимательно!», и смена темпа в конце («сначала неторопливо... потом всё увереннее»)?",
+      "options": [
+        "Все три слышны",
+        "Слышны вопросы и восклицание, темп ровный",
+        "Слышно только частично",
+        "Читает ровно, осей не слышно"
+      ],
+      "clips": {
+        "A": "output/ref_candidates/take5/segment_a32a1cbd2c87b1ee.wav"
+      },
+      "hidden": {
+        "A": {
+          "take": 5,
+          "metrics": {
+            "file": "output/ref_candidates/take5/segment_a32a1cbd2c87b1ee.wav",
+            "duration_s": 27.8,
+            "f0_median_hz": 130.4,
+            "f0_min_hz": 61.5,
+            "f0_max_hz": 400.0,
+            "f0_range_hz": 338.5,
+            "f0_std_hz": 57.3,
+            "voiced_frame_ratio": 0.769,
+            "mean_energy_db": -28.7,
+            "num_pauses": 10,
+            "total_pause_ms": 2280,
+            "mean_pause_ms": 228.0,
+            "reverb_tail_ms": 47.5,
+            "spectral_centroid_hz": 2042.0,
+            "spectral_tilt_db_per_khz": -5.03,
+            "sibilance_ratio": 0.1018,
+            "low_band_ratio": 0.3438
+          }
+        }
+      }
+    }
+  ]
+}

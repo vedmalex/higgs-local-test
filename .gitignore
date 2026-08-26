@@ -43,3 +43,7 @@ __pycache__/
 # ~11MB) regenerated on demand by m3_real_weights_export.py / m3_decoder_block_prototype.py
 # --real-weights -- derived from the checkpoint, not source, never committed.
 docs/research/mojo-max/.m3_real_weights_block1.npz
+
+# Issue #57: local quantized/converted model checkpoints (mlx_audio.convert output).
+# Weights don't belong in Git -- same policy as the HF cache.
+models/
