@@ -166,7 +166,8 @@ class TestF5RetryAndContinueOnError(unittest.TestCase):
             self.always_fail = always_fail
             self.calls = 0
 
-        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                     fade_in_ms=None, fade_out_ms=None):
             self.calls += 1
             if self.always_fail or self.calls <= self.fail_times:
                 raise RuntimeError("simulated generation failure")
@@ -222,7 +223,8 @@ class TestF5RetryAndContinueOnError(unittest.TestCase):
             real_generate = model.generate
             calls_per_text = {}
 
-            def flaky_generate(text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+            def flaky_generate(text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                               fade_in_ms=None, fade_out_ms=None):
                 calls_per_text[text] = calls_per_text.get(text, 0) + 1
                 if "падающее" in text:
                     raise RuntimeError("permanent failure for this segment")
@@ -980,6 +982,83 @@ class TestScreenplaySpeakerChangeAssembly(unittest.TestCase):
             self.assertAlmostEqual(result["total_duration_seconds"], 0.3, places=2)
 
 
+class TestFadeThreadedIntoGeneration(unittest.TestCase):
+    """The fade lengths must actually reach model.generate()/batch_generate().
+
+    mlx_audio defaults to fade_in_ms=30, which multiplies the first 30 ms of every
+    segment by a 0->1 ramp -- long enough to swallow a plosive or half a fricative,
+    so a segment opening on "Шри" loses its attack. The owner heard exactly that once
+    the voice reference removed the per-seam voice change that had been masking it.
+    Measured on chapter-114-e2: with fade 30 the first 40 ms sit at 0.001-0.004, with
+    fade 5 at 0.004-0.056. If these kwargs silently stop being forwarded, the defect
+    comes back inaudibly to the tests, so assert the wiring on both paths.
+    """
+
+    class _RecordingModel:
+        def __init__(self):
+            self.generate_kwargs = []
+            self.batch_kwargs = []
+
+        @staticmethod
+        def _result(text):
+            sr = 24000
+            n = max(1, int(len(text) * 0.05 * sr))
+            return type("R", (), {"audio": np.zeros(n, dtype=np.float64),
+                                  "sample_rate": sr, "sequence_idx": 0})()
+
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None,
+                     ref_text=None, fade_in_ms=None, fade_out_ms=None):
+            self.generate_kwargs.append((fade_in_ms, fade_out_ms))
+            return [self._result(text)]
+
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None,
+                           ref_text=None, fade_in_ms=None, fade_out_ms=None):
+            self.batch_kwargs.append((fade_in_ms, fade_out_ms))
+            for i, t in enumerate(texts):
+                r = self._result(t)
+                r.sequence_idx = i
+                yield r
+
+    def _manifest(self, d, texts):
+        chunks = [ab.Chunk(index=i, sentences=[t], reopened_tags={}, text=t)
+                  for i, t in enumerate(texts)]
+        manifest_path = Path(d) / "manifest.json"
+        return ab.build_manifest(chunks, max_chars=500, tag_scope="chunk"), manifest_path
+
+    def test_defaults_are_short_not_mlx_audios_thirty(self):
+        """The whole point of the fix: our default must not be 30 ms."""
+        self.assertLess(ab.DEFAULT_FADE_IN_MS, 30.0)
+        self.assertGreater(ab.DEFAULT_FADE_IN_MS, 0.0,
+                           "not zero either -- a jump from silence to a loud onset clicks")
+
+    def test_unbatched_path_forwards_the_fades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            manifest, mp = self._manifest(d, ["Шри Сута Госвами сказал."])
+            model = self._RecordingModel()
+            ab.generate_segments(model, manifest, mp, batch_size=1,
+                                 fade_in_ms=7.0, fade_out_ms=3.0)
+            self.assertEqual(model.generate_kwargs, [(7.0, 3.0)])
+
+    def test_batched_path_forwards_the_fades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            manifest, mp = self._manifest(d, ["Первый.", "Второй.", "Третий."])
+            model = self._RecordingModel()
+            ab.generate_segments(model, manifest, mp, batch_size=3,
+                                 fade_in_ms=7.0, fade_out_ms=3.0)
+            self.assertEqual(model.batch_kwargs, [(7.0, 3.0)])
+
+    def test_defaults_reach_the_model_when_not_passed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            manifest, mp = self._manifest(d, ["Одна фраза."])
+            model = self._RecordingModel()
+            ab.generate_segments(model, manifest, mp, batch_size=1)
+            self.assertEqual(model.generate_kwargs,
+                             [(ab.DEFAULT_FADE_IN_MS, ab.DEFAULT_FADE_OUT_MS)])
+
+
 class TestMidSentenceJoinSilence(unittest.TestCase):
     """assemble_chapter's mid_sentence_silence_ms (Refs #57).
 
@@ -1213,7 +1292,8 @@ class TestBatchGenerationIntegration(unittest.TestCase):
             n = max(1, int(len(text) * 0.05 * self.SR))
             return np.zeros(n, dtype=np.float64)
 
-        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                     fade_in_ms=None, fade_out_ms=None):
             # Deliberately always succeeds here, even for a `fail_substrings` text -- that
             # knob only makes `batch_generate` produce bad audio for the matching row, so
             # tests can verify the single-segment fallback path actually rescues it.
@@ -1221,7 +1301,8 @@ class TestBatchGenerationIntegration(unittest.TestCase):
             self.generate_ref_kwargs.append((ref_audio_codes, ref_text))
             return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
 
-        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                           fade_in_ms=None, fade_out_ms=None):
             self.batch_calls.append(list(texts))
             self.batch_ref_kwargs.append((ref_audio_codes, ref_text))
             if len(self.batch_calls) <= self.fail_batch_times:
@@ -1620,11 +1701,13 @@ class TestVoiceReferenceThreadedIntoGeneration(unittest.TestCase):
             n = max(1, int(len(text) * 0.05 * self.SR))
             return np.zeros(n, dtype=np.float64)
 
-        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def generate(self, text, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                     fade_in_ms=None, fade_out_ms=None):
             self.generate_ref_kwargs.append((ref_audio_codes, ref_text))
             return [type("R", (), {"audio": self._audio_for(text), "sample_rate": self.SR})()]
 
-        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None):
+        def batch_generate(self, texts, temperature, max_new_tokens, ref_audio_codes=None, ref_text=None,
+                           fade_in_ms=None, fade_out_ms=None):
             self.batch_ref_kwargs.append((ref_audio_codes, ref_text))
             for idx, t in enumerate(texts):
                 yield type(

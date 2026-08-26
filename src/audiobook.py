@@ -517,6 +517,23 @@ def ends_mid_sentence(text: str) -> bool:
     return stripped[-1] not in SENTENCE_FINAL_PUNCT
 
 
+# mlx_audio's Higgs v3 `generate`/`batch_generate` default to fade_in_ms=30, fade_out_ms=15
+# (model.py `_apply_fades`): the first 30 ms of every segment is multiplied by a 0->1 ramp.
+# Standalone that only prevents a click; in a stitched chapter it EATS THE FIRST PHONEME --
+# 30 ms is the length of a plosive or half a fricative, so a segment starting on "Шри" or
+# "Махараджа" loses its attack. The owner heard exactly this ("первая буква фрагмента
+# проглатывается") once the voice reference made the seams audible at all; measured on
+# chapter-114-e2's own segments, the opening envelope rises linearly across ~30 ms and only
+# then reaches its plateau (docs/research/audiobook/, join diagnostics).
+#
+# We insert our own silence between segments, so a long fade buys us nothing. Keep a short
+# one: enough to avoid a discontinuity click when a segment starts loud, too short to damp a
+# consonant. NOT zero -- head amplitudes up to 0.42 were measured at segment starts, and
+# jumping from silence straight to that is an audible click.
+DEFAULT_FADE_IN_MS = 5.0
+DEFAULT_FADE_OUT_MS = 5.0
+
+
 def _force_split_long_sentence(sentence: str, max_chars: int) -> list[str]:
     """Split a single sentence that exceeds max_chars on its own (F2).
 
@@ -1255,6 +1272,8 @@ def _generate_single_segment(
     manifest_path: Path,
     ref_audio_codes=None,
     ref_text: Optional[str] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> tuple[bool, Optional[str]]:
     """Generate one segment via `model.generate()` with retry/backoff (F5) and per-segment
     audio-sanity validation (F6). Mutates `entry` in place and calls `save_manifest` after
@@ -1283,6 +1302,8 @@ def _generate_single_segment(
                     max_new_tokens=max_new_tokens,
                     ref_audio_codes=ref_audio_codes,
                     ref_text=ref_text,
+                    fade_in_ms=fade_in_ms,
+                    fade_out_ms=fade_out_ms,
                 )
             )
             generation_seconds = time.perf_counter() - started
@@ -1328,6 +1349,8 @@ def _generate_batch_group(
     manifest_path: Path,
     ref_audio_codes=None,
     ref_text: Optional[str] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> list[tuple[int, dict, bool, Optional[str]]]:
     """Generate every entry in `group` (list of `(seg_i, entry)`, len <= --batch-size)
     through `model.batch_generate()`, with a self-narrowing fallback on failure.
@@ -1385,6 +1408,7 @@ def _generate_batch_group(
             model, entry, out_path, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
             ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+            fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
         )
         return [(seg_i, entry, ok, err)]
 
@@ -1406,6 +1430,7 @@ def _generate_batch_group(
             for r in model.batch_generate(
                 texts=texts, temperature=temperature, max_new_tokens=max_new_tokens,
                 ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+                fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
             ):
                 result_by_pos[r.sequence_idx] = r
             if len(result_by_pos) != len(remaining_now):
@@ -1463,6 +1488,7 @@ def _generate_batch_group(
             model, remaining[mid:], base_dir, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
             ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+            fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
         )
         if remaining[mid:]
         else []
@@ -1483,6 +1509,8 @@ def generate_segments(
     batch_size: int = 1,
     ref_audio_codes=None,
     ref_text: Optional[str] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> dict:
     """Generate every pending segment, writing progress to disk after each one.
 
@@ -1540,6 +1568,7 @@ def generate_segments(
                 model, entry, out_path, temperature, max_new_tokens, max_retries,
                 retry_base_delay, manifest, manifest_path,
                 ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+                fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
             )
             if not succeeded:
                 if not continue_on_error:
@@ -1576,6 +1605,7 @@ def generate_segments(
             model, group, base_dir, temperature, max_new_tokens, max_retries,
             retry_base_delay, manifest, manifest_path,
             ref_audio_codes=ref_audio_codes, ref_text=ref_text,
+            fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
         )
         for _seg_i, entry, succeeded, last_error in outcomes:
             if not succeeded:
@@ -1860,6 +1890,29 @@ def main() -> None:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--fade-in-ms",
+        type=float,
+        default=DEFAULT_FADE_IN_MS,
+        help=(
+            "Fade-in applied to the start of every generated segment. mlx_audio defaults to "
+            "30 ms, which eats the first phoneme when segments are stitched into a chapter: "
+            "30 ms is a plosive or half a fricative, so a segment opening on 'Шри' loses its "
+            "attack. We insert our own silence between segments, so a long fade buys nothing. "
+            f"Default {DEFAULT_FADE_IN_MS} ms -- short enough to keep the consonant, long "
+            "enough to avoid a click when a segment starts loud (head amplitudes up to 0.42 "
+            "were measured). Pass 30 to restore mlx_audio's own default."
+        ),
+    )
+    parser.add_argument(
+        "--fade-out-ms",
+        type=float,
+        default=DEFAULT_FADE_OUT_MS,
+        help=(
+            "Fade-out applied to the end of every generated segment (mlx_audio default 15 ms). "
+            f"Default {DEFAULT_FADE_OUT_MS} ms, same reasoning as --fade-in-ms."
+        ),
+    )
     parser.add_argument(
         "--voice-name",
         type=str,
