@@ -530,6 +530,9 @@ def ends_mid_sentence(text: str) -> bool:
 # one: enough to avoid a discontinuity click when a segment starts loud, too short to damp a
 # consonant. NOT zero -- head amplitudes up to 0.42 were measured at segment starts, and
 # jumping from silence straight to that is an audible click.
+# mlx_audio's own defaults, i.e. what every run generated before we started passing
+# these used. A manifest without a `fades_ms` field was written by such a run.
+MLX_AUDIO_LEGACY_FADES_MS = [30.0, 15.0]
 DEFAULT_FADE_IN_MS = 5.0
 DEFAULT_FADE_OUT_MS = 5.0
 
@@ -1019,6 +1022,8 @@ def build_manifest(
     max_chars: int,
     tag_scope: str,
     voice_reference: Optional["VoiceReference"] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> dict:
     # Auto-detected, not author-set (Refs #57): the author of a screenplay/chapter has no
     # other way to tell a later reader/tool whether stress marks were already placed in the
@@ -1036,6 +1041,9 @@ def build_manifest(
         # segment -- see VoiceReference's docstring for why this must invalidate resume on
         # mismatch the same way model/max_chars/tag_scope already do (load_or_create_manifest).
         "voice_reference": voice_reference.manifest_id() if voice_reference else None,
+        # Refs #57: baked into every wav at generation time and NOT part of the segment
+        # hash, so it must invalidate resume too -- see load_or_create_manifest.
+        "fades_ms": [round(float(fade_in_ms), 3), round(float(fade_out_ms), 3)],
         "created": time.time(),
         "stress_marks_detected": count_stress_marks(full_text),
         "ambiguous_apostrophes_detected": count_ambiguous_apostrophes(full_text),
@@ -1080,6 +1088,8 @@ def load_or_create_manifest(
     max_chars: int,
     tag_scope: str,
     voice_reference: Optional["VoiceReference"] = None,
+    fade_in_ms: float = DEFAULT_FADE_IN_MS,
+    fade_out_ms: float = DEFAULT_FADE_OUT_MS,
 ) -> dict:
     if manifest_path.exists():
         manifest = _load_manifest_with_recovery(manifest_path)
@@ -1110,10 +1120,29 @@ def load_or_create_manifest(
                 f"voice_reference: manifest={manifest.get('voice_reference')!r} vs "
                 f"current={current_ref_id!r}"
             )
+        # Refs #57: the fade lengths are baked into every wav on disk at generation time
+        # (mlx_audio multiplies the first fade_in_ms of the audio by a 0->1 ramp before we
+        # ever see it), and they are NOT part of the segment hash, which keys only on
+        # speaker+text. So a resume under different fades would silently reuse segments
+        # whose onsets were damaged by the old value and mix them with correctly-generated
+        # ones -- the chapter would end up uneven with no visible cause. Worse, the damage
+        # is irrecoverable after the fact: at 16-bit the first samples quantize to 0/-1/5,
+        # so dividing the ramp back out cannot restore the consonant it swallowed.
+        current_fades = [round(float(fade_in_ms), 3), round(float(fade_out_ms), 3)]
+        # A manifest with no `fades_ms` predates this field, which means it was generated
+        # before we passed fades at all -- so mlx_audio's own defaults applied. That is a
+        # fact about when it was written, not a guess, so name them rather than treating
+        # the absence as "unknown" and waving the run through.
+        manifest_fades = manifest.get("fades_ms", MLX_AUDIO_LEGACY_FADES_MS)
+        if manifest_fades != current_fades:
+            shown = ("отсутствует в манифесте, значит прежнее поведение mlx_audio "
+                     f"{MLX_AUDIO_LEGACY_FADES_MS}" if "fades_ms" not in manifest
+                     else repr(manifest_fades))
+            mismatches.append(f"fades_ms: manifest={shown} vs current={current_fades!r}")
         if mismatches:
             raise RuntimeError(
                 "Existing manifest was built with different settings, which changes every "
-                "segment's text -- refusing to resume blindly: " + "; ".join(mismatches)
+                "segment's audio -- refusing to resume blindly: " + "; ".join(mismatches)
             )
 
         # F7: reuse any segment whose own text is unchanged (keyed by content hash), no
@@ -1148,7 +1177,8 @@ def load_or_create_manifest(
         save_manifest(manifest, manifest_path)
         return manifest
 
-    manifest = build_manifest(chunks, max_chars, tag_scope, voice_reference=voice_reference)
+    manifest = build_manifest(chunks, max_chars, tag_scope, voice_reference=voice_reference,
+                              fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms)
     save_manifest(manifest, manifest_path)
     return manifest
 
@@ -2029,6 +2059,8 @@ def main() -> None:
         max_chars=args.max_chars,
         tag_scope=args.tag_scope,
         voice_reference=voice_reference,
+        fade_in_ms=args.fade_in_ms,
+        fade_out_ms=args.fade_out_ms,
     )
 
     if not args.assemble_only:

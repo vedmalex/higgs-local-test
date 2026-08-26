@@ -136,7 +136,9 @@ class TestF4AtomicManifest(unittest.TestCase):
             # Now verify the fixed recovery path: a good manifest, a good .bak, then a
             # corrupt primary -- load_or_create_manifest must recover from .bak instead
             # of raising an uncaught JSONDecodeError.
-            good = {"model": ab.MODEL_ID, "max_chars": 1, "tag_scope": "chunk", "segments": []}
+            good = {"model": ab.MODEL_ID, "max_chars": 1, "tag_scope": "chunk",
+                    "fades_ms": [ab.DEFAULT_FADE_IN_MS, ab.DEFAULT_FADE_OUT_MS],
+                    "segments": []}
             manifest_path.write_text(json.dumps(good), encoding="utf-8")
             bak_path = Path(d) / "manifest.json.bak"
             bak_path.write_text(json.dumps(good), encoding="utf-8")
@@ -980,6 +982,67 @@ class TestScreenplaySpeakerChangeAssembly(unittest.TestCase):
                 speaker_change_silence_ms=900,
             )
             self.assertAlmostEqual(result["total_duration_seconds"], 0.3, places=2)
+
+
+class TestFadeInvalidatesResume(unittest.TestCase):
+    """Changing the fades must refuse to resume, like the voice reference does.
+
+    The fades are baked into every wav at generation time and are NOT part of the
+    segment hash (which keys on speaker+text only). Without this guard, re-running
+    with corrected fades would happily reuse every segment whose onset the old fade
+    had already damaged, and the chapter would come out uneven with nothing to point
+    at. The damage cannot be repaired afterwards either: at 16-bit the first samples
+    quantize to 0/-1/5, so dividing the ramp back out yields noise, not the consonant.
+    """
+
+    def _write(self, d, **extra):
+        chunks = ab.chunk_sentences(ab.split_sentences("Одно предложение тут."), max_chars=500)
+        mp = Path(d) / "manifest.json"
+        base = {"model": ab.MODEL_ID, "max_chars": 500, "tag_scope": "chunk",
+                "voice_reference": None, "segments": []}
+        base.update(extra)
+        mp.write_text(json.dumps(base), encoding="utf-8")
+        return chunks, mp
+
+    def test_changed_fades_refuse_to_resume(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks, mp = self._write(d, fades_ms=[30.0, 15.0])
+            with self.assertRaises(RuntimeError) as ctx:
+                ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=5.0, fade_out_ms=5.0)
+            self.assertIn("fades_ms", str(ctx.exception))
+
+    def test_same_fades_resume_fine(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks, mp = self._write(d, fades_ms=[5.0, 5.0])
+            m = ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=5.0, fade_out_ms=5.0)
+            self.assertIn("segments", m)
+
+    def test_missing_field_reads_as_mlx_audios_old_defaults(self):
+        """Not "unknown, wave it through" — such a manifest provably used 30/15."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks, mp = self._write(d)  # no fades_ms at all
+            # resuming with the corrected fades must refuse...
+            with self.assertRaises(RuntimeError) as ctx:
+                ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=5.0, fade_out_ms=5.0)
+            self.assertIn("отсутствует в манифесте", str(ctx.exception))
+            # ...but resuming with the old values it was actually made with must work.
+            m = ab.load_or_create_manifest(mp, chunks, max_chars=500, tag_scope="chunk",
+                                           fade_in_ms=30.0, fade_out_ms=15.0)
+            self.assertIn("segments", m)
+
+    def test_new_manifest_records_the_fades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            chunks = ab.chunk_sentences(ab.split_sentences("Одно предложение тут."), max_chars=500)
+            m = ab.build_manifest(chunks, max_chars=500, tag_scope="chunk",
+                                  fade_in_ms=7.0, fade_out_ms=3.0)
+            self.assertEqual(m["fades_ms"], [7.0, 3.0])
 
 
 class TestFadeThreadedIntoGeneration(unittest.TestCase):
