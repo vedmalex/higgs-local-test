@@ -124,6 +124,10 @@ from typing import Optional
 
 import numpy as np
 
+# Refs #57 (M6, 8-bit quantization): default TTS model, overridable per-run with --model
+# (an HF repo id like this default, or a local converted checkpoint directory such as
+# `models/higgs-tts-3-4b-8bit` -- see scripts/quantize_higgs_tts.py). The 8-bit checkpoint
+# is an ADDITIONAL option, opt-in only; the default here stays the full-precision model.
 MODEL_ID = "bosonai/higgs-tts-3-4b"
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1028,7 @@ def build_manifest(
     voice_reference: Optional["VoiceReference"] = None,
     fade_in_ms: float = DEFAULT_FADE_IN_MS,
     fade_out_ms: float = DEFAULT_FADE_OUT_MS,
+    model_id: str = MODEL_ID,
 ) -> dict:
     # Auto-detected, not author-set (Refs #57): the author of a screenplay/chapter has no
     # other way to tell a later reader/tool whether stress marks were already placed in the
@@ -1034,7 +1039,7 @@ def build_manifest(
     # single bool, so a mostly-marked chapter with a few misses is visible as such.
     full_text = "\n".join(c.text for c in chunks)
     return {
-        "model": MODEL_ID,
+        "model": model_id,
         "max_chars": max_chars,
         "tag_scope": tag_scope,
         # Refs #57: the voice reference is a property of the whole run, not of any one
@@ -1090,15 +1095,23 @@ def load_or_create_manifest(
     voice_reference: Optional["VoiceReference"] = None,
     fade_in_ms: float = DEFAULT_FADE_IN_MS,
     fade_out_ms: float = DEFAULT_FADE_OUT_MS,
+    model_id: str = MODEL_ID,
 ) -> dict:
     if manifest_path.exists():
         manifest = _load_manifest_with_recovery(manifest_path)
 
         # F7: compare the settings that change every segment's text, and name exactly
         # which one differs instead of a blanket "text doesn't match" error.
+        # Refs #57 (M6): `model` is compared as a plain string, which works whether it is
+        # an HF repo id or a local converted-checkpoint path (e.g.
+        # `models/higgs-tts-3-4b-8bit`) -- the two never compare equal to each other, so
+        # resuming a chapter started with the full model under the 8-bit one (or vice
+        # versa) is refused exactly like every other settings mismatch below. Mixing
+        # segments from two different models in one chapter is the same class of bug as
+        # mixing voice references or fade lengths (see those checks below).
         mismatches = []
-        if manifest.get("model") != MODEL_ID:
-            mismatches.append(f"model: manifest={manifest.get('model')!r} vs current={MODEL_ID!r}")
+        if manifest.get("model") != model_id:
+            mismatches.append(f"model: manifest={manifest.get('model')!r} vs current={model_id!r}")
         if manifest.get("max_chars") != max_chars:
             mismatches.append(
                 f"max_chars: manifest={manifest.get('max_chars')!r} vs current={max_chars!r}"
@@ -1178,7 +1191,8 @@ def load_or_create_manifest(
         return manifest
 
     manifest = build_manifest(chunks, max_chars, tag_scope, voice_reference=voice_reference,
-                              fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms)
+                              fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms,
+                              model_id=model_id)
     save_manifest(manifest, manifest_path)
     return manifest
 
@@ -1977,6 +1991,19 @@ def main() -> None:
         help="With --ref-audio, also save the encoded reference under voices/<name>.npy+.txt.",
     )
     parser.add_argument("--voices-dir", type=Path, default=VOICES_DIR)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=MODEL_ID,
+        help=(
+            "Refs #57 (M6): TTS model to use -- an HF repo id (default) or a local "
+            "converted checkpoint directory, e.g. models/higgs-tts-3-4b-8bit (see "
+            "scripts/quantize_higgs_tts.py). ADDITIONAL, opt-in option; the default stays "
+            "the full-precision model. A chapter's manifest records the model that "
+            "generated it and refuses to resume under a different one (see "
+            "load_or_create_manifest) -- do not mix models within one chapter."
+        ),
+    )
     args = parser.parse_args()
 
     given = [
@@ -2041,14 +2068,14 @@ def main() -> None:
     if not args.assemble_only:
         from mlx_audio.tts.utils import load
 
-        model = load(MODEL_ID, model_type="higgs_audio_v3")
+        model = load(args.model, model_type="higgs_audio_v3")
 
     voice_reference = None
     if args.voice_name is not None or args.ref_audio is not None:
         if model is None:
             from mlx_audio.tts.utils import load
 
-            model = load(MODEL_ID, model_type="higgs_audio_v3")
+            model = load(args.model, model_type="higgs_audio_v3")
         voice_reference = resolve_voice_reference(
             model, args.voice_name, args.ref_audio, ref_text, args.save_voice_as, args.voices_dir
         )
@@ -2061,6 +2088,7 @@ def main() -> None:
         voice_reference=voice_reference,
         fade_in_ms=args.fade_in_ms,
         fade_out_ms=args.fade_out_ms,
+        model_id=args.model,
     )
 
     if not args.assemble_only:
