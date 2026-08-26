@@ -394,6 +394,16 @@ suitability tiers           RTF <= 1.5 practical / 1.5-3 usable with mandatory r
   *Devices:* M1, overnight.
   *Tier:* **sonnet** for the harness, **opus** for reviewing the first tag-across-chunk-boundary
   result.
+  *Status note (2026-08-26, still unchecked — deliberately):* a full chapter was generated
+  (`output/chapter-114-e0/`, PR #124, commit `95997c3`, 70 segments / 32 min assembled), but
+  **without** a pinned voice reference — measured pitch spread across its 70 segments is
+  83.9-203.4 Hz (stdev 28.6), i.e. the chapter reads in a different voice segment to segment and
+  is not usable as a final artifact (`docs/research/audiobook/voice-clone-consistency-results.md`).
+  The fix for that (pinning `narrator_e0` into every `generate()` call) landed afterward, PR #133 /
+  commit `05975df`, and was validated only on an 8-sentence probe (spread drops to 6.1/8.2 Hz),
+  not by regenerating this chapter. No `chapter-114-e1` or any regenerated output exists yet. This
+  box should stay unchecked until the chapter is regenerated with the reference wired in and T6/T7
+  are actually run against that output — see issue #118 and #57.
 
 ### Lane 1 — optimization
 
