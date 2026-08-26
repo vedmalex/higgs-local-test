@@ -980,6 +980,108 @@ class TestScreenplaySpeakerChangeAssembly(unittest.TestCase):
             self.assertAlmostEqual(result["total_duration_seconds"], 0.3, places=2)
 
 
+class TestMidSentenceJoinSilence(unittest.TestCase):
+    """assemble_chapter's mid_sentence_silence_ms (Refs #57).
+
+    The owner heard the splice seam in a blind test (`midsentence_split` survey set);
+    the measured cause was timing, not pitch -- the fixed 200 ms join is ~2x the model's
+    own ~100 ms pause at the comma a long sentence gets cut on
+    (docs/research/audiobook/m4-midsentence-split-results.md, n=1).
+    """
+
+    def _make_segment(self, d, name, seconds, sr=8000, value=0.2):
+        path = Path(d) / name
+        n = int(seconds * sr)
+        ab.write_wav(path, np.full(n, value, dtype=np.float64), sr)
+
+    def test_ends_mid_sentence_classifies_real_cuts(self):
+        # Cut mid-sentence: what _force_split_long_sentence actually produces.
+        self.assertTrue(ab.ends_mid_sentence("Хотя он и старался скрыть величие,"))
+        self.assertTrue(ab.ends_mid_sentence("первая часть;"))
+        self.assertTrue(ab.ends_mid_sentence("оборван на слове"))
+        # Genuine sentence ends, including closing quotes/brackets after the punctuation.
+        self.assertFalse(ab.ends_mid_sentence("Это конец."))
+        self.assertFalse(ab.ends_mid_sentence("Неужели?"))
+        self.assertFalse(ab.ends_mid_sentence("Очень хорошо!»"))
+        self.assertFalse(ab.ends_mid_sentence('Он сказал: "Хорошо."'))
+        self.assertFalse(ab.ends_mid_sentence("многоточие…"))
+        # Empty/whitespace must not raise and must not claim a continuation.
+        self.assertFalse(ab.ends_mid_sentence("   "))
+
+    def test_mid_sentence_join_uses_the_shorter_pause(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            self._make_segment(d, "seg2.wav", 0.1)
+            manifest = {
+                "segments": [
+                    # seg0 is cut mid-sentence -> the join before seg1 is the short one.
+                    {"index": 0, "status": "done", "output_path": "seg0.wav", "text": "Хотя он и старался,"},
+                    # seg1 ends properly -> the join before seg2 is the normal one.
+                    {"index": 1, "status": "done", "output_path": "seg1.wav", "text": "мудрецы почтили его."},
+                    {"index": 2, "status": "done", "output_path": "seg2.wav", "text": "Следующее предложение."},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=200,
+                mid_sentence_silence_ms=100,
+            )
+            # 0.3s audio + one mid-sentence join (0.1) + one normal join (0.2) = 0.6s.
+            self.assertAlmostEqual(result["total_duration_seconds"], 0.6, places=2)
+            self.assertEqual(result["mid_sentence_silence_ms"], 100)
+
+    def test_unset_keeps_the_old_uniform_behavior(self):
+        """Regression guard: without the flag nothing about assembly changes."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            manifest = {
+                "segments": [
+                    {"index": 0, "status": "done", "output_path": "seg0.wav", "text": "Хотя он и старался,"},
+                    {"index": 1, "status": "done", "output_path": "seg1.wav", "text": "конец."},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=200,
+            )
+            self.assertAlmostEqual(result["total_duration_seconds"], 0.4, places=2)
+
+    def test_speaker_change_wins_over_mid_sentence(self):
+        """A new speaker starting mid-sentence still earns the speaker-change pause."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            self._make_segment(d, "seg0.wav", 0.1)
+            self._make_segment(d, "seg1.wav", 0.1)
+            manifest = {
+                "segments": [
+                    {"index": 0, "status": "done", "output_path": "seg0.wav",
+                     "text": "Мудрецы сказали,", "speaker": "narrator"},
+                    {"index": 1, "status": "done", "output_path": "seg1.wav",
+                     "text": "О царь!", "speaker": "sages"},
+                ]
+            }
+            result = ab.assemble_chapter(
+                manifest,
+                Path(d) / "chapter.wav",
+                base_dir=Path(d),
+                silence_ms=200,
+                mid_sentence_silence_ms=100,
+                speaker_change_silence_ms=900,
+            )
+            self.assertAlmostEqual(result["total_duration_seconds"], 1.1, places=2)
+
+
 class TestStressApostropheNotation(unittest.TestCase):
     """Refs #57: the owner confirmed by ear (docs/research/audiobook/m4-tag-inventory-results.md
     sec. 3) that an apostrophe placed right after the stressed vowel ("за'мок") is the one

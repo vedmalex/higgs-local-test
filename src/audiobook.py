@@ -490,6 +490,33 @@ def _reopen_prefix(active: dict[str, Optional[str]], sentence: str) -> str:
     return "".join(prefix_parts)
 
 
+# Sentence-final punctuation, used to tell a genuine sentence boundary from a chunk that
+# was cut mid-sentence by _force_split_long_sentence() (Refs #57). Assembly needs this to
+# pick a join pause: the model's own pause at a mid-clause comma measured ~100 ms
+# (docs/research/audiobook/m4-midsentence-split-results.md), while a real sentence end
+# earns the full `silence_ms`.
+SENTENCE_FINAL_PUNCT = ".!?…"
+
+
+def ends_mid_sentence(text: str) -> bool:
+    """True when `text` does not end on sentence-final punctuation.
+
+    Chunks normally end where a sentence ends, so this is False for almost all of them.
+    It is True exactly for the pieces `_force_split_long_sentence()` produces when one
+    sentence exceeds max_chars on its own -- those end on `;`, `,`, a space, or a hard
+    character cut, and the next chunk continues the same sentence.
+
+    Closing quotes/brackets after the punctuation are stepped over, so `...конец!»` and
+    `...конец."` both read as a real sentence end.
+    """
+    stripped = text.rstrip()
+    while stripped and stripped[-1] in '»"\')]':
+        stripped = stripped[:-1].rstrip()
+    if not stripped:
+        return False
+    return stripped[-1] not in SENTENCE_FINAL_PUNCT
+
+
 def _force_split_long_sentence(sentence: str, max_chars: int) -> list[str]:
     """Split a single sentence that exceeds max_chars on its own (F2).
 
@@ -1580,6 +1607,7 @@ def assemble_chapter(
     allow_gaps: bool = False,
     gap_silence_ms: int = 1000,
     speaker_change_silence_ms: Optional[int] = None,
+    mid_sentence_silence_ms: Optional[int] = None,
 ) -> dict:
     """Stream-assemble the chapter from per-segment WAVs (F3, F13).
 
@@ -1625,6 +1653,9 @@ def assemble_chapter(
     prev_tail: Optional[np.ndarray] = None
     prev_index: Optional[int] = None
     prev_speaker: Optional[str] = None
+    # Whether the previously written segment's text was cut mid-sentence (see
+    # ends_mid_sentence). False before the first segment: nothing precedes it.
+    prev_ends_mid_sentence: bool = False
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(output_path), "wb") as out:
@@ -1651,6 +1682,7 @@ def assemble_chapter(
                 prev_tail = None  # no meaningful edge to join across a gap
                 prev_index = entry["index"]
                 prev_speaker = None  # speaker on the far side of a gap is unknown here
+                prev_ends_mid_sentence = False  # a gap is not a mid-sentence continuation
                 continue
 
             audio, sr = read_wav(base_dir / entry["output_path"])
@@ -1702,6 +1734,15 @@ def assemble_chapter(
                 )
                 this_speaker = entry.get("speaker")
                 effective_silence_ms = silence_ms
+                # A chunk cut mid-sentence continues into the next one, so the full
+                # `silence_ms` reads as an unnatural hesitation there -- the owner heard
+                # this seam in the blind midsentence_split probe. Measured: the model's
+                # own pause at that comma was ~100 ms vs. the 200 ms default (n=1,
+                # m4-midsentence-split-results.md).
+                if mid_sentence_silence_ms is not None and prev_ends_mid_sentence:
+                    effective_silence_ms = mid_sentence_silence_ms
+                # A speaker change is the stronger signal and wins over both: a new
+                # speaker starting mid-sentence still deserves the speaker-change pause.
                 if (
                     speaker_change_silence_ms is not None
                     and prev_speaker is not None
@@ -1722,6 +1763,7 @@ def assemble_chapter(
             prev_tail = audio[-edge_n:] if len(audio) >= edge_n else audio
             prev_index = entry["index"]
             prev_speaker = entry.get("speaker")
+            prev_ends_mid_sentence = ends_mid_sentence(entry.get("text", ""))
             del audio, clipped, pcm  # release this segment's memory before the next one
 
         if sample_rate is None:
@@ -1738,6 +1780,7 @@ def assemble_chapter(
         "gaps": gap_reports,
         "silence_ms_between_segments": silence_ms,
         "speaker_change_silence_ms": speaker_change_silence_ms,
+        "mid_sentence_silence_ms": mid_sentence_silence_ms,
         "total_duration_seconds": total_samples / sample_rate if sample_rate else None,
         "join_reports": join_reports,
     }
@@ -1800,6 +1843,20 @@ def main() -> None:
         help=(
             "Pause length to use between segments whose 'speaker' differs (screenplay "
             "format only); defaults to --silence-ms for every join when unset."
+        ),
+    )
+    parser.add_argument(
+        "--mid-sentence-silence-ms",
+        type=int,
+        default=100,
+        help=(
+            "Pause length before a segment whose predecessor was cut mid-sentence (a long "
+            "sentence split by --max-chars, ending on ',' / ';' / a word rather than '.'). "
+            "The default 200 ms join reads as an unnatural hesitation there -- the model's "
+            "own pause at such a comma measured ~100 ms (n=1, "
+            "docs/research/audiobook/m4-midsentence-split-results.md), and the owner heard "
+            "the seam in a blind test. Pass the same value as --silence-ms to restore the "
+            "old uniform behavior. A speaker change still wins over this."
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -1951,6 +2008,7 @@ def main() -> None:
             allow_gaps=args.allow_gaps,
             gap_silence_ms=args.gap_silence_ms,
             speaker_change_silence_ms=args.speaker_change_silence_ms,
+            mid_sentence_silence_ms=args.mid_sentence_silence_ms,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
