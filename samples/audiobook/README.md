@@ -112,6 +112,34 @@ actual TTS run (whether the model vocalizes it, whether it collides with any fut
 acute-based stress-mark pipeline). `prepare.py::strip_sanskrit_diacritics` documents
 this collision inline where it lists U+0301 among the marks it strips.
 
+## Reference-voice texts (not book excerpts — synthetic, purpose-built)
+
+`reference-voice-variant-a.txt` / `reference-voice-variant-b.txt` are **not** extracted from
+the source corpus: they are purpose-written short texts for recording (or generating) a
+**voice-clone reference** — the clip whose codes get pinned into every generation call so the
+whole book keeps one narrator voice (Refs #57, #118).
+
+Design rationale, the discarded alternatives, and the acceptance thresholds live in
+`docs/research/audiobook/reference-voice-text-design.md`. The short version of why they look
+the way they do:
+
+- **Deliberately minimal (~470 chars ≈ 26 s), not maximal.** The reference's codes are a
+  prefix prepended to *every* generation call (`higgs_audio_v3/prompt.py`'s `build_prompt`
+  extends the token ids by one placeholder per reference frame), so its length is paid on
+  every segment of every chapter, not once. Measured: pinning the current 25.8 s reference
+  costs RTF 3.85 vs. 2.17 at equal batching. Coverage past the point where a listener can no
+  longer hear the difference is bought with the whole book's runtime.
+- **Covers axes a voice drifts along**, not a phoneme checklist: hard/soft pairs, unstressed
+  reduction, consonant clusters, sibilants, seven intonation contours (statement, two question
+  types, exclamation, enumeration, unfinished thought, direct speech), and a tempo change.
+- **No stress apostrophes**, even though `'` after a stressed vowel is this project's one
+  working stress notation — the risk of teaching the clone a false sign↔sound pairing
+  outweighs an unverified in-context benefit.
+- **Variant A carries a few Sanskrit names, variant B carries none.** The reference transfers
+  *manner of pronunciation*, not just timbre (`docs/guides/voice_cloning_guide.md`), so a name
+  mispronounced in the reference would spread across the whole book as general articulation
+  slop. Variant B is the fallback if the owner rejects A's names by ear.
+
 ## Regenerating
 
 ```bash
